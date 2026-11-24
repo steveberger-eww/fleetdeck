@@ -9,6 +9,7 @@ echo "hostname=$(hostname 2>/dev/null || cat /etc/hostname)"
 . /etc/os-release 2>/dev/null
 echo "os=$PRETTY_NAME"
 echo "os_id=$ID"
+echo "os_version=$VERSION_ID"
 echo "kernel=$(uname -r)"
 echo "arch=$(uname -m)"
 echo "cpu_model=$(grep -m1 -E '^(model name|Model)' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"

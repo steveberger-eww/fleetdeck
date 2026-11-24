@@ -23,6 +23,7 @@ type Snapshot struct {
 	Hostname    string      `json:"hostname"`
 	OS          string      `json:"os"`
 	OSID        string      `json:"osId"`
+	OSEOL       string      `json:"osEol,omitempty"` // end of security support, YYYY-MM-DD; "" when unknown
 	Kernel      string      `json:"kernel"`
 	Arch        string      `json:"arch"`
 	CPUModel    string      `json:"cpuModel"`
@@ -380,7 +381,7 @@ func Parse(text string) *Snapshot {
 	net, dio, dk := nums(kv["net"]), nums(kv["dio"]), nums(kv["docker"])
 
 	s := &Snapshot{
-		Hostname: kv["hostname"], OS: kv["os"], OSID: kv["os_id"], Kernel: kv["kernel"], Arch: kv["arch"],
+		Hostname: kv["hostname"], OS: kv["os"], OSID: kv["os_id"], OSEOL: EOL(kv["os_id"], kv["os_version"]), Kernel: kv["kernel"], Arch: kv["arch"],
 		CPUModel: kv["cpu_model"], Cores: n(kv["cores"]), IPs: strings.Fields(kv["ips"]), Uptime: n(kv["uptime"]),
 		Procs: n(kv["procs"]), MemTotal: memTotal, SwapTotal: swapTotal, Disks: disks,
 		Counters: Counters{or0(at(net, 0)), or0(at(net, 1)), or0(at(dio, 0)), or0(at(dio, 1))},

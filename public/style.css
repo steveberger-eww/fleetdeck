@@ -422,3 +422,6 @@ dialog.palette[open] { animation: pop .14s ease-out; }
 .step-n.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
 .step.off .panel-b { opacity: .55; }
 .checklist { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.eol { display: inline-flex; flex: none; }
+.eol.warn { color: var(--warn); }
+.eol.bad { color: var(--bad); }

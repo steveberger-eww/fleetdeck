@@ -78,7 +78,7 @@ func eq(t *testing.T, got, want any) {
 func TestScriptsVerbatim(t *testing.T) {
 	// sha256(PROBE + "|" + SMART) of lib/probe.js's strings.
 	h := sha256.Sum256([]byte(PROBE + "|" + SMART))
-	eq(t, hex.EncodeToString(h[:]), "e3db0cd74a490d88b8f32337cb5b12d03045e80458c8bb2682c16d935ab30213")
+	eq(t, hex.EncodeToString(h[:]), "a7eb59b55c48344c3f3b139161e3dc891eaa7cd270431e9a2cd3b7f1d82701b5")
 }
 
 func TestProbeParser(t *testing.T) {

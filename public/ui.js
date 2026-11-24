@@ -122,6 +122,15 @@ export function dur(ms) {
   return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
 export const uptime = (s) => (s == null ? '–' : dur(s * 1000));
+// OS end of life from the snapshot's osEol (YYYY-MM-DD): nothing while more than ~6 months away.
+export function eol(n) {
+  if (!n?.osEol) return null;
+  const t = new Date(`${n.osEol}T00:00:00`);
+  const month = t.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+  if (t <= Date.now()) return { kind: 'bad', text: `End of life since ${month}` };
+  if (t - Date.now() < 183 * 864e5) return { kind: 'warn', text: `Support ends ${month}` };
+  return null;
+}
 // Clock: '' = the locale's default, '24' or '12'. Read once at load; changing it reloads the page.
 export function getClock() {
   try { return localStorage.getItem('fd-clock') || ''; } catch { return ''; }
@@ -192,7 +201,7 @@ const ICONS = {
   stop: 'M7 7h10v10H7z', git: 'M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9', trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3', edit: 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4',
   more: 'M5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
   power: 'M12 3v8M6.3 6.3a8 8 0 1 0 11.4 0', mute: 'M6 16v-5a6 6 0 0 1 9.5-4.9M18 11v5l2 2H8M10 21h4M3 3l18 18',
-  full: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', download: 'M12 4v11M7 10l5 5 5-5M5 20h14', chev: 'M6 9l6 6 6-6',
+  full: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', warn: 'M12 3 2 20h20zM12 10v4M12 17h.01', download: 'M12 4v11M7 10l5 5 5-5M5 20h14', chev: 'M6 9l6 6 6-6',
 };
 export const Icon = ({ name, size = 16 }) => html`<svg width=${size} height=${size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=${ICONS[name]} /></svg>`;
 
