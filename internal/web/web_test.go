@@ -157,13 +157,35 @@ func TestAPISmoke(t *testing.T) {
 	if rule["server_name"] != "web1" || rule["enabled"] != true || rule["threshold"] != 85.0 {
 		t.Fatalf("rule: %v", rule)
 	}
+	code, m, _ = call("POST", "/api/custom-metrics", `{"name":"Backups","command":"","tag":"web"}`)
+	expect(code, 400, m, "custom metric without a command")
+	code, cm, _ := call("POST", "/api/custom-metrics", `{"name":"Backups","unit":"files","command":"ls /var/backups | wc -l","tag":"web"}`)
+	expect(code, 200, cm, "create custom metric")
+	_, _, list := call("GET", "/api/servers/"+server["id"].(string)+"/custom?range=6h", "")
+	if l := list.([]any); len(l) != 1 || l[0].(map[string]any)["name"] != "Backups" || l[0].(map[string]any)["series"].(map[string]any)["points"] == nil {
+		t.Fatalf("server custom metrics: %v", list)
+	}
+	code, m, _ = call("PUT", "/api/custom-metrics/"+cm["id"].(string), `{"command":"ls /srv/backups | wc -l"}`)
+	if code != 200 || m["tag"] != "web" || m["name"] != "Backups" || m["command"] != "ls /srv/backups | wc -l" {
+		t.Fatalf("custom metric merge: %d %v", code, m)
+	}
+	code, crule, _ := call("POST", "/api/alerts/rules", `{"metric":"custom","custom_id":"`+cm["id"].(string)+`","threshold":5}`)
+	if code != 200 || crule["custom_name"] != "Backups" || crule["custom_unit"] != "files" {
+		t.Fatalf("custom rule: %d %v", code, crule)
+	}
+	code, m, _ = call("DELETE", "/api/custom-metrics/"+cm["id"].(string), "")
+	expect(code, 200, m, "delete custom metric")
+	_, alertsPage, _ := call("GET", "/api/alerts", "")
+	if len(alertsPage["rules"].([]any)) != 1 || len(alertsPage["custom"].([]any)) != 0 {
+		t.Fatalf("custom rule not removed with its metric: %v", alertsPage)
+	}
 	code, variable, _ := call("POST", "/api/variables", `{"name":"REGION","value":"eu","secret":false}`)
 	expect(code, 200, variable, "create variable")
 	if variable["value"] != "eu" || variable["secret"] != false {
 		t.Fatalf("variable: %v", variable)
 	}
 
-	_, _, list := call("GET", "/api/servers", "")
+	_, _, list = call("GET", "/api/servers", "")
 	if s := list.([]any)[0].(map[string]any); s["name"] != "web1" || s["key_id"] != key["id"] || s["spark"] == nil {
 		t.Fatalf("servers: %v", list)
 	}
@@ -171,7 +193,7 @@ func TestAPISmoke(t *testing.T) {
 	if used := list.([]any)[0].(map[string]any)["used_by"].([]any); len(used) != 1 || used[0].(map[string]any)["name"] != "web1" {
 		t.Fatalf("keys: %v", list)
 	}
-	_, alertsPage, _ := call("GET", "/api/alerts", "")
+	_, alertsPage, _ = call("GET", "/api/alerts", "")
 	if alertsPage["metrics"].(map[string]any)["cpu"] == nil || len(alertsPage["rules"].([]any)) != 1 {
 		t.Fatalf("alerts: %v", alertsPage)
 	}

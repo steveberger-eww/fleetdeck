@@ -336,7 +336,7 @@ function niceMax(v) {
 
 // Line chart with recessive grid, one y-axis, crosshair + tooltip. Gaps in data break the line.
 // Charts given the same `sync` store share the crosshair: hover one, all show that minute.
-export function LineChart({ title, series, data, fmt = (v) => v.toFixed(1), yMax, current, sync }) {
+export function LineChart({ title, series, data, fmt = (v) => v.toFixed(1), yMax, current, sync, actions }) {
   const ref = useRef();
   const [w, setW] = useState(420);
   const [own, setOwn] = useState(null);
@@ -383,7 +383,7 @@ export function LineChart({ title, series, data, fmt = (v) => v.toFixed(1), yMax
   return html`<div class="panel chart">
     <div class="chart-h"><h3>${title}</h3>
       ${legend && html`<div class="legend">${series.map((s) => html`<span><i style=${{ background: s.color }} />${s.label}</span>`)}</div>`}
-      ${current && html`<span class="now">${current}</span>`}</div>
+      ${current && html`<span class="now">${current}</span>`}${actions && html`<span class="chart-act">${actions}</span>`}</div>
     <div class="plot" ref=${ref}>
       <svg viewBox=${`0 0 ${w} ${H}`} onPointerMove=${move} onPointerLeave=${() => setHoverT(null)} role="img" aria-label=${`${title} chart${current ? `, now ${current}` : ''}`}>
         <g class="grid">${[0, 0.5, 1].map((f) => html`<line x1=${pl} x2=${w - pr} y1=${y(max * f)} y2=${y(max * f)} />`)}</g>

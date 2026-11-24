@@ -102,6 +102,15 @@ CREATE TABLE IF NOT EXISTS variables (
   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, value_enc TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 1,
   description TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
 
+-- Custom metrics: a shell command run by the probe that prints one number. Scoped like alert rules.
+CREATE TABLE IF NOT EXISTS custom_metrics (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, unit TEXT NOT NULL DEFAULT '', command TEXT NOT NULL,
+  server_id TEXT REFERENCES servers(id) ON DELETE CASCADE, tag TEXT, created_at INTEGER NOT NULL);
+
+CREATE TABLE IF NOT EXISTS custom_values (
+  server_id TEXT NOT NULL, metric_id TEXT NOT NULL, t INTEGER NOT NULL, v REAL,
+  PRIMARY KEY (server_id, metric_id, t)) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS sessions (
   hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, ip TEXT, ua TEXT);
 `
@@ -117,13 +126,14 @@ var migrations = [][3]string{
 	{"jobs", "repo_id", "TEXT"},
 	{"jobs", "options", "TEXT NOT NULL DEFAULT '{}'"},
 	{"jobs", "commit_sha", "TEXT"},
-	{"alert_rules", "tag", "TEXT"},                            // rule applies to servers with this tag
-	{"alert_state", "notified", "INTEGER NOT NULL DEFAULT 1"}, // 0 = fired during quiet hours, not sent yet
-	{"scripts", "vars", "TEXT NOT NULL DEFAULT '[]'"},         // names of shared variables the script receives
-	{"schedules", "once", "INTEGER NOT NULL DEFAULT 0"},       // one-off run: deleted after it fires
-	{"alert_rules", "mount", "TEXT"},                          // disk/inodes rules: watch this mount only
-	{"metrics", "gpu", "REAL"},                                // busiest GPU, 0-1
-	{"metrics", "gpu_mem", "REAL"},                            // its memory used, 0-1
+	{"alert_rules", "tag", "TEXT"},                                                       // rule applies to servers with this tag
+	{"alert_state", "notified", "INTEGER NOT NULL DEFAULT 1"},                            // 0 = fired during quiet hours, not sent yet
+	{"scripts", "vars", "TEXT NOT NULL DEFAULT '[]'"},                                    // names of shared variables the script receives
+	{"schedules", "once", "INTEGER NOT NULL DEFAULT 0"},                                  // one-off run: deleted after it fires
+	{"alert_rules", "mount", "TEXT"},                                                     // disk/inodes rules: watch this mount only
+	{"metrics", "gpu", "REAL"},                                                           // busiest GPU, 0-1
+	{"metrics", "gpu_mem", "REAL"},                                                       // its memory used, 0-1
+	{"alert_rules", "custom_id", "TEXT REFERENCES custom_metrics(id) ON DELETE CASCADE"}, // metric 'custom'
 }
 
 // Open creates dir (0700) and opens or creates fleetdeck.db in it.

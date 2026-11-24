@@ -1,5 +1,5 @@
 import {
-  html, useState, useEffect, useRef, useMemo, api, go, store, useStore, useLoad, useQuery, useHold, serversStore, refreshServers, toast, confirmBox,
+  html, useState, useEffect, useRef, useMemo, api, go, store, useStore, useLoad, useQuery, useHold, useDirty, serversStore, refreshServers, toast, confirmBox,
   Btn, Th, useSort, StatusChip, LineChart, Empty, Modal, Footer, Field, ParamInput, Loading, ErrorNote, Output, Icon, Copy, Menu, CellBar,
   bytes, rate, pct, ago, dur, uptime, when, logTime, level, eol, traffic,
 } from '../ui.js';
@@ -113,9 +113,12 @@ function OverviewTab({ s }) {
   const n = s.snapshot;
   const hasTemp = m.data?.points.some((p) => p.temp != null);
   const hasGPU = n?.gpus?.length > 0 || m.data?.points.some((p) => p.gpu != null);
+  const custom = useLoad(() => api(`/api/servers/${s.id}/custom?range=${range}`), [s.id, range], { poll: 60_000 });
+  const [edit, setEdit] = useState(null); // custom metric being added ({}) or edited
   return html`<div class="stack">
-    <div class="row"><h2>Metrics</h2><div class="right"><${RangePicker} value=${range} onChange=${setRange} /></div></div>
+    <div class="row"><h2>Metrics</h2><div class="row right"><${Btn} size="sm" icon="plus" onClick=${() => setEdit({})}>Add custom metric</${Btn}><${RangePicker} value=${range} onChange=${setRange} /></div></div>
     ${m.error && html`<${ErrorNote} error=${m.error} retry=${m.reload} />`}
+    ${custom.error && html`<${ErrorNote} error=${custom.error} retry=${custom.reload} />`}
     <div class="charts">
       <${LineChart} sync=${sync} title="CPU" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'cpu', label: 'CPU', color: 'var(--s1)' }]} current=${n && `${pct(n.cpu)} of ${n.cores} cores`} />
       <${LineChart} sync=${sync} title="Memory" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'mem', label: 'Memory', color: 'var(--s1)' }, { key: 'swap', label: 'Swap', color: 'var(--s2)' }]} current=${n && `${bytes(n.memUsed)} of ${bytes(n.memTotal)}`} />
@@ -124,7 +127,10 @@ function OverviewTab({ s }) {
       <${LineChart} sync=${sync} title="Load (1 min)" data=${m.data} fmt=${(v) => v.toFixed(v < 10 ? 1 : 0)} series=${[{ key: 'load1', label: 'Load', color: 'var(--s1)' }]} current=${n && `${n.load.map((l) => l.toFixed(2)).join(', ')}`} />
       ${hasTemp && html`<${LineChart} sync=${sync} title="Temperature" data=${m.data} fmt=${(v) => `${Math.round(v)}°`} series=${[{ key: 'temp', label: 'Temperature', color: 'var(--s1)' }]} current=${n?.temp != null && `${Math.round(n.temp)} °C`} />`}
       ${hasGPU && html`<${LineChart} sync=${sync} title="GPU" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'gpu', label: 'Usage', color: 'var(--s1)' }, { key: 'gpu_mem', label: 'Memory', color: 'var(--s2)' }]} current=${n?.gpu != null && `${pct(n.gpu)}${n.gpus.length > 1 ? ` (busiest of ${n.gpus.length})` : ''}`} />`}
+      ${custom.data?.map((c) => html`<${LineChart} sync=${sync} title=${c.unit ? `${c.name} (${c.unit})` : c.name} data=${c.series} fmt=${customNum} series=${[{ key: 'v', label: c.name, color: 'var(--s1)' }]}
+        current=${customNow(n?.custom?.[c.id], c.unit)} actions=${html`<${Btn} size="sm" kind="ghost" icon="edit" title=${`Edit ${c.name}`} onClick=${() => setEdit(c)} />`} />`)}
     </div>
+    ${edit && html`<${CustomMetricDialog} s=${s} metric=${edit} onClose=${() => setEdit(null)} onSaved=${() => { setEdit(null); custom.reload(true); }} />`}
     ${n && html`<div class="grid-2">
       <section class="panel"><div class="panel-h"><h2>Filesystems</h2></div>
         <div class="table-wrap"><table class="t"><thead><tr><th>Mount</th><th class="hide-sm">Type</th><th>Used</th><th class="num hide-sm">Inodes</th><th class="num">Size</th></tr></thead>
@@ -155,6 +161,51 @@ function OverviewTab({ s }) {
     </div>`}
     ${n && html`<${DiskHealth} s=${s} />`}
   </div>`;
+}
+
+// ---------- custom metrics ----------
+const customNum = (v) => (Math.abs(v) >= 100 ? Math.round(v) : +v.toFixed(2)).toLocaleString();
+const unitOf = (u) => (!u ? '' : /^[%°]/.test(u) ? u : ` ${u}`);
+// Latest reading from the snapshot: the value, or why there is none (missing until the next probe after adding it).
+const customNow = (x, unit) => (!x ? 'Waiting for the next check' : x.v != null ? `${customNum(x.v)}${unitOf(unit)}` : `⚠ ${x.err}`);
+
+function CustomMetricDialog({ s, metric, onClose, onSaved }) {
+  const servers = useStore(serversStore) || [];
+  const tags = [...new Set(servers.flatMap((x) => x.tags))].sort();
+  // scope: '' = all servers, 'tag:<name>', or a server id. New metrics start on this server.
+  const [v, setV] = useState({ name: '', unit: '', command: '', ...metric, scope: metric.id ? metric.server_id || (metric.tag ? `tag:${metric.tag}` : '') : s.id });
+  const dirty = useDirty(v);
+  const [err, setErr] = useState('');
+  const set = (k) => (e) => setV({ ...v, [k]: e.target.value });
+  const save = async () => {
+    setErr('');
+    try {
+      const tag = v.scope.startsWith('tag:') ? v.scope.slice(4) : null;
+      const body = { name: v.name, unit: v.unit, command: v.command, tag, server_id: tag ? null : v.scope || null };
+      await api(metric.id ? `/api/custom-metrics/${metric.id}` : '/api/custom-metrics', { method: metric.id ? 'PUT' : 'POST', body });
+      if (!metric.id) toast(`${v.name} added. The first value arrives with the next check, within a minute.`, 'ok');
+      onSaved();
+    } catch (e) { setErr(e.message); }
+  };
+  const del = async () => {
+    if (!await confirmBox({ title: `Delete "${metric.name}"?`, body: 'Its history and any alert rules that use it are deleted too.', confirm: 'Delete metric', danger: true })) return;
+    await api(`/api/custom-metrics/${metric.id}`, { method: 'DELETE' });
+    onSaved();
+  };
+  return html`<${Modal} title=${metric.id ? `Edit ${metric.name}` : 'Add custom metric'} onClose=${onClose} dirty=${dirty}
+    footer=${html`${metric.id && html`<${Btn} kind="quiet-danger" icon="trash" onClick=${del}>Delete</${Btn}>`}<span class="grow" /><${Footer} onClose=${onClose} onSave=${save} label="Save metric" disabled=${!v.name.trim() || !v.command.trim()} />`}>
+    <div class="alert-bar warn"><span class="grow"><b>The command runs as root</b> on every server it applies to, once a minute, with the same rights as Fleetdeck's own checks (root via <span class="mono">sudo -n</span> where available). Adding or changing it is recorded in the audit log.</span></div>
+    <div class="cols">
+      <${Field} label="Name"><input value=${v.name} onInput=${set('name')} placeholder="Backups" maxlength="60" autofocus /></${Field}>
+      <${Field} label="Unit (optional)"><input value=${v.unit} onInput=${set('unit')} placeholder="files" maxlength="16" /></${Field}>
+    </div>
+    <${Field} label="Command" hint="Must print one number. Anything else is recorded as missing. Stopped after 5 seconds."><textarea class="mono" spellcheck="false" value=${v.command} onInput=${set('command')} placeholder="ls /var/backups | wc -l" /></${Field}>
+    <${Field} label="Applies to" hint=${v.scope.startsWith('tag:') ? 'Includes servers that get this tag later.' : null}><select value=${v.scope} onChange=${set('scope')}>
+      <option value=${s.id}>Only ${s.name}</option>
+      ${tags.length > 0 && html`<optgroup label="Servers tagged">${tags.map((t) => html`<option value=${`tag:${t}`}>${t}</option>`)}</optgroup>`}
+      <option value="">All servers</option></select></${Field}>
+    ${err && html`<p class="err" role="alert">${err}</p>`}
+  </${Modal}>`;
 }
 
 // S.M.A.R.T. from the probe (every 30 min). Virtual machines have no SMART, so stay quiet there.

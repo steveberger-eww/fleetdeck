@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,45 +21,46 @@ import (
 // Snapshot is one probe result. It is stored as JSON in servers.last_json and sent to the browser as-is,
 // so keys and null-vs-number behave as in the Node version.
 type Snapshot struct {
-	Hostname    string      `json:"hostname"`
-	OS          string      `json:"os"`
-	OSID        string      `json:"osId"`
-	OSEOL       string      `json:"osEol,omitempty"` // end of security support, YYYY-MM-DD; "" when unknown
-	Kernel      string      `json:"kernel"`
-	Arch        string      `json:"arch"`
-	CPUModel    string      `json:"cpuModel"`
-	Cores       *float64    `json:"cores"`
-	Virt        string      `json:"virt"`
-	IPs         []string    `json:"ips"`
-	Uptime      *float64    `json:"uptime"`
-	Load        []float64   `json:"load"`
-	Procs       *float64    `json:"procs"`
-	CPU         *float64    `json:"cpu"`
-	MemTotal    float64     `json:"memTotal"`
-	MemUsed     float64     `json:"memUsed"`
-	Mem         *float64    `json:"mem"`
-	SwapTotal   float64     `json:"swapTotal"`
-	Swap        *float64    `json:"swap"`
-	Disks       []Disk      `json:"disks"`
-	Disk        *float64    `json:"disk"`
-	Counters    Counters    `json:"counters"`
-	Ifaces      []Iface     `json:"ifaces"` // all interfaces but lo and veth*; the rx/tx totals above leave out virtual ones (docker, VPN) to avoid double counting
-	Temp        *float64    `json:"temp"`
-	Pkg         string      `json:"pkg"`
-	Updates     *float64    `json:"updates"`
-	Security    *float64    `json:"security"`
-	AutoUpdates *bool       `json:"autoUpdates"`
-	Reboot      bool        `json:"reboot"`
-	Failed      float64     `json:"failed"`
-	Cockpit     bool        `json:"cockpit"`
-	Docker      *Docker     `json:"docker"`
-	Containers  []Container `json:"containers"` // null when Docker isn't there
-	Unhealthy   *int        `json:"unhealthy"`
-	ProbeUser   string      `json:"probeUser"`
-	Smart       *Smart      `json:"smart"`
-	GPUs        []GPU       `json:"gpus,omitempty"`
-	GPU         *float64    `json:"gpu,omitempty"`    // utilization of the busiest GPU, 0-1
-	GPUMem      *float64    `json:"gpuMem,omitempty"` // memory used of that GPU, 0-1
+	Hostname    string                 `json:"hostname"`
+	OS          string                 `json:"os"`
+	OSID        string                 `json:"osId"`
+	OSEOL       string                 `json:"osEol,omitempty"` // end of security support, YYYY-MM-DD; "" when unknown
+	Kernel      string                 `json:"kernel"`
+	Arch        string                 `json:"arch"`
+	CPUModel    string                 `json:"cpuModel"`
+	Cores       *float64               `json:"cores"`
+	Virt        string                 `json:"virt"`
+	IPs         []string               `json:"ips"`
+	Uptime      *float64               `json:"uptime"`
+	Load        []float64              `json:"load"`
+	Procs       *float64               `json:"procs"`
+	CPU         *float64               `json:"cpu"`
+	MemTotal    float64                `json:"memTotal"`
+	MemUsed     float64                `json:"memUsed"`
+	Mem         *float64               `json:"mem"`
+	SwapTotal   float64                `json:"swapTotal"`
+	Swap        *float64               `json:"swap"`
+	Disks       []Disk                 `json:"disks"`
+	Disk        *float64               `json:"disk"`
+	Counters    Counters               `json:"counters"`
+	Ifaces      []Iface                `json:"ifaces"` // all interfaces but lo and veth*; the rx/tx totals above leave out virtual ones (docker, VPN) to avoid double counting
+	Temp        *float64               `json:"temp"`
+	Pkg         string                 `json:"pkg"`
+	Updates     *float64               `json:"updates"`
+	Security    *float64               `json:"security"`
+	AutoUpdates *bool                  `json:"autoUpdates"`
+	Reboot      bool                   `json:"reboot"`
+	Failed      float64                `json:"failed"`
+	Cockpit     bool                   `json:"cockpit"`
+	Docker      *Docker                `json:"docker"`
+	Containers  []Container            `json:"containers"` // null when Docker isn't there
+	Unhealthy   *int                   `json:"unhealthy"`
+	ProbeUser   string                 `json:"probeUser"`
+	Smart       *Smart                 `json:"smart"`
+	GPUs        []GPU                  `json:"gpus,omitempty"`
+	GPU         *float64               `json:"gpu,omitempty"`    // utilization of the busiest GPU, 0-1
+	GPUMem      *float64               `json:"gpuMem,omitempty"` // memory used of that GPU, 0-1
+	Custom      map[string]CustomValue `json:"custom,omitempty"` // custom metric id -> value
 	// Set by the probe loop (rates against the previous probe), not by Parse.
 	Rx *float64 `json:"rx"`
 	Tx *float64 `json:"tx"`
@@ -148,6 +150,60 @@ func parseGPUs(nv, amd []string) []GPU {
 			MemUsed: n(f[2]), MemTotal: n(f[3]), Temp: scale(n(f[4]), 1e-3), Power: scale(n(f[5]), 1e-6)})
 	}
 	return out
+}
+
+// Custom is a row of custom_metrics: a shell command that prints one number, scoped like alert rules.
+type Custom struct {
+	ID        string  `db:"id" json:"id"`
+	Name      string  `db:"name" json:"name"`
+	Unit      string  `db:"unit" json:"unit"`
+	Command   string  `db:"command" json:"command"`
+	ServerID  *string `db:"server_id" json:"server_id"`
+	Tag       *string `db:"tag" json:"tag"`
+	CreatedAt int64   `db:"created_at" json:"created_at"`
+}
+
+// CustomValue is a custom metric's latest reading: V, or why there is none in Err.
+type CustomValue struct {
+	V   *float64 `json:"v"`
+	Err string   `json:"err,omitempty"`
+}
+
+// CustomFor lists the custom metrics that apply to a server: its own, its tags' and the fleet-wide ones.
+func CustomFor(s *db.Server) ([]Custom, error) {
+	all, err := db.Select[Custom](`SELECT * FROM custom_metrics WHERE server_id IS NULL OR server_id = ? ORDER BY name COLLATE NOCASE`, s.ID)
+	if err != nil {
+		return nil, err
+	}
+	tags := strings.Split(s.Tags, ",")
+	out := all[:0]
+	for _, c := range all {
+		if c.Tag == nil || *c.Tag == "" || slices.Contains(tags, *c.Tag) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// customScript runs each command in the background (they overlap with the rest of the probe), each capped at
+// 5 s by timeout, which kills the command's whole process group. One short line each: custom.<id>=<output>.
+func customScript(cs []Custom) string {
+	var b strings.Builder
+	for _, c := range cs {
+		fmt.Fprintf(&b, "(echo \"custom.%s=$(timeout 5 sh -c %s </dev/null 2>/dev/null | head -n 1 | cut -c 1-100)\") &\n", c.ID, ssh.Shq(c.Command))
+	}
+	return b.String()
+}
+
+func customValue(v string) CustomValue {
+	if v == "" {
+		return CustomValue{Err: "no output"}
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return CustomValue{Err: fmt.Sprintf("not a number: %q", v)}
+	}
+	return CustomValue{V: &f}
 }
 
 type Smart struct {
@@ -371,6 +427,7 @@ func Parse(text string) *Snapshot {
 	inodes := map[string]float64{} // mount -> used/total
 	var smartDevs, ctrs, cstats, nv, amd []string
 	ifaces := []Iface{}
+	var custom map[string]CustomValue
 	for _, line := range strings.Split(text, "\n") {
 		i := strings.Index(line, "=")
 		if i <= 0 {
@@ -412,7 +469,14 @@ func Parse(text string) *Snapshot {
 				}
 			}
 		default:
-			kv[k] = v
+			if id, ok := strings.CutPrefix(k, "custom."); ok {
+				if custom == nil {
+					custom = map[string]CustomValue{}
+				}
+				custom[id] = customValue(v)
+			} else {
+				kv[k] = v
+			}
 		}
 	}
 	a, b := nums(kv["cpu1"]), nums(kv["cpu2"])
@@ -436,7 +500,7 @@ func Parse(text string) *Snapshot {
 		Counters: Counters{or0(at(net, 0)), or0(at(net, 1)), or0(at(dio, 0)), or0(at(dio, 1))},
 		Ifaces:   ifaces, Pkg: kv["pkg"], Updates: n(kv["updates"]), Security: n(kv["security"]),
 		Reboot: kv["reboot"] == "1", Failed: or0(num(kv["failed"])), Cockpit: kv["cockpit"] == "active",
-		ProbeUser: kv["probe_user"], Smart: parseSmart(kv["smart"], smartDevs),
+		ProbeUser: kv["probe_user"], Smart: parseSmart(kv["smart"], smartDevs), Custom: custom,
 	}
 	if s.Disks == nil {
 		s.Disks = []Disk{}
@@ -627,6 +691,13 @@ func collect(s *db.Server) (snap *Snapshot, err error) {
 	if withSmart {
 		script, timeout = PROBE+SMART, 90*time.Second
 	}
+	customs, err := CustomFor(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(customs) > 0 {
+		script = "export LC_ALL=C\n" + customScript(customs) + script + "\nwait\n"
+	}
 	r, err := ssh.Exec(context.Background(), s, script, ssh.ExecOpts{Mode: ssh.ModeAuto, Timeout: timeout})
 	if err != nil {
 		return nil, err
@@ -687,6 +758,13 @@ func collect(s *db.Server) (snap *Snapshot, err error) {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.ID, t, snap.CPU, snap.Mem, snap.Swap, snap.Disk, load1, snap.Rx, snap.Tx, snap.Dr, snap.Dw, snap.Temp, snap.GPU, snap.GPUMem); err != nil {
 		return nil, err
+	}
+	for id, v := range snap.Custom {
+		if v.V != nil {
+			if _, err := db.Exec(`INSERT OR REPLACE INTO custom_values (server_id, metric_id, t, v) VALUES (?, ?, ?, ?)`, s.ID, id, t, v.V); err != nil {
+				return nil, err
+			}
+		}
 	}
 	for _, c := range snap.Containers {
 		if c.CPU != nil {
@@ -762,6 +840,23 @@ func ContainerSeries(id, name, rangeStr string) (*SeriesOf[ContainerPoint], erro
 		return nil, err
 	}
 	return &SeriesOf[ContainerPoint]{bucket, now - sp, now, pts}, nil
+}
+
+type CustomPoint struct {
+	T int64    `db:"t" json:"t"`
+	V *float64 `db:"v" json:"v"`
+}
+
+// CustomSeries is Series for one custom metric of a server.
+func CustomSeries(id, metricID, rangeStr string) (*SeriesOf[CustomPoint], error) {
+	sp, bucket := span(rangeStr)
+	now := db.Now()
+	pts, err := db.Select[CustomPoint](`SELECT (t / ?) * ? AS t, AVG(v) v FROM custom_values
+    WHERE server_id = ? AND metric_id = ? AND t >= ? GROUP BY t / ? ORDER BY 1`, bucket, bucket, id, metricID, now-sp, bucket)
+	if err != nil {
+		return nil, err
+	}
+	return &SeriesOf[CustomPoint]{bucket, now - sp, now, pts}, nil
 }
 
 // Sparks is the last hour of [t, cpu, mem] per server id, for the overview's sparklines.
@@ -848,7 +943,7 @@ func prune() {
 		return
 	}
 	cutoff := db.Now() - int64(days*864e5)
-	for _, q := range []string{`DELETE FROM metrics WHERE t < ?`, `DELETE FROM container_metrics WHERE t < ?`} {
+	for _, q := range []string{`DELETE FROM metrics WHERE t < ?`, `DELETE FROM container_metrics WHERE t < ?`, `DELETE FROM custom_values WHERE t < ?`} {
 		if _, err := db.Exec(q, cutoff); err != nil {
 			log.Printf("probe retention: %v", err)
 		}
