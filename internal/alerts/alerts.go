@@ -66,6 +66,7 @@ var Metrics = MetricList{
 	{Key: "smart", Label: "Disks with S.M.A.R.T. problems", Unit: "", Def: def(0)},
 	{Key: "unhealthy", Label: "Unhealthy or restarting containers", Unit: "", Def: def(0)},
 	{Key: "net", Label: "Network traffic (in + out)", Unit: " MB/s", Col: "rx + tx", Scale: 1e-6, Def: def(50)},
+	{Key: "gpu", Label: "GPU usage (busiest GPU)", Unit: "%", Col: "gpu", Scale: 100, Def: def(90)},
 }
 
 // ordered writes a JSON object with keys in slice order (Go maps would sort them).
@@ -287,6 +288,8 @@ func currentValue(r *Rule, m *Metric, s *db.Server, snap *probe.Snapshot) (*floa
 		return pct(snap.Swap), nil
 	case "temp":
 		return snap.Temp, nil
+	case "gpu":
+		return pct(snap.GPU), nil
 	case "net":
 		if snap.Rx == nil {
 			return nil, nil

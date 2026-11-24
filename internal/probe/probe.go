@@ -56,6 +56,9 @@ type Snapshot struct {
 	Unhealthy   *int        `json:"unhealthy"`
 	ProbeUser   string      `json:"probeUser"`
 	Smart       *Smart      `json:"smart"`
+	GPUs        []GPU       `json:"gpus,omitempty"`
+	GPU         *float64    `json:"gpu,omitempty"`    // utilization of the busiest GPU, 0-1
+	GPUMem      *float64    `json:"gpuMem,omitempty"` // memory used of that GPU, 0-1
 	// Set by the probe loop (rates against the previous probe), not by Parse.
 	Rx *float64 `json:"rx"`
 	Tx *float64 `json:"tx"`
@@ -103,6 +106,48 @@ type Container struct {
 	Health *string  `json:"health"`
 	CPU    *float64 `json:"cpu"`
 	Mem    *float64 `json:"mem"`
+}
+
+type GPU struct {
+	Vendor   string   `json:"vendor"` // nvidia | amd
+	Name     string   `json:"name"`
+	Util     *float64 `json:"util"` // 0-1
+	MemUsed  *float64 `json:"memUsed"`
+	MemTotal *float64 `json:"memTotal"`
+	Temp     *float64 `json:"temp"`  // °C
+	Power    *float64 `json:"power"` // W
+}
+
+// parseGPUs reads nv= lines (nvidia-smi CSV: util %, mem used MiB, mem total MiB, temp, power W, name)
+// and amd= lines (card, busy %, vram used B, vram total B, temp m°C, power µW). "[N/A]" and empty become null.
+func parseGPUs(nv, amd []string) []GPU {
+	scale := func(p *float64, k float64) *float64 {
+		if p == nil {
+			return nil
+		}
+		return ptr(*p * k)
+	}
+	var out []GPU
+	for _, l := range nv {
+		f := strings.Split(l, ",")
+		if len(f) < 6 {
+			continue
+		}
+		for i := range f {
+			f[i] = strings.TrimSpace(f[i])
+		}
+		out = append(out, GPU{Vendor: "nvidia", Name: strings.Join(f[5:], ","), Util: scale(n(f[0]), 0.01),
+			MemUsed: scale(n(f[1]), 1<<20), MemTotal: scale(n(f[2]), 1<<20), Temp: n(f[3]), Power: n(f[4])})
+	}
+	for _, l := range amd {
+		f := strings.Split(l, ",")
+		if len(f) < 6 {
+			continue
+		}
+		out = append(out, GPU{Vendor: "amd", Name: "AMD " + f[0], Util: scale(n(f[1]), 0.01),
+			MemUsed: n(f[2]), MemTotal: n(f[3]), Temp: scale(n(f[4]), 1e-3), Power: scale(n(f[5]), 1e-6)})
+	}
+	return out
 }
 
 type Smart struct {
@@ -324,7 +369,7 @@ func Parse(text string) *Snapshot {
 	var disks []Disk
 	diskAt := map[string]int{}
 	inodes := map[string]float64{} // mount -> used/total
-	var smartDevs, ctrs, cstats []string
+	var smartDevs, ctrs, cstats, nv, amd []string
 	ifaces := []Iface{}
 	for _, line := range strings.Split(text, "\n") {
 		i := strings.Index(line, "=")
@@ -339,6 +384,10 @@ func Parse(text string) *Snapshot {
 			ctrs = append(ctrs, v)
 		case "cst":
 			cstats = append(cstats, v)
+		case "nv":
+			nv = append(nv, v)
+		case "amd":
+			amd = append(amd, v)
 		case "if":
 			f := append(strings.Split(v, " "), "", "")
 			ifaces = append(ifaces, Iface{Name: f[0], RxTotal: or0(num(f[1])), TxTotal: or0(num(f[2]))})
@@ -437,6 +486,16 @@ func Parse(text string) *Snapshot {
 	if v := kv["auto_updates"]; v != "" {
 		on := v == "on"
 		s.AutoUpdates = &on
+	}
+	s.GPUs = parseGPUs(nv, amd)
+	for i := range s.GPUs {
+		g := &s.GPUs[i]
+		if g.Util != nil && (s.GPU == nil || *g.Util > *s.GPU) {
+			s.GPU, s.GPUMem = g.Util, nil
+			if g.MemUsed != nil && g.MemTotal != nil && *g.MemTotal > 0 {
+				s.GPUMem = ptr(*g.MemUsed / *g.MemTotal)
+			}
+		}
 	}
 	if kv["docker"] != "" {
 		s.Docker = &Docker{or0(at(dk, 0)), or0(at(dk, 1))}
@@ -624,9 +683,9 @@ func collect(s *db.Server) (snap *Snapshot, err error) {
 	if len(snap.Load) > 0 {
 		load1 = &snap.Load[0]
 	}
-	if _, err := db.Exec(`INSERT OR REPLACE INTO metrics (server_id, t, cpu, mem, swap, disk, load1, rx, tx, dr, dw, temp)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, t, snap.CPU, snap.Mem, snap.Swap, snap.Disk, load1, snap.Rx, snap.Tx, snap.Dr, snap.Dw, snap.Temp); err != nil {
+	if _, err := db.Exec(`INSERT OR REPLACE INTO metrics (server_id, t, cpu, mem, swap, disk, load1, rx, tx, dr, dw, temp, gpu, gpu_mem)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, t, snap.CPU, snap.Mem, snap.Swap, snap.Disk, load1, snap.Rx, snap.Tx, snap.Dr, snap.Dw, snap.Temp, snap.GPU, snap.GPUMem); err != nil {
 		return nil, err
 	}
 	for _, c := range snap.Containers {
@@ -651,17 +710,19 @@ func span(rangeStr string) (span, bucket int64) {
 }
 
 type Point struct {
-	T     int64    `db:"t" json:"t"`
-	CPU   *float64 `db:"cpu" json:"cpu"`
-	Mem   *float64 `db:"mem" json:"mem"`
-	Swap  *float64 `db:"swap" json:"swap"`
-	Disk  *float64 `db:"disk" json:"disk"`
-	Load1 *float64 `db:"load1" json:"load1"`
-	Rx    *float64 `db:"rx" json:"rx"`
-	Tx    *float64 `db:"tx" json:"tx"`
-	Dr    *float64 `db:"dr" json:"dr"`
-	Dw    *float64 `db:"dw" json:"dw"`
-	Temp  *float64 `db:"temp" json:"temp"`
+	T      int64    `db:"t" json:"t"`
+	CPU    *float64 `db:"cpu" json:"cpu"`
+	Mem    *float64 `db:"mem" json:"mem"`
+	Swap   *float64 `db:"swap" json:"swap"`
+	Disk   *float64 `db:"disk" json:"disk"`
+	Load1  *float64 `db:"load1" json:"load1"`
+	Rx     *float64 `db:"rx" json:"rx"`
+	Tx     *float64 `db:"tx" json:"tx"`
+	Dr     *float64 `db:"dr" json:"dr"`
+	Dw     *float64 `db:"dw" json:"dw"`
+	Temp   *float64 `db:"temp" json:"temp"`
+	GPU    *float64 `db:"gpu" json:"gpu"`
+	GPUMem *float64 `db:"gpu_mem" json:"gpu_mem"`
 }
 
 type ContainerPoint struct {
@@ -682,7 +743,8 @@ func Series(id, rangeStr string) (*SeriesOf[Point], error) {
 	sp, bucket := span(rangeStr)
 	now := db.Now()
 	pts, err := db.Select[Point](`SELECT (t / ?) * ? AS t, AVG(cpu) cpu, AVG(mem) mem, AVG(swap) swap, AVG(disk) disk, AVG(load1) load1,
-      AVG(rx) rx, AVG(tx) tx, AVG(dr) dr, AVG(dw) dw, MAX(temp) temp
+      AVG(rx) rx, AVG(tx) tx, AVG(dr) dr, AVG(dw) dw, MAX(temp) temp,
+      AVG(gpu) gpu, AVG(gpu_mem) gpu_mem
     FROM metrics WHERE server_id = ? AND t >= ? GROUP BY t / ? ORDER BY 1`, bucket, bucket, id, now-sp, bucket)
 	if err != nil {
 		return nil, err

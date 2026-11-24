@@ -78,7 +78,7 @@ func eq(t *testing.T, got, want any) {
 func TestScriptsVerbatim(t *testing.T) {
 	// sha256(PROBE + "|" + SMART) of lib/probe.js's strings.
 	h := sha256.Sum256([]byte(PROBE + "|" + SMART))
-	eq(t, hex.EncodeToString(h[:]), "a7eb59b55c48344c3f3b139161e3dc891eaa7cd270431e9a2cd3b7f1d82701b5")
+	eq(t, hex.EncodeToString(h[:]), "470d50ba49709f8c3011b9ab9a85bb17d71b36a80531719f86c384858992a5bc")
 }
 
 func TestProbeParser(t *testing.T) {
@@ -236,4 +236,31 @@ func TestTraffic(t *testing.T) {
 	}
 	// rx: (100 + 200 + 100 + 1000) * 60 s, the gap counts as one minute at most, the extra probe as 30 s.
 	eq(t, tr["tr"], Totals{Rx: 1400*60 + 100*30, Tx: 1030*60 + 100*30, Days: 30})
+}
+
+func TestGPUs(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	// nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,name --format=csv,noheader,nounits
+	one := Parse("nv=37, 2048, 8192, 61, 115.42, NVIDIA GeForce RTX 3070")
+	eq(t, one.GPUs, []GPU{{Vendor: "nvidia", Name: "NVIDIA GeForce RTX 3070", Util: f(0.37), MemUsed: f(2048 << 20), MemTotal: f(8192 << 20), Temp: f(61), Power: f(115.42)}})
+	eq(t, []float64{*one.GPU, *one.GPUMem}, []float64{0.37, 0.25})
+
+	// Two GPUs: the busiest one is stored; [N/A] (e.g. power on some cards) is null.
+	two := Parse("nv=5, 1024, 81920, 40, [N/A], NVIDIA A100-SXM4-80GB\nnv=90, 40960, 81920, 72, 300.10, NVIDIA A100-SXM4-80GB")
+	eq(t, len(two.GPUs), 2)
+	eq(t, two.GPUs[0].Power, (*float64)(nil))
+	eq(t, []float64{*two.GPU, *two.GPUMem}, []float64{0.9, 0.5})
+
+	// AMD sysfs: card, gpu_busy_percent, mem_info_vram_used/total (bytes), hwmon temp1_input (m°C), power1_average (µW).
+	amd := Parse("amd=card1,12,536870912,17163091968,47000,35000000\namd=card2,,,,,")
+	eq(t, amd.GPUs[0], GPU{Vendor: "amd", Name: "AMD card1", Util: f(0.12), MemUsed: f(536870912), MemTotal: f(17163091968), Temp: f(47), Power: f(35)})
+	eq(t, amd.GPUs[1], GPU{Vendor: "amd", Name: "AMD card2"}) // unreadable files: all null
+	eq(t, *amd.GPU, 0.12)
+
+	none := Parse("hostname=x")
+	eq(t, []any{none.GPUs, none.GPU, none.GPUMem}, []any{[]GPU(nil), (*float64)(nil), (*float64)(nil)})
+	b, _ := json.Marshal(none)
+	if strings.Contains(string(b), "gpu") {
+		t.Fatal("no GPU must leave no gpu keys in the snapshot: " + string(b))
+	}
 }

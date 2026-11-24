@@ -66,6 +66,18 @@ if [ -n "$dk" ]; then
   sed 's/^/cst=/' "$dk"
   rm -f "$dk"
 fi
+# GPUs: NVIDIA via nvidia-smi (bounded: a wedged driver can hang it), AMD from sysfs (no tools needed). Intel is out of scope.
+if command -v nvidia-smi >/dev/null 2>&1; then
+  T=''; command -v timeout >/dev/null 2>&1 && T='timeout 5'
+  $T nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,name --format=csv,noheader,nounits 2>/dev/null | sed 's/^/nv=/'
+fi
+for c in /sys/class/drm/card*; do
+  case ${c##*/} in *-*) continue ;; esac # connectors like card0-DP-1
+  d=$c/device
+  [ -r "$d/gpu_busy_percent" ] || continue
+  h=$(ls -d "$d"/hwmon/hwmon* 2>/dev/null | head -1)
+  echo "amd=${c##*/},$(cat "$d/gpu_busy_percent" 2>/dev/null),$(cat "$d/mem_info_vram_used" 2>/dev/null),$(cat "$d/mem_info_vram_total" 2>/dev/null),$(cat "$h/temp1_input" 2>/dev/null),$(cat "$h/power1_average" 2>/dev/null)"
+done
 echo "probe_user=$(id -un)"
 true
 `

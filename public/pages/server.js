@@ -112,6 +112,7 @@ function OverviewTab({ s }) {
   const sync = useMemo(() => store(null), []); // shared crosshair
   const n = s.snapshot;
   const hasTemp = m.data?.points.some((p) => p.temp != null);
+  const hasGPU = n?.gpus?.length > 0 || m.data?.points.some((p) => p.gpu != null);
   return html`<div class="stack">
     <div class="row"><h2>Metrics</h2><div class="right"><${RangePicker} value=${range} onChange=${setRange} /></div></div>
     ${m.error && html`<${ErrorNote} error=${m.error} retry=${m.reload} />`}
@@ -122,6 +123,7 @@ function OverviewTab({ s }) {
       <${LineChart} sync=${sync} title="Disk I/O" data=${m.data} fmt=${(v) => rate(v)} series=${[{ key: 'dr', label: 'Read', color: 'var(--s1)' }, { key: 'dw', label: 'Write', color: 'var(--s2)' }]} />
       <${LineChart} sync=${sync} title="Load (1 min)" data=${m.data} fmt=${(v) => v.toFixed(v < 10 ? 1 : 0)} series=${[{ key: 'load1', label: 'Load', color: 'var(--s1)' }]} current=${n && `${n.load.map((l) => l.toFixed(2)).join(', ')}`} />
       ${hasTemp && html`<${LineChart} sync=${sync} title="Temperature" data=${m.data} fmt=${(v) => `${Math.round(v)}°`} series=${[{ key: 'temp', label: 'Temperature', color: 'var(--s1)' }]} current=${n?.temp != null && `${Math.round(n.temp)} °C`} />`}
+      ${hasGPU && html`<${LineChart} sync=${sync} title="GPU" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'gpu', label: 'Usage', color: 'var(--s1)' }, { key: 'gpu_mem', label: 'Memory', color: 'var(--s2)' }]} current=${n?.gpu != null && `${pct(n.gpu)}${n.gpus.length > 1 ? ` (busiest of ${n.gpus.length})` : ''}`} />`}
     </div>
     ${n && html`<div class="grid-2">
       <section class="panel"><div class="panel-h"><h2>Filesystems</h2></div>
@@ -135,6 +137,7 @@ function OverviewTab({ s }) {
           <dt class="sub">Hardware</dt>
           <dt>CPU</dt><dd>${n.cpuModel || '–'}, ${n.cores} cores</dd>
           <dt>Memory</dt><dd>${bytes(n.memTotal)}${n.swapTotal ? `, ${bytes(n.swapTotal)} swap` : ', no swap'}</dd>
+          ${n.gpus?.length > 0 && html`<dt>GPU</dt><dd>${n.gpus.map((g) => html`<div>${g.name}${g.memTotal ? `, ${bytes(g.memTotal)}` : ''}${g.temp != null ? `, ${Math.round(g.temp)} °C` : ''}${g.power != null ? `, ${Math.round(g.power)} W` : ''}</div>`)}</dd>`}
           ${n.virt && html`<dt>Virtualization</dt><dd>${n.virt}</dd>`}
           <dt class="sub">Software</dt>
           <dt>OS</dt><dd>${n.os}</dd>

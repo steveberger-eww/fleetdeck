@@ -122,6 +122,8 @@ var migrations = [][3]string{
 	{"scripts", "vars", "TEXT NOT NULL DEFAULT '[]'"},         // names of shared variables the script receives
 	{"schedules", "once", "INTEGER NOT NULL DEFAULT 0"},       // one-off run: deleted after it fires
 	{"alert_rules", "mount", "TEXT"},                          // disk/inodes rules: watch this mount only
+	{"metrics", "gpu", "REAL"},                                // busiest GPU, 0-1
+	{"metrics", "gpu_mem", "REAL"},                            // its memory used, 0-1
 }
 
 // Open creates dir (0700) and opens or creates fleetdeck.db in it.

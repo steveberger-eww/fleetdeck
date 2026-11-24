@@ -167,7 +167,7 @@ func TestQuietHours(t *testing.T) {
 func TestMetricsAndTypesJSON(t *testing.T) {
 	b, err := json.Marshal(Metrics)
 	must(t, err)
-	eq(t, string(b), `{"down":{"label":"Unreachable","unit":"min","hint":"Fires when the server cannot be reached for N minutes"},"cpu":{"label":"CPU usage","unit":"%","col":"cpu","scale":100,"def":90},"mem":{"label":"Memory usage","unit":"%","col":"mem","scale":100,"def":90},"swap":{"label":"Swap usage","unit":"%","col":"swap","scale":100,"def":50},"disk":{"label":"Disk usage (fullest mount)","unit":"%","def":90},"inodes":{"label":"Inode usage (fullest mount)","unit":"%","def":90},"load":{"label":"Load per CPU core","unit":"","col":"load1","scale":1,"def":1.5},"temp":{"label":"Temperature","unit":"°C","col":"temp","scale":1,"def":80},"updates":{"label":"Pending updates","unit":"","def":0},"security":{"label":"Pending security updates","unit":"","def":0},"failed":{"label":"Failed systemd units","unit":"","def":0},"reboot":{"label":"Reboot required","unit":""},"smart":{"label":"Disks with S.M.A.R.T. problems","unit":"","def":0},"unhealthy":{"label":"Unhealthy or restarting containers","unit":"","def":0},"net":{"label":"Network traffic (in + out)","unit":" MB/s","col":"rx + tx","scale":0.000001,"def":50}}`)
+	eq(t, string(b), `{"down":{"label":"Unreachable","unit":"min","hint":"Fires when the server cannot be reached for N minutes"},"cpu":{"label":"CPU usage","unit":"%","col":"cpu","scale":100,"def":90},"mem":{"label":"Memory usage","unit":"%","col":"mem","scale":100,"def":90},"swap":{"label":"Swap usage","unit":"%","col":"swap","scale":100,"def":50},"disk":{"label":"Disk usage (fullest mount)","unit":"%","def":90},"inodes":{"label":"Inode usage (fullest mount)","unit":"%","def":90},"load":{"label":"Load per CPU core","unit":"","col":"load1","scale":1,"def":1.5},"temp":{"label":"Temperature","unit":"°C","col":"temp","scale":1,"def":80},"updates":{"label":"Pending updates","unit":"","def":0},"security":{"label":"Pending security updates","unit":"","def":0},"failed":{"label":"Failed systemd units","unit":"","def":0},"reboot":{"label":"Reboot required","unit":""},"smart":{"label":"Disks with S.M.A.R.T. problems","unit":"","def":0},"unhealthy":{"label":"Unhealthy or restarting containers","unit":"","def":0},"net":{"label":"Network traffic (in + out)","unit":" MB/s","col":"rx + tx","scale":0.000001,"def":50},"gpu":{"label":"GPU usage (busiest GPU)","unit":"%","col":"gpu","scale":100,"def":90}}`)
 	b, err = json.Marshal(Types)
 	must(t, err)
 	eq(t, string(b), `{"webhook":{"label":"Webhook (JSON POST)","fields":[{"key":"url","label":"URL","secret":true}]},"ntfy":{"label":"ntfy","fields":[{"key":"url","label":"Topic URL (https://ntfy.sh/my-topic)"},{"key":"token","label":"Access token (optional)","secret":true,"optional":true}]},"discord":{"label":"Discord","fields":[{"key":"url","label":"Webhook URL","secret":true}]},"slack":{"label":"Slack","fields":[{"key":"url","label":"Incoming webhook URL","secret":true}]},"telegram":{"label":"Telegram","fields":[{"key":"token","label":"Bot token","secret":true},{"key":"chat_id","label":"Chat ID"}]},"pushover":{"label":"Pushover","fields":[{"key":"token","label":"Application API token","secret":true},{"key":"user","label":"User or group key","secret":true},{"key":"device","label":"Device (optional, all devices if empty)","optional":true}]},"gotify":{"label":"Gotify","fields":[{"key":"url","label":"Server URL"},{"key":"token","label":"App token","secret":true}]}}`)
@@ -235,4 +235,15 @@ func TestMountRules(t *testing.T) {
 	if _, err := ValidateRule(map[string]any{"metric": "disk", "threshold": 80.0, "mount": "data"}); err == nil {
 		t.Fatal("relative mount accepted")
 	}
+}
+
+func TestGPUAlert(t *testing.T) {
+	exec(t, `INSERT INTO servers (id, name, host, created_at) VALUES ('g1', 'ml', 'h', 0)`)
+	exec(t, `INSERT INTO alert_rules (id, metric, threshold, server_id, created_at) VALUES ('rg1', 'gpu', 90, 'g1', 0)`)
+	Evaluate(srv(t, "g1"), probe.Parse("nv=20, 1, 2, 40, 50, A\nnv=95, 1, 2, 40, 50, B"), nil)
+	eq(t, message(t, "rg1"), "ml: GPU usage (busiest GPU) is 95% (threshold 90%)")
+	Evaluate(srv(t, "g1"), probe.Parse("hostname=ml"), nil) // GPU gone: no value, resolves
+	n, err := db.Get[int](`SELECT COUNT(*) FROM alert_state WHERE rule_id = 'rg1'`)
+	must(t, err)
+	eq(t, *n, 0)
 }
