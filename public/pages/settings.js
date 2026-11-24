@@ -1,4 +1,4 @@
-import { html, useState, useEffect, useMemo, api, go, useLoad, toast, confirmBox, Btn, Th, useSort, Empty, Field, Loading, ErrorNote, ago, when } from '../ui.js';
+import { html, useState, useEffect, useMemo, api, useLoad, useQuery, toast, confirmBox, Btn, Th, useSort, Empty, Field, Loading, ErrorNote, ago, when } from '../ui.js';
 import { getTheme, setTheme } from '../theme.js';
 
 export function SettingsPage() {
@@ -6,7 +6,7 @@ export function SettingsPage() {
   const settings = useLoad(() => api('/api/settings'));
   return html`<div class="page">
     <div class="page-h"><div><h1>Settings</h1></div></div>
-    <div class="charts" style=${{ alignItems: 'start' }}>
+    <div class="grid-2">
       <div class="stack">
         <${PasswordPanel} />
         ${acct.data && html`<${TotpPanel} enabled=${acct.data.totp} onChange=${() => acct.reload(true)} />`}
@@ -41,7 +41,7 @@ function PasswordPanel() {
     <${Field} label="Current password"><input type="password" autocomplete="current-password" value=${v.current} onInput=${set('current')} /></${Field}>
     <div class="cols"><${Field} label="New password"><input type="password" autocomplete="new-password" value=${v.next} onInput=${set('next')} /></${Field}>
       <${Field} label="Repeat new password"><input type="password" autocomplete="new-password" value=${v.confirm} onInput=${set('confirm')} /></${Field}></div>
-    ${err && html`<p class="err">${err}</p>`}
+    ${err && html`<p class="err" role="alert">${err}</p>`}
     <div><${Btn} kind="primary" onClick=${save} disabled=${!v.current || v.next.length < 10}>Change password</${Btn}></div>
   </div></section>`;
 }
@@ -65,13 +65,13 @@ function TotpPanel({ enabled, onChange }) {
           <${Field} label="Code"><input inputmode="numeric" maxlength="6" value=${code} onInput=${(e) => setCode(e.target.value)} /></${Field}></div>
         <div><${Btn} kind="danger" onClick=${disable}>Turn off two-factor sign-in</${Btn}></div>`
       : !setup ? html`<p class="small ink2">Ask for a code from an authenticator app (1Password, Aegis, Google Authenticator…) at every sign-in.</p><div><${Btn} kind="primary" onClick=${begin}>Set up two-factor sign-in</${Btn}></div>`
-      : html`<div class="row" style=${{ alignItems: 'flex-start', gap: '16px' }}>
-          <img src=${setup.qr} width="168" height="168" alt="QR code for your authenticator app" style=${{ borderRadius: '4px', background: '#fff' }} />
-          <div class="stack grow" style=${{ gap: '8px' }}><p class="small">Scan the code, or enter this secret manually:</p>
-            <span class="mono" style=${{ overflowWrap: 'anywhere' }}>${setup.secret.match(/.{1,4}/g).join(' ')}</span>
+      : html`<div class="row top">
+          <img class="qr" src=${setup.qr} width="168" height="168" alt="QR code for your authenticator app" />
+          <div class="stack sm grow"><p class="small">Scan the code, or enter this secret manually:</p>
+            <span class="mono wrap-any">${setup.secret.match(/.{1,4}/g).join(' ')}</span>
             <${Field} label="Code from the app"><input inputmode="numeric" maxlength="6" autofocus value=${code} onInput=${(e) => setCode(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && enable()} /></${Field}>
             <div class="row"><${Btn} kind="primary" onClick=${enable}>Turn on</${Btn}><button class="btn ghost" onClick=${() => setSetup(null)}>Cancel</button></div></div></div>`}
-      ${err && html`<p class="err">${err}</p>`}
+      ${err && html`<p class="err" role="alert">${err}</p>`}
     </div></section>`;
 }
 
@@ -99,25 +99,30 @@ function SessionsPanel({ sessions, onChange }) {
     <table class="t"><tbody>${sessions.map((s) => html`<tr>
       <td><b>${browserName(s.ua)}</b>${s.current && html` <span class="chip ok">This session</span>`}<div class="small muted">${s.ip}, signed in ${when(s.created_at)}</div></td>
       <td class="ink2 nowrap">active ${ago(s.seen_at)}</td>
-      <td class="act">${!s.current && html`<${Btn} size="sm" kind="ghost" onClick=${() => revoke(s)}>Sign out</${Btn}>`}</td></tr>`)}</tbody></table></section>`;
+      <td class="act">${!s.current && html`<${Btn} size="sm" kind="quiet-danger" onClick=${() => revoke(s)}>Sign out</${Btn}>`}</td></tr>`)}</tbody></table></section>`;
 }
 
+const RETENTION = ['retention_metrics_days', 'retention_jobs_days', 'retention_events_days'];
 function RetentionPanel({ value }) {
   const [v, setV] = useState(value);
-  const save = async () => { await api('/api/settings', { method: 'PUT', body: v }); toast('Retention saved', 'ok'); };
+  const [saved, setSaved] = useState(value);
+  const changed = RETENTION.some((k) => v[k] !== saved[k]);
+  const save = async () => { await api('/api/settings', { method: 'PUT', body: v }); setSaved(v); toast('Retention saved', 'ok'); };
   const f = (k, label, max) => html`<${Field} label=${label}><input type="number" min="1" max=${max} value=${v[k]} onInput=${(e) => setV({ ...v, [k]: Number(e.target.value) })} /></${Field}>`;
   return html`<section class="panel"><div class="panel-h"><h2>Keep data for (days)</h2></div><div class="panel-b form">
     <div class="cols">${f('retention_metrics_days', 'Metrics', 365)}${f('retention_jobs_days', 'Job output', 3650)}${f('retention_events_days', 'Audit log', 3650)}</div>
-    <div><${Btn} onClick=${save}>Save</${Btn}></div></div></section>`;
+    <div><${Btn} kind=${changed ? 'primary' : ''} disabled=${!changed} onClick=${save}>Save</${Btn}></div></div></section>`;
 }
 
 // ---------- audit log ----------
+// "Job #12 …" in job events links to the job.
+const jobLinks = (msg) => msg.split(/(Job #\d+)/).map((part) => (/^Job #\d+$/.test(part) ? html`<a href=${`#/jobs/${part.slice(5)}`}>${part}</a>` : part));
 const KINDS = [['', 'Everything'], ['audit', 'Changes'], ['security', 'Security'], ['alert', 'Alerts'], ['job', 'Jobs'], ['schedule', 'Schedules'], ['notify', 'Notifications']];
 
 export function AuditPage() {
-  const [kind, setKind] = useState('');
-  const [q, setQ] = useState('');
-  const [query, setQuery] = useState('');
+  const [kind, setKind] = useQuery('kind');
+  const [query, setQuery] = useQuery('q');
+  const [q, setQ] = useState(query);
   const [older, setOlder] = useState([]);
   useEffect(() => { const t = setTimeout(() => setQuery(q), 300); return () => clearTimeout(t); }, [q]);
   useEffect(() => setOlder([]), [kind, query]);
@@ -131,19 +136,20 @@ export function AuditPage() {
     <div class="page-h"><div><h1>Audit log</h1><p class="sub">Who changed what, every remote action, sign-ins and alerts.</p></div></div>
     <section class="panel">
       <div class="panel-h">
-        <div class="seg" role="group" aria-label="Type">${KINDS.map(([k, l]) => html`<button aria-pressed=${kind === k} onClick=${() => setKind(k)}>${l}</button>`)}</div>
+        <div class="seg hide-sm" role="group" aria-label="Type">${KINDS.map(([k, l]) => html`<button aria-pressed=${kind === k} onClick=${() => setKind(k)}>${l}</button>`)}</div>
+        <select class="show-sm" value=${kind} onChange=${(e) => setKind(e.target.value)} aria-label="Type">${KINDS.map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select>
         <input type="search" placeholder="Search" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Search events" class="right" />
       </div>
       ${ev.loading && !ev.data ? html`<${Loading} />` : ev.error ? html`<div class="panel-b"><${ErrorNote} error=${ev.error} retry=${ev.reload} /></div>`
         : !rows.length ? html`<${Empty} title="No events match" />`
-        : html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="t" desc>Time</${Th}><${Th} sort=${sort} k="kind">Type</${Th}><${Th} sort=${sort} k="message">Event</${Th}><${Th} sort=${sort} k="server_name">Server</${Th}><${Th} sort=${sort} k="ip">From</${Th}></tr></thead>
+        : html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="t" desc>Time</${Th}><${Th} sort=${sort} k="kind">Type</${Th}><${Th} sort=${sort} k="message">Event</${Th}><${Th} sort=${sort} k="server_name">Server</${Th}><${Th} sort=${sort} k="ip" class="hide-sm">From</${Th}></tr></thead>
           <tbody>${sort.rows.map((e) => html`<tr>
             <td class="nowrap ink2" title=${when(e.t)}>${ago(e.t)}</td>
             <td><span class=${`chip ${lvl[e.level] || ''}`}>${KINDS.find(([k]) => k === e.kind)?.[1] || e.kind}</span></td>
-            <td>${e.message}</td>
+            <td>${e.kind === 'job' ? jobLinks(e.message) : e.message}</td>
             <td>${e.server_id && e.server_name ? html`<a href=${`#/servers/${e.server_id}`}>${e.server_name}</a>` : ''}</td>
-            <td class="mono small ink2">${e.ip || ''}</td></tr>`)}</tbody></table>
-          ${rows.length >= 100 && html`<div style=${{ padding: '10px' }}><${Btn} size="sm" onClick=${more}>Load older events</${Btn}></div>`}</div>`}
+            <td class="mono small ink2 hide-sm">${e.ip || ''}</td></tr>`)}</tbody></table>
+          ${rows.length >= 100 && html`<div class="pad"><${Btn} size="sm" onClick=${more}>Load older events</${Btn}></div>`}</div>`}
     </section>
   </div>`;
 }

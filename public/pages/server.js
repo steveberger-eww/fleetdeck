@@ -1,28 +1,52 @@
 import {
-  html, useState, useEffect, useRef, useMemo, api, go, useStore, useLoad, serversStore, refreshServers, toast, confirmBox,
-  Btn, Th, useSort, Lamp, StatusChip, Gauge, LineChart, Empty, Field, Modal, Loading, ErrorNote, Output, Icon, Copy,
+  html, useState, useEffect, useRef, useMemo, api, go, store, useStore, useLoad, useQuery, useHold, serversStore, refreshServers, toast, confirmBox,
+  Btn, Th, useSort, StatusChip, LineChart, Empty, Modal, Loading, ErrorNote, Output, Icon, Copy, Menu, CellBar,
   bytes, rate, pct, ago, dur, uptime, when, logTime, level,
 } from '../ui.js';
-import { Flags, ServerForm, serverBody } from './overview.js';
-import { JobsTable, openRun } from './jobs.js';
+import { ServerForm, serverBody, PRIV_TEXT } from './overview.js';
+import { JobsTable, openRun, confirmRun } from './jobs.js';
 import { muteFor } from './alerts.js';
 
 const TABS = [['overview', 'Overview'], ['updates', 'Updates'], ['services', 'Services'], ['logs', 'Logs'], ['processes', 'Processes'], ['containers', 'Containers'], ['network', 'Network'], ['terminal', 'Terminal'], ['jobs', 'Jobs'], ['settings', 'Settings']];
+export const TAB_LABEL = Object.fromEntries(TABS);
 
 async function startJob(server, scriptId, params) {
   const { id } = await api('/api/jobs', { method: 'POST', body: { script_id: scriptId, params, targets: { servers: [server.id] } } });
   go(`/jobs/${id}`);
 }
+const logsHref = (s, unit) => `#/servers/${s.id}/logs?unit=${encodeURIComponent(unit)}`;
+
+// Counts on the tab that fixes them, instead of a row of chips above the tabs.
+function tabBadge(k, n) {
+  if (!n) return null;
+  if (k === 'updates' && n.updates) return html`<span class=${`count ${n.security ? 'soft' : 'warn'}`} title=${n.security ? `${n.security} security` : ''}>${n.updates}</span>`;
+  if (k === 'services' && n.failed) return html`<span class="count soft" title="Failed units">${n.failed}</span>`;
+  if (k === 'containers' && n.unhealthy) return html`<span class="count soft" title="Unhealthy containers">${n.unhealthy}</span>`;
+  return null;
+}
+
+// Ordered, one bar per kind: host key → unreachable → sudo → alerts.
+function Attention({ s, acceptKey }) {
+  const bars = [];
+  if (s.ssh?.hostKeyMismatch) bars.push(html`<div class="alert-bar" role="alert"><span class="grow"><b>The host key changed.</b> Fleetdeck refuses to connect, because this can mean someone is intercepting the connection. Pinned: <span class="mono">${s.host_key}</span>, offered: <span class="mono">${s.ssh.hostKeyMismatch}</span></span><${Btn} kind="danger" onClick=${acceptKey}>Trust new key</${Btn}></div>`);
+  else if (s.status === 'down') bars.push(html`<div class="alert-bar" role="alert"><span class="grow"><b>Unreachable${s.error ? ` for ${dur(Date.now() - s.error.since)}` : ''}.</b> ${s.error?.message}</span><a class="btn sm" href=${`#/servers/${s.id}/settings`}>Connection settings</a></div>`);
+  if (s.ssh?.sudoRejected) bars.push(html`<div class="alert-bar warn"><span class="grow"><b>The server rejected the stored sudo password.</b> Fleetdeck stopped using it so the account doesn't get locked. Update it to resume admin actions.</span><a class="btn sm" href=${`#/servers/${s.id}/settings`}>Update password</a></div>`);
+  const f = (s.firing || []).filter((a) => !(s.status === 'down' && a.metric === 'down')); // the unreachable bar already says it
+  if (f.length === 1) bars.push(html`<div class="alert-bar"><span class="grow"><b>Alert firing ${ago(f[0].since)}:</b> ${f[0].message}</span><a class="btn sm" href="#/alerts">Alert rules</a></div>`);
+  else if (f.length > 1) bars.push(html`<div class="alert-bar"><span class="grow"><b>${f.length} alerts firing</b><ul>${f.map((a) => html`<li>${a.message} <span class="muted">(${ago(a.since)})</span></li>`)}</ul></span><a class="btn sm" href="#/alerts">Alert rules</a></div>`);
+  return bars.length ? html`<div class="attention">${bars}</div>` : null;
+}
 
 export function ServerPage({ id, tab }) {
   const servers = useStore(serversStore);
   const s = servers?.find((x) => x.id === id);
+  useEffect(() => { document.querySelector('.tabs [aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }, [tab, !!s]);
   if (!servers) return html`<div class="page"><${Loading} /></div>`;
   if (!s) return html`<div class="page"><${Empty} title="Server not found" action=${html`<a class="btn" href="#/">Back to the fleet</a>`}>It may have been removed.</${Empty}></div>`;
   const n = s.snapshot;
 
   const reboot = async () => {
-    if (!await confirmBox({ title: `Reboot ${s.name}?`, body: 'Everything running on it will be unavailable until it is back up.', confirm: 'Reboot', danger: true, typeToConfirm: s.name })) return;
+    if (!await confirmRun({ scriptId: 'reboot', name: 'Reboot', count: 1, names: [s.name] })) return;
     await startJob(s, 'reboot');
   };
   const acceptKey = async () => {
@@ -31,6 +55,8 @@ export function ServerPage({ id, tab }) {
     toast('New host key trusted', 'ok');
     refreshServers();
   };
+  const mute = async (h) => { await muteFor(s.id, h, `Maintenance on ${s.name}`); toast(`Notifications for ${s.name} muted for ${h} h`, 'ok', { label: 'Quiet hours', href: '#/alerts' }); };
+  const cockpitUrl = `https://${s.host.includes(':') ? `[${s.host}]` : s.host}:9090`;
 
   let body;
   if (tab === 'updates') body = html`<${UpdatesTab} s=${s} />`;
@@ -44,6 +70,8 @@ export function ServerPage({ id, tab }) {
   else if (tab === 'settings') body = html`<${SettingsTab} s=${s} />`;
   else body = html`<${OverviewTab} s=${s} />`;
 
+  // Containers only when Docker is there (the route still works and explains).
+  const tabs = TABS.filter(([k]) => k !== 'containers' || n?.docker || tab === 'containers');
   return html`<div class="page">
     <div class="srv-h">
       <div class="id grow">
@@ -53,22 +81,22 @@ export function ServerPage({ id, tab }) {
       </div>
       <div class="row">
         <${Btn} icon="refresh" title="Check now" onClick=${async () => { await api(`/api/servers/${s.id}/probe`, { method: 'POST' }); await refreshServers(); }} />
-        ${n?.cockpit
-          ? html`<a class="btn" href=${`https://${s.host.includes(':') ? `[${s.host}]` : s.host}:9090`} target="_blank" rel="noopener noreferrer"><${Icon} name="ext" />Cockpit</a>`
-          : n && html`<${Btn} onClick=${() => startJob(s, 'cockpit')} title="Install Cockpit for storage, networking and firewall management">Install Cockpit</${Btn}>`}
+        ${tab !== 'terminal' && html`<a class="btn" href=${`#/servers/${s.id}/terminal`}><${Icon} name="term" /><span class="hide-sm">Terminal</span></a>`}
         <${Btn} icon="play" onClick=${() => openRun({ targets: { servers: [s.id] } })}>Run script</${Btn}>
-        <${Btn} kind="danger" onClick=${reboot}>Reboot</${Btn}>
+        <${Menu} label=${`More actions for ${s.name}`}>
+          ${n?.cockpit ? html`<a class="mi" href=${cockpitUrl} target="_blank" rel="noopener noreferrer"><${Icon} name="ext" />Open Cockpit</a>`
+            : n && html`<button class="mi" title="Storage, networking and firewall management" onClick=${() => startJob(s, 'cockpit').catch((e) => toast(e.message, 'bad'))}><${Icon} name="plus" />Install Cockpit</button>`}
+          <button class="mi" onClick=${() => mute(1).catch((e) => toast(e.message, 'bad'))}><${Icon} name="mute" />Mute alerts for 1 h</button>
+          <button class="mi" onClick=${() => mute(4).catch((e) => toast(e.message, 'bad'))}><${Icon} name="mute" />Mute alerts for 4 h</button>
+          <hr />
+          <button class="mi bad" onClick=${() => reboot().catch((e) => toast(e.message, 'bad'))}><${Icon} name="power" />Reboot…</button>
+        </${Menu}>
       </div>
     </div>
 
-    ${s.ssh?.hostKeyMismatch && html`<div class="alert-bar"><span class="grow"><b>The host key changed.</b> Fleetdeck refuses to connect, because this can mean someone is intercepting the connection. Pinned: <span class="mono">${s.host_key}</span>, offered: <span class="mono">${s.ssh.hostKeyMismatch}</span></span><${Btn} kind="danger" onClick=${acceptKey}>Trust new key</${Btn}></div>`}
-    ${s.ssh?.sudoRejected && html`<div class="alert-bar warn"><span class="grow"><b>The server rejected the stored sudo password.</b> Fleetdeck stopped using it so the account doesn't get locked. Update it to resume admin actions.</span><a class="btn sm" href=${`#/servers/${s.id}/settings`}>Update password</a></div>`}
-    ${s.status === 'down' && !s.ssh?.hostKeyMismatch && html`<div class="alert-bar"><span class="grow"><b>Unreachable for ${dur(Date.now() - s.error.since)}.</b> ${s.error.message}</span><a class="btn sm" href=${`#/servers/${s.id}/settings`}>Connection settings</a></div>`}
-    ${(s.firing || []).map((a) => html`<div class="alert-bar"><span class="grow"><b>Alert firing ${ago(a.since)}:</b> ${a.message}</span><a class="btn sm" href="#/alerts">Alert rules</a></div>`)}
-    ${n && (n.updates || n.reboot || n.failed || n.unhealthy || n.smart?.disks?.some((d) => d.problem)) ? html`<div class="row"><${Flags} s=${{ ...s, alerts: 0, status: '' }} />
-      ${n.updates > 0 && html`<${Btn} size="sm" onClick=${() => startJob(s, 'update')}>Install ${n.updates} update${n.updates > 1 ? 's' : ''}</${Btn}>`}</div>` : ''}
+    <${Attention} s=${s} acceptKey=${acceptKey} />
 
-    <nav class="tabs" aria-label="Server sections">${TABS.map(([k, label]) => html`<a href=${`#/servers/${s.id}${k === 'overview' ? '' : `/${k}`}`} aria-current=${tab === k ? 'page' : undefined}>${label}</a>`)}</nav>
+    <nav class="tabs" aria-label="Server sections">${tabs.map(([k, label]) => html`<a href=${`#/servers/${s.id}${k === 'overview' ? '' : `/${k}`}`} aria-current=${tab === k ? 'page' : undefined}>${label}${tabBadge(k, n)}</a>`)}</nav>
     ${body}
   </div>`;
 }
@@ -76,47 +104,52 @@ export function ServerPage({ id, tab }) {
 // ---------- overview: charts + system info ----------
 const RANGES = ['1h', '6h', '24h', '7d', '30d'];
 const P = (v) => `${Math.round(v * 100)}%`;
+const RangePicker = ({ value, onChange }) => html`<div class="seg" role="group" aria-label="Time range">${RANGES.map((r) => html`<button aria-pressed=${r === value} onClick=${() => onChange(r)}>${r}</button>`)}</div>`;
 
 function OverviewTab({ s }) {
-  const [range, setRange] = useState('1h');
+  const [range, setRange] = useQuery('range', '1h');
   const m = useLoad(() => api(`/api/servers/${s.id}/metrics?range=${range}`), [s.id, range], { poll: 60_000 });
+  const sync = useMemo(() => store(null), []); // shared crosshair
   const n = s.snapshot;
   const hasTemp = m.data?.points.some((p) => p.temp != null);
   return html`<div class="stack">
-    <div class="row"><h2>Metrics</h2><div class="seg right" role="group" aria-label="Time range">${RANGES.map((r) => html`<button aria-pressed=${r === range} onClick=${() => setRange(r)}>${r}</button>`)}</div></div>
+    <div class="row"><h2>Metrics</h2><div class="right"><${RangePicker} value=${range} onChange=${setRange} /></div></div>
     ${m.error && html`<${ErrorNote} error=${m.error} retry=${m.reload} />`}
     <div class="charts">
-      <${LineChart} title="CPU" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'cpu', label: 'CPU', color: 'var(--s1)' }]} current=${n && `${pct(n.cpu)} of ${n.cores} cores`} />
-      <${LineChart} title="Memory" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'mem', label: 'Memory', color: 'var(--s1)' }, { key: 'swap', label: 'Swap', color: 'var(--s2)' }]} current=${n && `${bytes(n.memUsed)} of ${bytes(n.memTotal)}`} />
-      <${LineChart} title="Network" data=${m.data} fmt=${(v) => rate(v)} series=${[{ key: 'rx', label: 'In', color: 'var(--s1)' }, { key: 'tx', label: 'Out', color: 'var(--s2)' }]} />
-      <${LineChart} title="Disk I/O" data=${m.data} fmt=${(v) => rate(v)} series=${[{ key: 'dr', label: 'Read', color: 'var(--s1)' }, { key: 'dw', label: 'Write', color: 'var(--s2)' }]} />
-      <${LineChart} title="Load (1 min)" data=${m.data} fmt=${(v) => v.toFixed(v < 10 ? 1 : 0)} series=${[{ key: 'load1', label: 'Load', color: 'var(--s1)' }]} current=${n && `${n.load.map((l) => l.toFixed(2)).join(', ')}`} />
-      ${hasTemp && html`<${LineChart} title="Temperature" data=${m.data} fmt=${(v) => `${Math.round(v)}°`} series=${[{ key: 'temp', label: 'Temperature', color: 'var(--s1)' }]} current=${n?.temp != null && `${Math.round(n.temp)} °C`} />`}
+      <${LineChart} sync=${sync} title="CPU" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'cpu', label: 'CPU', color: 'var(--s1)' }]} current=${n && `${pct(n.cpu)} of ${n.cores} cores`} />
+      <${LineChart} sync=${sync} title="Memory" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'mem', label: 'Memory', color: 'var(--s1)' }, { key: 'swap', label: 'Swap', color: 'var(--s2)' }]} current=${n && `${bytes(n.memUsed)} of ${bytes(n.memTotal)}`} />
+      <${LineChart} sync=${sync} title="Network" data=${m.data} fmt=${(v) => rate(v)} series=${[{ key: 'rx', label: 'In', color: 'var(--s1)' }, { key: 'tx', label: 'Out', color: 'var(--s2)' }]} />
+      <${LineChart} sync=${sync} title="Disk I/O" data=${m.data} fmt=${(v) => rate(v)} series=${[{ key: 'dr', label: 'Read', color: 'var(--s1)' }, { key: 'dw', label: 'Write', color: 'var(--s2)' }]} />
+      <${LineChart} sync=${sync} title="Load (1 min)" data=${m.data} fmt=${(v) => v.toFixed(v < 10 ? 1 : 0)} series=${[{ key: 'load1', label: 'Load', color: 'var(--s1)' }]} current=${n && `${n.load.map((l) => l.toFixed(2)).join(', ')}`} />
+      ${hasTemp && html`<${LineChart} sync=${sync} title="Temperature" data=${m.data} fmt=${(v) => `${Math.round(v)}°`} series=${[{ key: 'temp', label: 'Temperature', color: 'var(--s1)' }]} current=${n?.temp != null && `${Math.round(n.temp)} °C`} />`}
     </div>
-    ${n && html`<div class="charts">
+    ${n && html`<div class="grid-2">
       <section class="panel"><div class="panel-h"><h2>Filesystems</h2></div>
-        <div class="table-wrap"><table class="t"><thead><tr><th>Mount</th><th>Type</th><th style=${{ width: '40%' }}>Used</th><th class="num">Size</th></tr></thead>
-        <tbody>${n.disks.map((d) => html`<tr><td class="mono">${d.mount}</td><td class="ink2">${d.type}</td>
+        <div class="table-wrap"><table class="t"><thead><tr><th>Mount</th><th class="hide-sm">Type</th><th>Used</th><th class="num">Size</th></tr></thead>
+        <tbody>${n.disks.map((d) => html`<tr><td class="mono">${d.mount}</td><td class="ink2 hide-sm">${d.type}</td>
           <td><div class="row nw"><div class="bar grow"><i class=${level(d.pct, 0.8, 0.9)} style=${{ width: `${d.pct * 100}%` }} /></div><span class="small nowrap">${pct(d.pct)}</span></div></td>
           <td class="num ink2 nowrap">${bytes(d.used)} / ${bytes(d.size)}</td></tr>`)}</tbody></table></div></section>
       <section class="panel"><div class="panel-h"><h2>System</h2></div><div class="panel-b">
         <dl class="kv">
-          <dt>Hostname</dt><dd class="mono">${n.hostname}</dd>
+          <dt class="sub">Hardware</dt>
+          <dt>CPU</dt><dd>${n.cpuModel || '–'}, ${n.cores} cores</dd>
+          <dt>Memory</dt><dd>${bytes(n.memTotal)}${n.swapTotal ? `, ${bytes(n.swapTotal)} swap` : ', no swap'}</dd>
+          ${n.virt && html`<dt>Virtualization</dt><dd>${n.virt}</dd>`}
+          <dt class="sub">Software</dt>
           <dt>OS</dt><dd>${n.os}</dd>
           <dt>Kernel</dt><dd class="mono">${n.kernel} (${n.arch})</dd>
-          <dt>CPU</dt><dd>${n.cpuModel || '–'}, ${n.cores} cores</dd>
-          ${n.virt && html`<dt>Virtualization</dt><dd>${n.virt}</dd>`}
-          <dt>Memory</dt><dd>${bytes(n.memTotal)}${n.swapTotal ? `, ${bytes(n.swapTotal)} swap` : ', no swap'}</dd>
-          <dt>Addresses</dt><dd class="mono">${n.ips.join(', ') || '–'}</dd>
-          <dt>Booted</dt><dd>${when(n.t - n.uptime * 1000)}</dd>
-          <dt>Processes</dt><dd>${n.procs}</dd>
           <dt>Packages</dt><dd>${n.pkg || 'unknown'}${n.updates != null ? `, ${n.updates} pending` : ''}${n.autoUpdates != null ? `, automatic updates ${n.autoUpdates ? 'on' : 'off'}` : ''}</dd>
           ${n.docker && html`<dt>Docker</dt><dd>${n.docker.running} of ${n.docker.total} containers running</dd>`}
-          <dt>Checks run as</dt><dd>${n.probeUser}${n.probeUser !== 'root' ? ' (no passwordless sudo)' : ''}</dd>
+          <dt>Booted</dt><dd>${when(n.t - n.uptime * 1000)}</dd>
+          <dt>Processes</dt><dd>${n.procs}</dd>
+          <dt class="sub">Access</dt>
+          <dt>Hostname</dt><dd class="mono">${n.hostname}</dd>
+          <dt>Addresses</dt><dd class="mono">${n.ips.join(', ') || '–'}</dd>
+          <dt>Checks run as</dt><dd>${n.probeUser}${n.probeUser !== 'root' && html` <span class="chip warn">no passwordless sudo</span> <a class="small" href=${`#/servers/${s.id}/settings`}>Settings</a>`}</dd>
+          ${s.notes && html`<dt>Notes</dt><dd class="pre-wrap">${s.notes}</dd>`}
         </dl></div></section>
     </div>`}
     ${n && html`<${DiskHealth} s=${s} />`}
-    ${s.notes && html`<section class="panel"><div class="panel-h"><h2>Notes</h2></div><div class="panel-b" style=${{ whiteSpace: 'pre-wrap' }}>${s.notes}</div></section>`}
   </div>`;
 }
 
@@ -129,13 +162,13 @@ function DiskHealth({ s }) {
   if (!sm.disks.length) return null;
   const n = (v) => (v == null ? '–' : v);
   return html`<section class="panel"><div class="panel-h"><h2>Disk health</h2><span class="small muted">S.M.A.R.T., checked every 30 minutes. Sleeping disks are skipped.</span></div>
-    <div class="table-wrap"><table class="t"><thead><tr><th>Health</th><th>Disk</th><th class="num">Temp</th><th class="num">Powered on</th><th class="num" title="Reallocated sectors">Realloc.</th><th class="num" title="Pending + uncorrectable sectors">Bad sectors</th><th class="num" title="NVMe: percentage of rated endurance used">Wear</th></tr></thead>
+    <div class="table-wrap"><table class="t"><thead><tr><th>Health</th><th>Disk</th><th class="num">Temp</th><th class="num hide-sm">Powered on</th><th class="num hide-sm" title="Reallocated sectors">Realloc.</th><th class="num" title="Pending + uncorrectable sectors">Bad sectors</th><th class="num" title="NVMe: percentage of rated endurance used">Wear</th></tr></thead>
     <tbody>${sm.disks.map((d) => html`<tr>
       <td><span class=${`chip ${!d.passed ? 'bad' : d.problem ? 'warn' : 'ok'}`}>${!d.passed ? 'Failing' : d.problem ? 'Warning' : 'OK'}</span></td>
       <td><span class="mono">${d.dev}</span><div class="small muted">${d.model}${d.serial ? ` · ${d.serial}` : ''}</div></td>
       <td class="num">${d.temp == null ? '–' : `${d.temp} °C`}</td>
-      <td class="num ink2">${d.hours == null ? '–' : dur(d.hours * 3600e3)}</td>
-      <td class="num">${n(d.realloc)}</td>
+      <td class="num ink2 hide-sm">${d.hours == null ? '–' : dur(d.hours * 3600e3)}</td>
+      <td class="num hide-sm">${n(d.realloc)}</td>
       <td class=${`num ${d.pending > 0 || d.uncorrectable > 0 ? 'err' : ''}`}>${d.pending == null && d.uncorrectable == null ? (d.mediaErrors == null ? '–' : `${d.mediaErrors} media err.`) : (d.pending || 0) + (d.uncorrectable || 0)}</td>
       <td class="num">${d.wear == null ? '–' : `${d.wear}%`}</td></tr>`)}</tbody></table></div></section>`;
 }
@@ -146,29 +179,32 @@ function UpdatesTab({ s }) {
   const p = useLoad(() => api(`/api/servers/${s.id}/packages${refresh ? '?refresh=1' : ''}`), [s.id, refresh]);
   const [sel, setSel] = useState(() => new Set());
   const list = p.data?.packages || [];
-  const sort = useSort(list, 'name');
+  const sort = useSort(list, 'security', 1, (x) => (x.security ? 0 : 1)); // security fixes first
   const toggle = (name) => setSel((x) => { const n = new Set(x); n.has(name) ? n.delete(name) : n.add(name); return n; });
   const auto = s.snapshot?.autoUpdates;
-  const toggleAuto = async () => {
+  const toggleAuto = async (e) => {
+    e.target.checked = auto; // reflect reality until the job has run and the next probe reports it
     if (auto && !await confirmBox({ title: `Turn off automatic updates on ${s.name}?`, body: 'Security fixes then only arrive when you install updates yourself or on a schedule.', confirm: 'Turn off', danger: true })) return;
     await startJob(s, auto ? 'unattended-off' : 'unattended');
   };
   return html`<div class="stack"><${RestartsPanel} s=${s} />
-    ${auto != null && html`<div class="row"><span class=${`chip ${auto ? 'ok' : 'warn'}`}>Automatic updates ${auto ? 'on' : 'off'}</span>
-      <span class="small muted">${auto ? (s.snapshot.pkg === 'apt' ? 'unattended-upgrades' : 'dnf-automatic') + ' installs updates by itself.' : 'Updates are only installed when you or a schedule run them.'}</span>
-      <${Btn} size="sm" kind="ghost" onClick=${toggleAuto}>${auto ? 'Turn off' : 'Turn on (security updates)'}</${Btn}></div>`}
     <section class="panel">
     <div class="panel-h"><h2>Available updates</h2>${p.data && html`<span class="small muted">${p.data.manager || 'unknown package manager'}</span>`}
       <div class="row right">
         <${Btn} size="sm" icon="refresh" onClick=${() => setRefresh((r) => r + 1)} disabled=${p.loading}>Refresh package lists</${Btn}>
         ${sel.size > 0 && html`<${Btn} size="sm" onClick=${() => startJob(s, 'upgrade-packages', { PACKAGES: [...sel].join(' ') })}>Upgrade ${sel.size} selected</${Btn}>`}
-        ${list.length > 0 && html`<${Btn} size="sm" kind="primary" onClick=${() => startJob(s, 'update')}>Upgrade all</${Btn}>`}
+        ${list.length > 0 && html`<${Btn} size="sm" kind="primary" onClick=${() => startJob(s, 'update')}>Upgrade all ${list.length}</${Btn}>`}
       </div></div>
+    ${auto != null && html`<div class="panel-b row b-bottom">
+      <label class="check"><input type="checkbox" class="switch" role="switch" checked=${auto} onChange=${(e) => toggleAuto(e).catch((x) => toast(x.message, 'bad'))} />Automatic security updates</label>
+      <span class="small muted">${auto ? `${s.snapshot.pkg === 'apt' ? 'unattended-upgrades' : 'dnf-automatic'} installs updates by itself.` : 'Updates are only installed when you or a schedule run them.'}</span></div>`}
     ${p.loading ? html`<${Loading} />` : p.error ? html`<div class="panel-b"><${ErrorNote} error=${p.error} retry=${p.reload} /></div>`
       : !list.length ? html`<${Empty} title="Everything is up to date">Fleetdeck checks the package cache every minute. Refresh the package lists to look for new releases now.</${Empty}>`
-      : html`<div class="table-wrap"><table class="t"><thead><tr><th><input type="checkbox" aria-label="Select all" checked=${sel.size === list.length} onChange=${() => setSel(sel.size === list.length ? new Set() : new Set(list.map((x) => x.name)))} /></th><${Th} sort=${sort} k="name">Package</${Th}><${Th} sort=${sort} k="from">Installed</${Th}><${Th} sort=${sort} k="version">Available</${Th}><${Th} sort=${sort} k="source">Source</${Th}></tr></thead>
+      : html`<div class="table-wrap"><table class="t"><thead><tr><th class="shrink"><input type="checkbox" aria-label="Select all" checked=${sel.size === list.length} onChange=${() => setSel(sel.size === list.length ? new Set() : new Set(list.map((x) => x.name)))} /></th>
+        <${Th} sort=${sort} k="security" get=${(x) => (x.security ? 0 : 1)} class="shrink"><span class="sr">Security</span></${Th}><${Th} sort=${sort} k="name">Package</${Th}><${Th} sort=${sort} k="from" class="hide-sm">Installed</${Th}><${Th} sort=${sort} k="version">Available</${Th}><${Th} sort=${sort} k="source" class="hide-sm">Source</${Th}></tr></thead>
         <tbody>${sort.rows.map((x) => html`<tr><td><input type="checkbox" checked=${sel.has(x.name)} onChange=${() => toggle(x.name)} aria-label=${`Select ${x.name}`} /></td>
-          <td class="mono">${x.name} ${x.security && html`<span class="chip warn">security</span>`}</td><td class="mono ink2">${x.from || '–'}</td><td class="mono">${x.version}</td><td class="ink2">${x.source}</td></tr>`)}</tbody></table></div>`}
+          <td>${x.security && html`<span class="chip warn">security</span>`}</td>
+          <td class="mono">${x.name}</td><td class="mono ink2 hide-sm">${x.from || '–'}</td><td class="mono">${x.version}</td><td class="ink2 hide-sm">${x.source}</td></tr>`)}</tbody></table></div>`}
   </section></div>`;
 }
 
@@ -190,10 +226,14 @@ function RestartsPanel({ s }) {
 }
 
 // ---------- services ----------
+const cap = (w) => w[0].toUpperCase() + w.slice(1);
 function ServicesTab({ s }) {
   const svc = useLoad(() => api(`/api/servers/${s.id}/services`), [s.id]);
-  const [q, setQ] = useState('');
-  const [filter, setFilter] = useState('running');
+  const failedCount = (svc.data || []).filter((u) => u.active === 'failed').length;
+  // Open on "Failed" when something failed; otherwise "Running".
+  const [f, setFilter] = useQuery('show');
+  const filter = f || (failedCount ? 'failed' : 'running');
+  const [q, setQ] = useQuery('q');
   const [status, setStatus] = useState(null);
   const list = useMemo(() => (svc.data || []).filter((u) => {
     if (filter === 'running' && u.active !== 'active') return false;
@@ -203,36 +243,40 @@ function ServicesTab({ s }) {
   }), [svc.data, q, filter]);
   const sort = useSort(list, 'unit');
   const act = async (u, action) => {
-    if (['stop', 'disable'].includes(action) && !await confirmBox({ title: `${action[0].toUpperCase() + action.slice(1)} ${u.unit}?`, confirm: action[0].toUpperCase() + action.slice(1), danger: true })) return;
+    if (['stop', 'disable'].includes(action) && !await confirmBox({ title: `${cap(action)} ${u.unit}?`, confirm: cap(action), danger: true })) return false;
     await api(`/api/servers/${s.id}/services`, { method: 'POST', body: { unit: u.unit, action } });
     toast(`${u.unit}: ${action} done`, 'ok');
     svc.reload(true);
+    return true;
   };
-  const showStatus = async (u) => setStatus({ unit: u.unit, text: (await api(`/api/servers/${s.id}/services/status?unit=${encodeURIComponent(u.unit)}`)).text });
-  const counts = { failed: (svc.data || []).filter((u) => u.active === 'failed').length };
+  const showStatus = async (u) => setStatus({ u, text: (await api(`/api/servers/${s.id}/services/status?unit=${encodeURIComponent(u.unit)}`)).text });
+  const fromModal = async (action) => { if (await act(status.u, action)) await showStatus({ ...status.u, active: action === 'stop' ? 'inactive' : 'active', sub: 'running' }); };
   return html`<section class="panel">
     <div class="panel-h">
-      <div class="seg" role="group" aria-label="Filter">${[['running', 'Running'], ['failed', `Failed${counts.failed ? ` (${counts.failed})` : ''}`], ['inactive', 'Stopped'], ['all', 'All'], ['timers', 'Timers']].map(([k, l]) => html`<button aria-pressed=${filter === k} onClick=${() => setFilter(k)}>${l}</button>`)}</div>
+      <div class="seg" role="group" aria-label="Filter">${[['running', 'Running'], ['failed', `Failed${failedCount ? ` (${failedCount})` : ''}`], ['inactive', 'Stopped'], ['all', 'All'], ['timers', 'Timers']].map(([k, l]) => html`<button aria-pressed=${filter === k} onClick=${() => setFilter(k)}>${l}</button>`)}</div>
       <input type="search" placeholder="Filter services" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter services" />
       <${Btn} size="sm" kind="ghost" icon="refresh" class="right" onClick=${() => svc.reload()}>Refresh</${Btn}>
     </div>
     ${filter === 'timers' ? html`<${TimersTable} s=${s} q=${q} />`
       : svc.loading && !svc.data ? html`<${Loading} />` : svc.error ? html`<div class="panel-b"><${ErrorNote} error=${svc.error} retry=${svc.reload} /></div>`
       : !list.length ? html`<${Empty} title="No services match" />`
-      : html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="active">State</${Th}><${Th} sort=${sort} k="unit">Service</${Th}><${Th} sort=${sort} k="description">Description</${Th}><${Th} sort=${sort} k="enabled">Start at boot</${Th}><th class="act"></th></tr></thead>
-      <tbody>${sort.rows.map((u) => html`<tr class="click" onClick=${() => showStatus(u)}>
+      : html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="active">State</${Th}><${Th} sort=${sort} k="unit">Service</${Th}><${Th} sort=${sort} k="description" class="hide-sm">Description</${Th}><${Th} sort=${sort} k="enabled" class="hide-sm">Start at boot</${Th}><th class="act"></th></tr></thead>
+      <tbody>${sort.rows.map((u) => html`<tr class="click" onClick=${(e) => !e.target.closest('button,a') && showStatus(u).catch((x) => toast(x.message, 'bad'))}>
         <td><span class=${`chip ${u.active === 'active' ? 'ok' : u.active === 'failed' ? 'bad' : ''}`}>${u.active === 'active' ? u.sub : u.active}</span></td>
-        <td class="mono">${u.unit.replace(/\.service$/, '')}</td><td class="ink2 trunc" style=${{ maxWidth: '320px' }}>${u.description}</td>
-        <td class="ink2">${u.enabled}</td>
-        <td class="act" onClick=${(e) => e.stopPropagation()}><div class="row nw">
-          ${u.active === 'active' ? html`<${Btn} size="sm" onClick=${() => act(u, 'restart')}>Restart</${Btn}><${Btn} size="sm" kind="danger" onClick=${() => act(u, 'stop')}>Stop</${Btn}>`
-            : html`<${Btn} size="sm" onClick=${() => act(u, 'start')}>Start</${Btn}>`}
-          ${u.enabled === 'enabled' ? html`<${Btn} size="sm" kind="ghost" onClick=${() => act(u, 'disable')}>Disable</${Btn}>`
+        <td><button class="btn ghost sm cell" title="Show status" onClick=${() => showStatus(u)}>${u.unit.replace(/\.service$/, '')}</button></td>
+        <td class="ink2 trunc max-cell hide-sm">${u.description}</td>
+        <td class="ink2 hide-sm">${u.enabled}</td>
+        <td class="act"><div class="row nw">
+          ${u.active === 'active' ? html`<${Btn} size="sm" kind="ghost" onClick=${() => act(u, 'restart')}>Restart</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => act(u, 'stop')}>Stop</${Btn}>`
+            : html`<${Btn} size="sm" kind="ghost" onClick=${() => act(u, 'start')}>Start</${Btn}>`}
+          ${u.enabled === 'enabled' ? html`<${Btn} size="sm" kind="quiet-danger" onClick=${() => act(u, 'disable')}>Disable</${Btn}>`
             : u.enabled === 'disabled' ? html`<${Btn} size="sm" kind="ghost" onClick=${() => act(u, 'enable')}>Enable</${Btn}>` : ''}
         </div></td></tr>`)}</tbody></table></div>`}
-    ${status && html`<${Modal} wide title=${status.unit} onClose=${() => setStatus(null)}>
-      <div class="row"><a class="btn sm" href=${`#/servers/${s.id}/logs`} onClick=${() => sessionStorage.setItem('fd-log-unit', status.unit)}>Open logs</a></div>
-      <${Output} text=${status.text} /></${Modal}>`}
+    ${status && html`<${Modal} wide title=${status.u.unit} onClose=${() => setStatus(null)}
+      footer=${html`<a class="btn ghost" href=${logsHref(s, status.u.unit)}>Open logs</a><span class="grow" />
+        ${status.u.active === 'active' ? html`<${Btn} kind="danger" onClick=${() => fromModal('stop')}>Stop</${Btn}><${Btn} kind="primary" onClick=${() => fromModal('restart')}>Restart</${Btn}>`
+          : html`<${Btn} kind="primary" onClick=${() => fromModal('start')}>Start</${Btn}>`}`}>
+      <${Output} name=${status.u.unit} text=${status.text} /></${Modal}>`}
   </section>`;
 }
 
@@ -254,17 +298,17 @@ function TimersTable({ s, q }) {
   if (t.loading && !t.data) return html`<${Loading} />`;
   if (t.error) return html`<div class="panel-b"><${ErrorNote} error=${t.error} retry=${t.reload} /></div>`;
   if (!list.length) return html`<${Empty} title="No timers match" />`;
-  return html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="unit">Timer</${Th}><${Th} sort=${sort} k="next">Next run</${Th}><${Th} sort=${sort} k="last" desc>Last run</${Th}><${Th} sort=${sort} k="result">Last result</${Th}><${Th} sort=${sort} k="enabled">Start at boot</${Th}><th class="act"></th></tr></thead>
+  return html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="unit">Timer</${Th}><${Th} sort=${sort} k="next">Next run</${Th}><${Th} sort=${sort} k="last" desc class="hide-sm">Last run</${Th}><${Th} sort=${sort} k="result">Last result</${Th}><${Th} sort=${sort} k="enabled" class="hide-sm">Start at boot</${Th}><th class="act"></th></tr></thead>
     <tbody>${sort.rows.map((x) => html`<tr>
-      <td><span class="mono">${x.unit.replace(/\.timer$/, '')}</span><div class="small muted trunc" style=${{ maxWidth: '320px' }}>${x.description}</div></td>
+      <td><span class="mono">${x.unit.replace(/\.timer$/, '')}</span><div class="small muted trunc max-cell">${x.description}</div></td>
       <td class="nowrap">${x.active === 'active' ? time(x.next, x.nextText) : html`<span class="muted">inactive</span>`}</td>
-      <td class="nowrap ink2">${time(x.last, x.lastText)}</td>
+      <td class="nowrap ink2 hide-sm">${time(x.last, x.lastText)}</td>
       <td>${x.running ? html`<span class="chip info">running</span>` : x.result && x.last ? html`<span class=${`chip ${x.result === 'success' ? 'ok' : 'bad'}`}>${x.result}</span>` : ''}</td>
-      <td class="ink2">${x.enabled}</td>
+      <td class="ink2 hide-sm">${x.enabled}</td>
       <td class="act"><div class="row nw">
-        <${Btn} size="sm" icon="play" disabled=${!x.activates || x.running} onClick=${() => runNow(x)}>Run now</${Btn}>
-        ${['enabled', 'disabled'].includes(x.enabled) && html`<${Btn} size="sm" kind="ghost" onClick=${() => toggle(x)}>${x.enabled === 'enabled' ? 'Disable' : 'Enable'}</${Btn}>`}
-        ${x.activates && html`<a class="btn sm ghost" href=${`#/servers/${s.id}/logs`} onClick=${() => sessionStorage.setItem('fd-log-unit', x.activates)}>Logs</a>`}
+        <${Btn} size="sm" kind="ghost" icon="play" disabled=${!x.activates || x.running} onClick=${() => runNow(x)}>Run now</${Btn}>
+        ${['enabled', 'disabled'].includes(x.enabled) && html`<${Btn} size="sm" kind=${x.enabled === 'enabled' ? 'quiet-danger' : 'ghost'} onClick=${() => toggle(x)}>${x.enabled === 'enabled' ? 'Disable' : 'Enable'}</${Btn}>`}
+        ${x.activates && html`<a class="btn sm ghost" href=${logsHref(s, x.activates)}>Logs</a>`}
       </div></td></tr>`)}</tbody></table></div>`;
 }
 
@@ -272,41 +316,47 @@ function TimersTable({ s, q }) {
 const PRIOS = [['', 'All levels'], ['3', 'Errors'], ['4', 'Warnings and worse'], ['6', 'Info and worse']];
 const PRIO_NAME = ['emerg', 'alert', 'crit', 'error', 'warn', 'notice', 'info', 'debug'];
 function LogsTab({ s }) {
-  const [f, setF] = useState(() => {
-    let unit = '';
-    try { unit = sessionStorage.getItem('fd-log-unit') || ''; sessionStorage.removeItem('fd-log-unit'); } catch { /* ignore */ }
-    return { unit, priority: '', since: '1h', lines: '500' };
-  });
-  const [q, setQ] = useState('');
-  const [follow, setFollow] = useState(false);
-  const qs = new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
-  const logs = useLoad(() => api(`/api/servers/${s.id}/logs?${qs}`), [s.id, qs], { poll: follow ? 5000 : 0 });
+  const [unit, setUnit] = useQuery('unit');
+  const [priority, setPriority] = useQuery('level');
+  const [since, setSince] = useQuery('since', '1h');
+  const [lines, setLines] = useQuery('lines', '500');
+  const [q, setQ] = useQuery('q');
+  const [follow, setFollow] = useQuery('follow');
+  const [draft, setDraft] = useState(unit);
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => setDraft(unit), [unit]);
+  useEffect(() => { if (draft === unit) return; const t = setTimeout(() => setUnit(draft), 400); return () => clearTimeout(t); }, [draft]);
+  const qs = new URLSearchParams(Object.entries({ unit, priority, since, lines }).filter(([, v]) => v)).toString();
+  // Following pauses while you scroll back through older entries.
+  const logs = useLoad(() => api(`/api/servers/${s.id}/logs?${qs}`), [s.id, qs], { poll: follow ? 5000 : 0, paused: scrolled });
   const list = useMemo(() => {
     const n = q.toLowerCase();
     return (logs.data || []).filter((e) => !n || `${e.id} ${e.msg}`.toLowerCase().includes(n)).reverse();
   }, [logs.data, q]);
-  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   return html`<section class="panel">
     <div class="panel-h">
-      <input class="mono" placeholder="Unit, e.g. nginx" value=${f.unit} onChange=${set('unit')} aria-label="Unit" style=${{ width: '170px' }} />
-      <select value=${f.priority} onChange=${set('priority')} aria-label="Level">${PRIOS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select>
-      <select value=${f.since} onChange=${set('since')} aria-label="Time range">${[['15m', 'Last 15 min'], ['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last day'], ['7d', 'Last week']].map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select>
-      <select value=${f.lines} onChange=${set('lines')} aria-label="Lines">${['200', '500', '2000', '5000'].map((v) => html`<option value=${v}>${v} lines</option>`)}</select>
+      <input class="mono" placeholder="Unit, e.g. nginx" value=${draft} onInput=${(e) => setDraft(e.target.value)} aria-label="Unit" />
+      <select value=${priority} onChange=${(e) => setPriority(e.target.value)} aria-label="Level">${PRIOS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select>
+      <select value=${since} onChange=${(e) => setSince(e.target.value)} aria-label="Time range">${[['15m', 'Last 15 min'], ['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last day'], ['7d', 'Last week']].map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select>
+      <select value=${lines} onChange=${(e) => setLines(e.target.value)} aria-label="Lines">${['200', '500', '2000', '5000'].map((v) => html`<option value=${v}>${v} lines</option>`)}</select>
       <input type="search" placeholder="Search" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Search messages" />
-      <label class="check small"><input type="checkbox" checked=${follow} onChange=${(e) => setFollow(e.target.checked)} />Follow</label>
-      <${Btn} size="sm" kind="ghost" icon="refresh" class="right" onClick=${() => logs.reload()}>Refresh</${Btn}>
+      <div class="row nw right">
+        <div class="seg"><button aria-pressed=${!!follow} onClick=${() => setFollow(follow ? '' : '1')} title="Reload every 5 seconds">${follow && html`<span class=${`lamp ${scrolled ? 'paused' : 'running'}`} aria-hidden="true" />`}${follow && scrolled ? 'Paused' : 'Follow'}</button></div>
+        <${Btn} size="sm" kind="ghost" icon="refresh" onClick=${() => logs.reload()}>Refresh</${Btn}>
+      </div>
     </div>
     ${logs.loading && !logs.data ? html`<${Loading} />` : logs.error ? html`<div class="panel-b"><${ErrorNote} error=${logs.error} retry=${logs.reload} /></div>`
       : !list.length ? html`<${Empty} title="No log entries">Nothing matches these filters. Widen the time range or clear the search.</${Empty}>`
-      : html`<div class="logs" style=${{ maxHeight: '65vh', overflowY: 'auto' }}>${list.map((e) => html`<div class=${`e p${e.p}`}>
+      : html`<div class="logs" tabindex="0" onScroll=${(e) => setScrolled(e.target.scrollTop > 40)}>${list.map((e) => html`<div class=${`e p${e.p}`}>
           <span class="muted">${logTime(e.t)}</span><span class=${`p${e.p}`}>${PRIO_NAME[e.p]}</span><span class="trunc ink2" title=${e.unit}>${e.id}</span><span class="m">${e.msg}</span></div>`)}</div>`}
   </section>`;
 }
 
 // ---------- processes ----------
 function ProcessesTab({ s }) {
-  const ps = useLoad(() => api(`/api/servers/${s.id}/processes`), [s.id], { poll: 10_000 });
-  const [q, setQ] = useState('');
+  const [held, bind] = useHold();
+  const ps = useLoad(() => api(`/api/servers/${s.id}/processes`), [s.id], { poll: 10_000, paused: held });
+  const [q, setQ] = useQuery('q');
   const filtered = useMemo(() => (ps.data || []).filter((p) => !q || `${p.args} ${p.user} ${p.pid}`.toLowerCase().includes(q.toLowerCase())), [ps.data, q]);
   const sort = useSort(filtered, 'cpu', -1);
   const list = sort.rows.slice(0, 80);
@@ -319,19 +369,20 @@ function ProcessesTab({ s }) {
   return html`<section class="panel">
     <div class="panel-h">
       <input type="search" placeholder="Filter processes" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter processes" />
-      <span class="small muted right">Updates every 10 seconds</span>
+      <span class="small muted right" aria-live="polite">${held ? 'Paused while you point at the table' : 'Updates every 10 seconds'}</span>
     </div>
     ${ps.loading && !ps.data ? html`<${Loading} />` : ps.error ? html`<div class="panel-b"><${ErrorNote} error=${ps.error} retry=${ps.reload} /></div>`
-      : html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="pid" class="num">PID</${Th}><${Th} sort=${sort} k="user">User</${Th}><${Th} sort=${sort} k="cpu" class="num" desc>CPU</${Th}><${Th} sort=${sort} k="mem" class="num" desc>Memory</${Th}><${Th} sort=${sort} k="rss" class="num" desc>RSS</${Th}><${Th} sort=${sort} k="elapsed" desc>Running</${Th}><${Th} sort=${sort} k="args">Command</${Th}><th class="act"></th></tr></thead>
-      <tbody>${list.map((p) => html`<tr><td class="num mono">${p.pid}</td><td class="ink2">${p.user}</td><td class="num">${p.cpu.toFixed(1)}%</td><td class="num">${p.mem.toFixed(1)}%</td>
-        <td class="num ink2">${bytes(p.rss)}</td><td class="ink2 nowrap">${dur(p.elapsed * 1000)}</td><td class="mono trunc" style=${{ maxWidth: '420px' }} title=${p.args}>${p.args}</td>
-        <td class="act"><div class="row nw"><${Btn} size="sm" kind="ghost" onClick=${() => kill(p, 'TERM')}>Stop</${Btn}><${Btn} size="sm" kind="danger" onClick=${() => kill(p, 'KILL')}>Kill</${Btn}></div></td></tr>`)}</tbody></table></div>`}
+      : html`<div class="table-wrap" ...${bind}><table class="t"><thead><tr><${Th} sort=${sort} k="pid" class="num">PID</${Th}><${Th} sort=${sort} k="user" class="hide-sm">User</${Th}><${Th} sort=${sort} k="cpu" class="num" desc>CPU</${Th}><${Th} sort=${sort} k="mem" class="num" desc>Memory</${Th}><${Th} sort=${sort} k="rss" class="num hide-sm" desc>RSS</${Th}><${Th} sort=${sort} k="elapsed" desc class="hide-sm">Running</${Th}><${Th} sort=${sort} k="args">Command</${Th}><th class="act"></th></tr></thead>
+      <tbody>${list.map((p) => html`<tr><td class="num mono">${p.pid}</td><td class="ink2 hide-sm">${p.user}</td><td class="num">${p.cpu.toFixed(1)}%</td><td class="num">${p.mem.toFixed(1)}%</td>
+        <td class="num ink2 hide-sm">${bytes(p.rss)}</td><td class="ink2 nowrap hide-sm">${dur(p.elapsed * 1000)}</td><td class="mono trunc max-cell" title=${p.args}>${p.args}</td>
+        <td class="act"><div class="row nw"><${Btn} size="sm" kind="ghost" onClick=${() => kill(p, 'TERM')}>Terminate</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => kill(p, 'KILL')}>Force kill</${Btn}></div></td></tr>`)}</tbody></table></div>`}
   </section>`;
 }
 
 // ---------- containers ----------
 function ContainersTab({ s }) {
-  const c = useLoad(() => api(`/api/servers/${s.id}/containers`), [s.id], { poll: 15_000 });
+  const [held, bind] = useHold();
+  const c = useLoad(() => api(`/api/servers/${s.id}/containers`), [s.id], { poll: 15_000, paused: held });
   const [logs, setLogs] = useState(null);
   const [hist, setHist] = useState(null);
   const sort = useSort(c.data?.containers, 'name');
@@ -345,23 +396,26 @@ function ContainersTab({ s }) {
   if (c.loading && !c.data) return html`<section class="panel"><${Loading} /></section>`;
   if (c.error) return html`<${ErrorNote} error=${c.error} retry=${c.reload} />`;
   if (!c.data.installed) return html`<section class="panel"><${Empty} title="Docker isn't installed on this server">Install Docker and its containers show up here with live stats.</${Empty}></section>`;
+  const cores = s.snapshot?.cores || 1;
   return html`<section class="panel">
-    <div class="panel-h"><h2>Containers</h2><span class="small muted">${c.data.containers.filter((x) => x.state === 'running').length} of ${c.data.containers.length} running</span>
+    <div class="panel-h"><h2>Containers</h2><span class="small muted">${c.data.containers.filter((x) => x.state === 'running').length} of ${c.data.containers.length} running${held ? ' · paused while you point at the table' : ''}</span>
       <${Btn} size="sm" kind="ghost" class="right" onClick=${() => startJob(s, 'docker-prune')}>Clean up unused data</${Btn}></div>
-    ${!c.data.containers.length ? html`<${Empty} title="No containers" />` : html`<div class="table-wrap"><table class="t">
-      <thead><tr><${Th} sort=${sort} k="state">State</${Th}><${Th} sort=${sort} k="name">Name</${Th}><${Th} sort=${sort} k="image">Image</${Th}><${Th} sort=${sort} k="status">Status</${Th}><${Th} sort=${sort} k="cpu" get=${(x) => parseFloat(x.cpu)} class="num" desc>CPU</${Th}><${Th} sort=${sort} k="mem" get=${(x) => parseFloat(x.memPct)} desc>Memory</${Th}><${Th} sort=${sort} k="ports">Ports</${Th}><th class="act"></th></tr></thead>
+    ${!c.data.containers.length ? html`<${Empty} title="No containers" />` : html`<div class="table-wrap" ...${bind}><table class="t">
+      <thead><tr><${Th} sort=${sort} k="state">State</${Th}><${Th} sort=${sort} k="name">Name</${Th}><${Th} sort=${sort} k="image" class="hide-sm">Image</${Th}><${Th} sort=${sort} k="status" class="hide-sm">Status</${Th}><${Th} sort=${sort} k="cpu" get=${(x) => parseFloat(x.cpu)} class="num" desc>CPU</${Th}><${Th} sort=${sort} k="mem" get=${(x) => parseFloat(x.memPct)} class="num" desc>Memory</${Th}><${Th} sort=${sort} k="ports" class="hide-sm">Ports</${Th}><th class="act"></th></tr></thead>
       <tbody>${sort.rows.map((x) => html`<tr>
         <td><div class="row nw"><span class=${`chip ${x.state === 'running' ? 'ok' : ['exited', 'dead'].includes(x.state) ? '' : 'warn'}`}>${x.state}</span>
           ${/\(unhealthy\)/.test(x.status) ? html`<span class="chip bad">unhealthy</span>` : /\(healthy\)/.test(x.status) ? html`<span class="chip ok">healthy</span>` : ''}</div></td>
-        <td class="mono">${x.name}</td><td class="mono ink2 trunc" style=${{ maxWidth: '220px' }} title=${x.image}>${x.image}</td><td class="ink2 nowrap">${x.status}</td>
-        <td class="num">${x.cpu}</td><td class="ink2 nowrap">${x.mem}</td><td class="mono small ink2 trunc" style=${{ maxWidth: '200px' }} title=${x.ports}>${x.ports}</td>
+        <td class="mono">${x.name}</td><td class="mono ink2 trunc max-cell sm hide-sm" title=${x.image}>${x.image}</td><td class="ink2 nowrap hide-sm">${x.status}</td>
+        <td class="num">${x.cpu ? html`<${CellBar} value=${parseFloat(x.cpu) / 100 / cores}>${x.cpu}</${CellBar}>` : '–'}</td>
+        <td class="num nowrap">${x.memPct ? html`<${CellBar} value=${parseFloat(x.memPct) / 100}><span title=${x.mem}>${x.memPct}</span></${CellBar}>` : html`<span class="ink2">${x.mem}</span>`}</td>
+        <td class="mono small ink2 trunc max-cell sm hide-sm" title=${x.ports}>${x.ports}</td>
         <td class="act"><div class="row nw">
           <${Btn} size="sm" kind="ghost" onClick=${() => setHist(x.name)}>History</${Btn}>
           <${Btn} size="sm" kind="ghost" onClick=${() => showLogs(x)}>Logs</${Btn}>
-          ${x.state === 'running' ? html`<${Btn} size="sm" onClick=${() => act(x, 'restart')}>Restart</${Btn}><${Btn} size="sm" kind="danger" onClick=${() => act(x, 'stop')}>Stop</${Btn}>`
-            : html`<${Btn} size="sm" onClick=${() => act(x, 'start')}>Start</${Btn}><${Btn} size="sm" kind="danger" onClick=${() => act(x, 'rm')}>Remove</${Btn}>`}
+          ${x.state === 'running' ? html`<${Btn} size="sm" kind="ghost" onClick=${() => act(x, 'restart')}>Restart</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => act(x, 'stop')}>Stop</${Btn}>`
+            : html`<${Btn} size="sm" kind="ghost" onClick=${() => act(x, 'start')}>Start</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => act(x, 'rm')}>Remove</${Btn}>`}
         </div></td></tr>`)}</tbody></table></div>`}
-    ${logs && html`<${Modal} wide title=${`Logs: ${logs.name}`} onClose=${() => setLogs(null)}><${Output} text=${logs.text} /></${Modal}>`}
+    ${logs && html`<${Modal} wide title=${`Logs: ${logs.name}`} onClose=${() => setLogs(null)}><${Output} name=${logs.name} text=${logs.text} /></${Modal}>`}
     ${hist && html`<${Modal} wide title=${`History: ${hist}`} onClose=${() => setHist(null)}><${ContainerHistory} s=${s} name=${hist} /></${Modal}>`}
   </section>`;
 }
@@ -370,11 +424,12 @@ function ContainersTab({ s }) {
 function ContainerHistory({ s, name }) {
   const [range, setRange] = useState('6h');
   const m = useLoad(() => api(`/api/servers/${s.id}/containers/metrics?name=${encodeURIComponent(name)}&range=${range}`), [s.id, name, range]);
+  const sync = useMemo(() => store(null), []);
   return html`<div class="stack">
-    <div class="seg" role="group" aria-label="Time range">${RANGES.map((r) => html`<button aria-pressed=${r === range} onClick=${() => setRange(r)}>${r}</button>`)}</div>
+    <${RangePicker} value=${range} onChange=${setRange} />
     ${m.error && html`<${ErrorNote} error=${m.error} retry=${m.reload} />`}
-    <${LineChart} title="CPU" data=${m.data} fmt=${(v) => `${v.toFixed(v < 10 ? 1 : 0)}%`} series=${[{ key: 'cpu', label: 'CPU (100% = one core)', color: 'var(--s1)' }]} />
-    <${LineChart} title="Memory" data=${m.data} fmt=${(v) => bytes(v)} series=${[{ key: 'mem', label: 'Memory', color: 'var(--s1)' }]} />
+    <${LineChart} sync=${sync} title="CPU" data=${m.data} fmt=${(v) => `${v.toFixed(v < 10 ? 1 : 0)}%`} series=${[{ key: 'cpu', label: 'CPU (100% = one core)', color: 'var(--s1)' }]} />
+    <${LineChart} sync=${sync} title="Memory" data=${m.data} fmt=${(v) => bytes(v)} series=${[{ key: 'mem', label: 'Memory', color: 'var(--s1)' }]} />
   </div>`;
 }
 
@@ -386,7 +441,7 @@ const EXPOSURE = {
 
 function NetworkTab({ s }) {
   const net = useLoad(() => api(`/api/servers/${s.id}/network`), [s.id]);
-  const [all, setAll] = useState(false);
+  const [all, setAll] = useQuery('ports');
   const [reach, setReach] = useState(null);
   const [ufwDocker, setUfwDocker] = useState(false);
   const n = net.data;
@@ -415,23 +470,23 @@ function NetworkTab({ s }) {
 
     <section class="panel">
       <div class="panel-h"><h2>Open ports</h2><span class="small muted">What is listening, and whether the firewall lets it through.</span>
-        <div class="seg" role="group" aria-label="Show"><button aria-pressed=${!all} onClick=${() => setAll(false)}>Reachable (${exposed.length})</button><button aria-pressed=${all} onClick=${() => setAll(true)}>All (${n.ports.length})</button></div>
+        <div class="seg" role="group" aria-label="Show"><button aria-pressed=${!all} onClick=${() => setAll('')}>Reachable (${exposed.length})</button><button aria-pressed=${!!all} onClick=${() => setAll('all')}>All (${n.ports.length})</button></div>
         <div class="row right">
           <${Btn} size="sm" title="Try a TCP connection to each port from the Fleetdeck host" onClick=${check} disabled=${!exposed.some((p) => p.proto === 'tcp')}>Test from Fleetdeck</${Btn}>
           <${Btn} size="sm" kind="ghost" icon="refresh" title="Refresh" onClick=${() => { setReach(null); net.reload(); }} /></div></div>
       ${!list.length ? html`<${Empty} title=${all ? 'Nothing is listening' : 'Nothing is reachable from outside'}>${!all && n.ports.length ? 'Every listening port is bound to this server only.' : ''}</${Empty}>`
-        : html`<div class="table-wrap"><table class="t"><thead><tr><th class="num">Port</th><th>Listening on</th><th>Program</th><th>Exposure</th>${reach && html`<th title="TCP connect from the Fleetdeck host">From Fleetdeck</th>`}<th class="act"></th></tr></thead>
+        : html`<div class="table-wrap"><table class="t"><thead><tr><th class="num">Port</th><th class="hide-sm">Listening on</th><th>Program</th><th>Exposure</th>${reach && html`<th title="TCP connect from the Fleetdeck host">From Fleetdeck</th>`}<th class="act"></th></tr></thead>
         <tbody>${list.map((p) => html`<tr>
           <td class="num mono nowrap">${p.port}<span class="muted">/${p.proto}</span></td>
-          <td class="mono small ink2">${p.addrs.map((a) => (a === '0.0.0.0' || a === '*' ? 'all IPv4' : a === '::' ? 'all IPv6' : a)).join(', ')}</td>
+          <td class="mono small ink2 hide-sm">${p.addrs.map((a) => (a === '0.0.0.0' || a === '*' ? 'all IPv4' : a === '::' ? 'all IPv6' : a)).join(', ')}</td>
           <td>${p.published.length ? p.published.map((x) => html`<div><span class="tag">docker</span> ${x.container} <span class="muted small">→ ${x.containerPort}</span></div>`) : html`<span class="mono">${p.processes.join(', ') || '–'}</span>`}</td>
           <td><span class=${`chip ${EXPOSURE[p.exposure][0]}`}>${EXPOSURE[p.exposure][1]}</span></td>
           ${reach && html`<td>${p.proto !== 'tcp' || reach[p.port] == null ? html`<span class="muted">–</span>` : reach[p.port] ? html`<span class=${`chip ${p.exposure === 'blocked' ? 'bad' : ''}`} title=${p.exposure === 'blocked' ? 'The firewall should block this, but it answered' : ''}>Reachable</span>` : html`<span class="chip">No answer</span>`}</td>`}
           <td class="act">${['blocked', 'restricted'].includes(p.exposure) && html`<${Btn} size="sm" kind="ghost" onClick=${() => allow(p)}>Allow</${Btn}>`}</td></tr>`)}</tbody></table></div>`}
-      ${reach && html`<div class="panel-b small muted" style=${{ borderTop: '1px solid var(--line)' }}>"From Fleetdeck" shows what the Fleetdeck host can reach. If it sits in the same network or VPN, the internet may see less.</div>`}
+      ${reach && html`<div class="panel-b small muted b-top">"From Fleetdeck" shows what the Fleetdeck host can reach. If it sits in the same network or VPN, the internet may see less.</div>`}
     </section>
 
-    <div class="charts" style=${{ alignItems: 'start' }}>
+    <div class="grid-2">
       <${FirewallPanel} n=${n} onUfwDocker=${canUfwDocker ? () => setUfwDocker(true) : null} />
       <section class="panel"><div class="panel-h"><h2>Interfaces</h2>
         <span class="small muted">${n.gateway ? `Gateway ${n.gateway}${n.gatewayDev ? ` via ${n.gatewayDev}` : ''}` : 'No default route'}${n.dns.length ? ` · DNS ${n.dns.join(', ')}` : ''}</span></div>
@@ -441,7 +496,7 @@ function NetworkTab({ s }) {
           const shown = i.addrs.filter((a) => !/^fe80:/i.test(a));
           return html`<tr>
           <td class="nowrap"><span class="mono">${i.name}</span>${i.state && i.state !== 'UP' && i.state !== 'UNKNOWN' ? html` <span class="chip">${i.state.toLowerCase()}</span>` : ''}</td>
-          <td class="mono small ink2" style=${{ overflowWrap: 'anywhere' }} title=${local.length ? `Link-local: ${local.join(', ')}` : ''}>${shown.length ? shown.map((a) => html`<div>${a}</div>`) : local.length ? html`<span class="muted">link-local only</span>` : '–'}</td>
+          <td class="mono small ink2 wrap-any" title=${local.length ? `Link-local: ${local.join(', ')}` : ''}>${shown.length ? shown.map((a) => html`<div>${a}</div>`) : local.length ? html`<span class="muted">link-local only</span>` : '–'}</td>
           <td class="num small nowrap" title=${i.rxTotal != null ? `${bytes(i.rxTotal)} received, ${bytes(i.txTotal)} sent since boot` : ''}>${i.rx == null ? '–' : html`<div>↓ ${rate(i.rx)}</div><div class="ink2">↑ ${rate(i.tx)}</div>`}</td></tr>`;
         })}</tbody></table></div></section>
     </div>
@@ -453,14 +508,14 @@ function FirewallPanel({ n, onUfwDocker }) {
   const f = n.firewall;
   return html`<section class="panel"><div class="panel-h"><h2>Firewall</h2>
     ${f.kind === 'ufw' ? html`<span class="chip ok">ufw active</span>` : f.kind === 'ufw-inactive' ? html`<span class="chip warn">ufw off</span>` : f.kind === 'firewalld' ? html`<span class="chip ok">firewalld active</span>` : html`<span class="chip warn">None</span>`}</div>
-    <div class="panel-b stack" style=${{ gap: '10px' }}>
+    <div class="panel-b stack sm">
       ${f.kind === 'ufw' && html`<p class="small ink2">Incoming: <b>${f.incoming}</b> · Outgoing: <b>${f.outgoing}</b>${f.routed ? html` · Routed: <b>${f.routed}</b>` : ''}</p>`}
       ${(f.kind === 'none' || f.kind === 'ufw-inactive') && html`<p class="small ink2">Every port listening on a public address is reachable. Turn on ufw from the terminal (allow SSH first: <span class="mono">ufw allow OpenSSH && ufw enable</span>).</p>`}
       ${n.docker && f.kind === 'ufw' && html`<div class="row"><span class="small ink2 grow">Docker ports: ${n.ufwDocker === 'active' ? html`<b>controlled by ufw</b> (ufw-docker). Open one with "Allow" on its port.` : html`<b>bypass ufw.</b> Docker's NAT rules come before ufw's.`}</span>
         ${onUfwDocker && html`<${Btn} size="sm" onClick=${onUfwDocker}>Let ufw control Docker</${Btn}>`}</div>`}
       ${f.kind === 'ufw' && (f.rules.length ? html`<table class="t"><thead><tr><th>To</th><th>Action</th><th>From</th></tr></thead>
         <tbody>${f.rules.map((r) => html`<tr><td class="mono small">${r[0]}</td><td class="small">${r[1]}</td><td class="mono small ink2">${r[2]}</td></tr>`)}</tbody></table>` : html`<p class="small muted">No rules: only the defaults apply.</p>`)}
-      ${f.kind === 'firewalld' && html`<pre class="out" style=${{ maxHeight: '260px' }}>${f.raw}</pre>`}
+      ${f.kind === 'firewalld' && html`<pre class="out short">${f.raw}</pre>`}
     </div></section>`;
 }
 
@@ -487,6 +542,13 @@ function TerminalTab({ s }) {
   const ref = useRef();
   const [state, setState] = useState('connecting');
   const [session, setSession] = useState(0);
+  // Fill the viewport below wherever the terminal starts (alert bars above it vary).
+  useEffect(() => {
+    const fit = () => { const el = ref.current; if (el && !document.fullscreenElement) el.style.height = `${Math.max(320, innerHeight - (el.getBoundingClientRect().top + scrollY) - 24)}px`; };
+    fit();
+    addEventListener('resize', fit);
+    return () => removeEventListener('resize', fit);
+  }, []);
   useEffect(() => {
     let ws;
     let term;
@@ -514,10 +576,13 @@ function TerminalTab({ s }) {
     })().catch((e) => setState(`error: ${e.message}`));
     return () => { disposed = true; ro?.disconnect(); ws?.close(); term?.dispose(); };
   }, [s.id, session]);
-  return html`<div class="stack" style=${{ gap: '10px' }}>
+  const full = () => ref.current.requestFullscreen?.().then(() => ref.current.querySelector('textarea')?.focus()).catch((e) => toast(e.message, 'bad'));
+  return html`<div class="stack sm">
     <div class="row"><span class=${`chip ${state === 'open' ? 'ok' : state === 'closed' ? '' : state.startsWith('error') ? 'bad' : 'info'}`}>${state === 'open' ? `Connected as ${s.user}` : state === 'closed' ? 'Disconnected' : state}</span>
-      <span class="small muted">Sessions are recorded in the audit log (opened, not keystrokes).</span>
-      ${state === 'closed' && html`<button class="btn sm right" onClick=${() => setSession((n) => n + 1)}>Reconnect</button>`}</div>
+      <span class="small muted hide-sm">Sessions are recorded in the audit log (opened, not keystrokes).</span>
+      <div class="row nw right">
+        ${state === 'closed' && html`<button class="btn sm" onClick=${() => setSession((n) => n + 1)}>Reconnect</button>`}
+        <button class="btn sm ghost" onClick=${full} title="Full screen (Esc leaves)"><${Icon} name="full" size=${14} />Full screen</button></div></div>
     <div class="term" ref=${ref} />
   </div>`;
 }
@@ -561,29 +626,29 @@ function SettingsTab({ s }) {
     toast(`${s.name} removed`);
   };
   const key = keys.data?.find((k) => k.id === v.key_id);
-  return html`<div class="charts" style=${{ alignItems: 'start' }}>
+  return html`<div class="grid-2">
     <section class="panel"><div class="panel-h"><h2>Connection</h2></div><div class="panel-b stack">
       ${keys.loading ? html`<${Loading} />` : html`<${ServerForm} value=${v} onChange=${setV} keys=${keys.data || []} hasSudo=${s.has_sudo_password} />`}
       ${s.has_sudo_password && html`<div><button class="btn sm ghost" onClick=${clearSudo}>Remove saved sudo password</button></div>`}
       ${key && html`<div class="field"><span>Public key to authorize on the server</span><${Copy} text=${key.public_key} /></div>`}
       <div class="row"><${Btn} kind="primary" onClick=${save}>Save changes</${Btn}>
         <${Btn} icon="term" onClick=${async () => setTest(await api(`/api/servers/${s.id}/test`, { method: 'POST' }))}>Test connection</${Btn}></div>
-      ${test && (test.ok ? html`<p class="small"><span class="chip ok">Connected as ${test.user}</span> ${{ none: 'No sudo: admin actions will fail. Add the sudo password above.', sudo: 'Passwordless sudo works.', password: 'sudo works with the stored password.', 'wrong-password': 'The server rejected the sudo password.', root: 'Logged in as root.' }[test.privilege]}</p>`
+      ${test && (test.ok ? html`<p class="small"><span class="chip ok">Connected as ${test.user}</span> ${PRIV_TEXT[test.privilege]}</p>`
         : html`<p class="small err">${test.error}</p>`)}
     </div></section>
     <div class="stack">
       <section class="panel"><div class="panel-h"><h2>Host key</h2></div><div class="panel-b stack">
         <p class="ink2 small">Pinned on the first connection. If it changes, Fleetdeck refuses to connect and raises an alert.</p>
-        <span class="mono small" style=${{ overflowWrap: 'anywhere' }}>${s.host_key || 'Not pinned yet'}</span>
+        <span class="mono small wrap-any">${s.host_key || 'Not pinned yet'}</span>
       </div></section>
       <section class="panel"><div class="panel-h"><h2>Monitoring</h2></div><div class="panel-b stack">
+        <label class="check"><input type="checkbox" class="switch" role="switch" checked=${!s.paused} onChange=${(e) => { e.target.checked = !s.paused; pause().catch((x) => toast(x.message, 'bad')); }} />Monitor this server</label>
         <p class="ink2 small">${s.paused ? 'Paused: no checks, no alerts. Jobs and the terminal still work.' : 'Checked every minute. Pause during maintenance to silence alerts.'}</p>
-        <div><${Btn} onClick=${pause}>${s.paused ? 'Resume monitoring' : 'Pause monitoring'}</${Btn}></div>
         <p class="ink2 small">Planned work? Keep monitoring but hold back notifications for a while. Anything still firing afterwards is sent then.</p>
         <div class="row">${[1, 4].map((h) => html`<${Btn} size="sm" onClick=${async () => { await muteFor(s.id, h, `Maintenance on ${s.name}`); toast(`Notifications for ${s.name} muted for ${h} h`, 'ok'); }}>Mute for ${h} h</${Btn}>`)}
           <a class="btn sm ghost" href="#/alerts">Quiet hours</a></div>
       </div></section>
-      <section class="panel"><div class="panel-h"><h2>Remove server</h2></div><div class="panel-b stack">
+      <section class="panel danger-zone"><div class="panel-h"><h2>Remove server</h2></div><div class="panel-b stack">
         <p class="ink2 small">Deletes its history from Fleetdeck. The server itself is not touched.</p>
         <div><${Btn} kind="danger" icon="trash" onClick=${remove}>Remove ${s.name}</${Btn}></div>
       </div></section>

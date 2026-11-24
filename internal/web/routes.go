@@ -235,6 +235,7 @@ type idName struct {
 type firing struct {
 	Message string `db:"message" json:"message"`
 	Since   int64  `db:"since" json:"since"`
+	Metric  string `db:"metric" json:"metric"`
 }
 
 type serverOut struct {
@@ -286,7 +287,7 @@ func serverView(s *db.Server, spark any) (*serverOut, error) {
 		out.Status = "unknown"
 	}
 	var err error
-	out.Firing, err = db.Select[firing](`SELECT message, since FROM alert_state WHERE server_id = ? ORDER BY since`, s.ID)
+	out.Firing, err = db.Select[firing](`SELECT a.message, a.since, r.metric FROM alert_state a JOIN alert_rules r ON r.id = a.rule_id WHERE a.server_id = ? ORDER BY a.since`, s.ID)
 	out.Alerts = len(out.Firing)
 	return out, err
 }
