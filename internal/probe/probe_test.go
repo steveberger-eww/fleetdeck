@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	osexec "os/exec"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"fleetdeck/internal/db"
 	"fleetdeck/internal/sec"
@@ -262,5 +264,63 @@ func TestGPUs(t *testing.T) {
 	b, _ := json.Marshal(none)
 	if strings.Contains(string(b), "gpu") {
 		t.Fatal("no GPU must leave no gpu keys in the snapshot: " + string(b))
+	}
+}
+
+func TestCustomMetrics(t *testing.T) {
+	_, err := db.Exec(`INSERT INTO servers (id, name, host, tags, created_at) VALUES ('cm', 'nas', 'h', 'backup,prod', 0)`)
+	must(t, err)
+	_, err = db.Exec(`INSERT INTO custom_metrics (id, name, command, server_id, tag, created_at) VALUES
+	  ('c-all', 'B all', 'echo 1', NULL, NULL, 0), ('c-tag', 'A tag', 'echo 2', NULL, 'backup', 0),
+	  ('c-other', 'other tag', 'echo 3', NULL, 'web', 0), ('c-mine', 'C mine', 'echo 4', 'cm', NULL, 0)`)
+	must(t, err)
+	srv, err := db.GetServer("cm")
+	must(t, err)
+	cs, err := CustomFor(srv)
+	must(t, err)
+	var ids []string
+	for _, c := range cs {
+		ids = append(ids, c.ID)
+	}
+	eq(t, ids, []string{"c-tag", "c-all", "c-mine"}) // by name; the 'web' tag's metric is not this server's
+
+	s := Parse("custom.a=42\ncustom.b=-1.5e3\ncustom.c=\ncustom.d=12 files\ncustom.e=NaN")
+	f := func(v float64) *float64 { return &v }
+	eq(t, s.Custom, map[string]CustomValue{"a": {V: f(42)}, "b": {V: f(-1500)}, "c": {Err: "no output"}, "d": {Err: `not a number: "12 files"`}, "e": {Err: `not a number: "NaN"`}})
+	eq(t, Parse("x=1").Custom, map[string]CustomValue(nil))
+
+	now := db.Now() / 60_000 * 60_000
+	_, err = db.Exec(`INSERT INTO custom_values (server_id, metric_id, t, v) VALUES ('cm', 'c-all', ?, 10), ('cm', 'c-all', ? + 1, 20), ('cm', 'c-tag', ?, 99)`, now, now, now)
+	must(t, err)
+	sr, err := CustomSeries("cm", "c-all", "1h")
+	must(t, err)
+	eq(t, len(sr.Points), 1)
+	eq(t, *sr.Points[0].V, 15.0)
+}
+
+// The real shell: a hanging command is cut off after 5 s, its siblings still report, and odd quoting survives.
+func TestCustomScriptTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("takes 5 s")
+	}
+	if _, err := osexec.LookPath("timeout"); err != nil {
+		t.Skip("no timeout command")
+	}
+	script := customScript([]Custom{{ID: "hang", Command: "sleep 30 & sleep 30; echo 1"}, {ID: "ok", Command: `printf '%s\n' "4'2" | tr -d "'"`}, {ID: "bad", Command: "echo hi"}}) + "wait\n"
+	start := time.Now()
+	out, err := osexec.Command("sh", "-c", script).Output()
+	must(t, err)
+	if d := time.Since(start); d > 6*time.Second {
+		t.Fatalf("took %v", d)
+	}
+	s := Parse(string(out))
+	f := func(v float64) *float64 { return &v }
+	eq(t, s.Custom, map[string]CustomValue{"hang": {Err: "no output"}, "ok": {V: f(42)}, "bad": {Err: `not a number: "hi"`}})
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }

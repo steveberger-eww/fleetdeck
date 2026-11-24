@@ -321,6 +321,8 @@ svg.spark path.area { fill: var(--accent-soft); stroke: none; }
 .chart-h { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .chart-h h3 { font-size: var(--fs-md); font-weight: 600; }
 .chart-h .now { margin-left: auto; font-size: var(--fs-sm); color: var(--ink-2); }
+.chart-h .chart-act { margin-left: auto; align-self: center; }
+.chart-h .now + .chart-act { margin-left: 0; }
 .legend { display: flex; gap: 14px; font-size: var(--fs-xs); color: var(--muted); }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
 .plot { position: relative; height: 150px; }

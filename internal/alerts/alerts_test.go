@@ -167,7 +167,7 @@ func TestQuietHours(t *testing.T) {
 func TestMetricsAndTypesJSON(t *testing.T) {
 	b, err := json.Marshal(Metrics)
 	must(t, err)
-	eq(t, string(b), `{"down":{"label":"Unreachable","unit":"min","hint":"Fires when the server cannot be reached for N minutes"},"cpu":{"label":"CPU usage","unit":"%","col":"cpu","scale":100,"def":90},"mem":{"label":"Memory usage","unit":"%","col":"mem","scale":100,"def":90},"swap":{"label":"Swap usage","unit":"%","col":"swap","scale":100,"def":50},"disk":{"label":"Disk usage (fullest mount)","unit":"%","def":90},"inodes":{"label":"Inode usage (fullest mount)","unit":"%","def":90},"load":{"label":"Load per CPU core","unit":"","col":"load1","scale":1,"def":1.5},"temp":{"label":"Temperature","unit":"°C","col":"temp","scale":1,"def":80},"updates":{"label":"Pending updates","unit":"","def":0},"security":{"label":"Pending security updates","unit":"","def":0},"failed":{"label":"Failed systemd units","unit":"","def":0},"reboot":{"label":"Reboot required","unit":""},"smart":{"label":"Disks with S.M.A.R.T. problems","unit":"","def":0},"unhealthy":{"label":"Unhealthy or restarting containers","unit":"","def":0},"net":{"label":"Network traffic (in + out)","unit":" MB/s","col":"rx + tx","scale":0.000001,"def":50},"gpu":{"label":"GPU usage (busiest GPU)","unit":"%","col":"gpu","scale":100,"def":90}}`)
+	eq(t, string(b), `{"down":{"label":"Unreachable","unit":"min","hint":"Fires when the server cannot be reached for N minutes"},"cpu":{"label":"CPU usage","unit":"%","col":"cpu","scale":100,"def":90},"mem":{"label":"Memory usage","unit":"%","col":"mem","scale":100,"def":90},"swap":{"label":"Swap usage","unit":"%","col":"swap","scale":100,"def":50},"disk":{"label":"Disk usage (fullest mount)","unit":"%","def":90},"inodes":{"label":"Inode usage (fullest mount)","unit":"%","def":90},"load":{"label":"Load per CPU core","unit":"","col":"load1","scale":1,"def":1.5},"temp":{"label":"Temperature","unit":"°C","col":"temp","scale":1,"def":80},"updates":{"label":"Pending updates","unit":"","def":0},"security":{"label":"Pending security updates","unit":"","def":0},"failed":{"label":"Failed systemd units","unit":"","def":0},"reboot":{"label":"Reboot required","unit":""},"smart":{"label":"Disks with S.M.A.R.T. problems","unit":"","def":0},"unhealthy":{"label":"Unhealthy or restarting containers","unit":"","def":0},"net":{"label":"Network traffic (in + out)","unit":" MB/s","col":"rx + tx","scale":0.000001,"def":50},"gpu":{"label":"GPU usage (busiest GPU)","unit":"%","col":"gpu","scale":100,"def":90},"custom":{"label":"Custom metric","unit":"","hint":"One of your custom metrics, from a server's Metrics panel"}}`)
 	b, err = json.Marshal(Types)
 	must(t, err)
 	eq(t, string(b), `{"webhook":{"label":"Webhook (JSON POST)","fields":[{"key":"url","label":"URL","secret":true}]},"ntfy":{"label":"ntfy","fields":[{"key":"url","label":"Topic URL (https://ntfy.sh/my-topic)"},{"key":"token","label":"Access token (optional)","secret":true,"optional":true}]},"discord":{"label":"Discord","fields":[{"key":"url","label":"Webhook URL","secret":true}]},"slack":{"label":"Slack","fields":[{"key":"url","label":"Incoming webhook URL","secret":true}]},"telegram":{"label":"Telegram","fields":[{"key":"token","label":"Bot token","secret":true},{"key":"chat_id","label":"Chat ID"}]},"pushover":{"label":"Pushover","fields":[{"key":"token","label":"Application API token","secret":true},{"key":"user","label":"User or group key","secret":true},{"key":"device","label":"Device (optional, all devices if empty)","optional":true}]},"gotify":{"label":"Gotify","fields":[{"key":"url","label":"Server URL"},{"key":"token","label":"App token","secret":true}]}}`)
@@ -246,4 +246,39 @@ func TestGPUAlert(t *testing.T) {
 	n, err := db.Get[int](`SELECT COUNT(*) FROM alert_state WHERE rule_id = 'rg1'`)
 	must(t, err)
 	eq(t, *n, 0)
+}
+
+func TestCustomAlert(t *testing.T) {
+	exec(t, `INSERT INTO servers (id, name, host, tags, created_at) VALUES ('c1', 'nas', 'h', 'backup', 0)`)
+	exec(t, `INSERT INTO custom_metrics (id, name, unit, command, tag, created_at) VALUES ('cb', 'Hours since backup', 'h', 'x', 'backup', 0)`)
+	if _, err := ValidateRule(map[string]any{"metric": "custom", "threshold": 26.0}); err == nil {
+		t.Fatal("custom rule without a metric accepted")
+	}
+	r, err := ValidateRule(map[string]any{"metric": "custom", "threshold": 26.0, "custom_id": "cb", "tag": "backup"})
+	must(t, err)
+	eq(t, *r.CustomID, "cb")
+	exec(t, `INSERT INTO alert_rules (id, metric, threshold, tag, custom_id, created_at) VALUES ('rc', 'custom', 26, 'backup', 'cb', 0)`)
+	Evaluate(srv(t, "c1"), probe.Parse("custom.cb=30"), nil)
+	eq(t, message(t, "rc"), "nas: Hours since backup is 30 h (threshold 26 h)")
+
+	// Averaged over minutes: from the stored values, not the snapshot.
+	exec(t, `INSERT INTO custom_values (server_id, metric_id, t, v) VALUES ('c1', 'cb', ?, 10)`, db.Now())
+	exec(t, `UPDATE alert_rules SET minutes = 5 WHERE id = 'rc'`)
+	Evaluate(srv(t, "c1"), probe.Parse("custom.cb=30"), nil)
+	n, err := db.Get[int](`SELECT COUNT(*) FROM alert_state WHERE rule_id = 'rc'`)
+	must(t, err)
+	eq(t, *n, 0)
+
+	exec(t, `DELETE FROM custom_metrics WHERE id = 'cb'`) // the rule goes with it
+	n, err = db.Get[int](`SELECT COUNT(*) FROM alert_rules WHERE id = 'rc'`)
+	must(t, err)
+	eq(t, *n, 0)
+
+	c, err := ValidateCustom(map[string]any{"name": " Backups ", "unit": "files", "command": " ls /var/backups | wc -l ", "tag": "Backup"})
+	must(t, err)
+	eq(t, []any{c.Name, c.Unit, c.Command, *c.Tag, c.ServerID}, []any{"Backups", "files", "ls /var/backups | wc -l", "backup", (*string)(nil)})
+	if _, err := ValidateCustom(map[string]any{"name": "x"}); err == nil {
+		t.Fatal("empty command accepted")
+	}
+	eq(t, []string{UnitSuffix("%"), UnitSuffix("°C"), UnitSuffix("GB"), UnitSuffix("")}, []string{"%", "°C", " GB", ""})
 }

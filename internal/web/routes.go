@@ -394,10 +394,13 @@ type ruleOut struct {
 	alerts.Rule
 	Enabled    bool    `db:"-" json:"enabled"`
 	ServerName *string `db:"server_name" json:"server_name"`
+	CustomName *string `db:"custom_name" json:"custom_name"`
+	CustomUnit *string `db:"custom_unit" json:"custom_unit"`
 }
 
 func rules(where string, args ...any) ([]ruleOut, error) {
-	list, err := db.Select[ruleOut](`SELECT r.*, s.name AS server_name FROM alert_rules r LEFT JOIN servers s ON s.id = r.server_id `+where, args...)
+	list, err := db.Select[ruleOut](`SELECT r.*, s.name AS server_name, c.name AS custom_name, c.unit AS custom_unit FROM alert_rules r
+    LEFT JOIN servers s ON s.id = r.server_id LEFT JOIN custom_metrics c ON c.id = r.custom_id `+where, args...)
 	for i := range list {
 		list[i].Enabled = list[i].Rule.Enabled != 0
 	}
@@ -869,7 +872,7 @@ func (s *Server) serverRoutes() {
 		}
 		ssh.Drop(srv.ID)
 		if err := db.Tx(func(tx *sqlx.Tx) error {
-			for _, q := range []string{`DELETE FROM metrics WHERE server_id = ?`, `DELETE FROM container_metrics WHERE server_id = ?`, `DELETE FROM servers WHERE id = ?`} {
+			for _, q := range []string{`DELETE FROM metrics WHERE server_id = ?`, `DELETE FROM container_metrics WHERE server_id = ?`, `DELETE FROM custom_values WHERE server_id = ?`, `DELETE FROM servers WHERE id = ?`} {
 				if _, err := tx.Exec(q, srv.ID); err != nil {
 					return err
 				}
@@ -957,6 +960,24 @@ func (s *Server) serverRoutes() {
 		})
 	}
 	onServer("GET /api/servers/{id}/metrics", func(c *ctx, srv *db.Server) (any, error) { return probe.Series(srv.ID, c.query("range")) })
+	onServer("GET /api/servers/{id}/custom", func(c *ctx, srv *db.Server) (any, error) {
+		list, err := probe.CustomFor(srv)
+		if err != nil {
+			return nil, err
+		}
+		type out struct {
+			probe.Custom
+			Series *probe.SeriesOf[probe.CustomPoint] `json:"series"`
+		}
+		res := make([]out, len(list))
+		for i, m := range list {
+			res[i].Custom = m
+			if res[i].Series, err = probe.CustomSeries(srv.ID, m.ID, c.query("range")); err != nil {
+				return nil, err
+			}
+		}
+		return res, nil
+	})
 	onServer("GET /api/servers/{id}/services", func(c *ctx, srv *db.Server) (any, error) { return admin.Services(c.r.Context(), srv) })
 	onServer("GET /api/servers/{id}/services/status", func(c *ctx, srv *db.Server) (any, error) {
 		text, err := admin.ServiceStatus(c.r.Context(), srv, c.query("unit"))
@@ -1781,7 +1802,76 @@ func (s *Server) alertRoutes() {
 			return nil, err
 		}
 		history, err := db.Rows(`SELECT * FROM events WHERE kind = 'alert' ORDER BY id DESC LIMIT 100`)
-		return J{"metrics": alerts.Metrics, "rules": list, "firing": firing, "history": history}, err
+		if err != nil {
+			return nil, err
+		}
+		custom, err := db.Select[probe.Custom](`SELECT * FROM custom_metrics ORDER BY name COLLATE NOCASE`)
+		return J{"metrics": alerts.Metrics, "rules": list, "firing": firing, "history": history, "custom": custom}, err
+	})
+
+	// ---- custom metrics (shown on the server page, alertable here) ----
+	scopeText := func(c *probe.Custom) string {
+		switch {
+		case c.ServerID != nil:
+			if srv, _ := db.GetServer(*c.ServerID); srv != nil {
+				return "on " + srv.Name
+			}
+		case db.Str(c.Tag) != "":
+			return "for tag " + *c.Tag
+		}
+		return "for all servers"
+	}
+	s.route("POST /api/custom-metrics", func(c *ctx) (any, error) {
+		v, err := alerts.ValidateCustom(c.body)
+		if err != nil {
+			return nil, err
+		}
+		v.ID, v.CreatedAt = db.NewID(), db.Now()
+		if err := exec(`INSERT INTO custom_metrics (id, name, unit, command, server_id, tag, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			v.ID, v.Name, v.Unit, v.Command, v.ServerID, v.Tag, v.CreatedAt); err != nil {
+			return nil, err
+		}
+		c.audit(fmt.Sprintf("Added custom metric %q %s, runs as root: %s", v.Name, scopeText(v), v.Command), db.Str(v.ServerID))
+		return v, nil
+	})
+	s.route("PUT /api/custom-metrics/{id}", func(c *ctx) (any, error) {
+		old, err := db.Get[probe.Custom](`SELECT * FROM custom_metrics WHERE id = ?`, c.param("id"))
+		if old == nil || err != nil {
+			return nil, cmpErr(err, notFound("Custom metric"))
+		}
+		v, err := alerts.ValidateCustom(merge(toObj(old), c.body))
+		if err != nil {
+			return nil, err
+		}
+		v.ID, v.CreatedAt = old.ID, old.CreatedAt
+		if err := exec(`UPDATE custom_metrics SET name = ?, unit = ?, command = ?, server_id = ?, tag = ? WHERE id = ?`,
+			v.Name, v.Unit, v.Command, v.ServerID, v.Tag, v.ID); err != nil {
+			return nil, err
+		}
+		msg := fmt.Sprintf("Changed custom metric %q %s", v.Name, scopeText(v))
+		if v.Command != old.Command {
+			msg += ", runs as root: " + v.Command
+		}
+		c.audit(msg, db.Str(v.ServerID))
+		return v, nil
+	})
+	s.route("DELETE /api/custom-metrics/{id}", func(c *ctx) (any, error) {
+		old, err := db.Get[probe.Custom](`SELECT * FROM custom_metrics WHERE id = ?`, c.param("id"))
+		if old == nil || err != nil {
+			return nil, cmpErr(err, notFound("Custom metric"))
+		}
+		if err := db.Tx(func(tx *sqlx.Tx) error { // its alert rules go with it (ON DELETE CASCADE)
+			for _, q := range []string{`DELETE FROM custom_values WHERE metric_id = ?`, `DELETE FROM custom_metrics WHERE id = ?`} {
+				if _, err := tx.Exec(q, old.ID); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		c.audit(fmt.Sprintf("Deleted custom metric %q", old.Name), db.Str(old.ServerID))
+		return okResp, nil
 	})
 	s.route("POST /api/alerts/rules", func(c *ctx) (any, error) {
 		v, err := alerts.ValidateRule(c.body)
@@ -1789,8 +1879,8 @@ func (s *Server) alertRoutes() {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO alert_rules (id, server_id, tag, metric, threshold, minutes, enabled, created_at, mount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, db.Now(), v.Mount); err != nil {
+		if err := exec(`INSERT INTO alert_rules (id, server_id, tag, metric, threshold, minutes, enabled, created_at, mount, custom_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, db.Now(), v.Mount, v.CustomID); err != nil {
 			return nil, err
 		}
 		c.audit("Created alert rule "+v.Metric, "")
@@ -1807,8 +1897,8 @@ func (s *Server) alertRoutes() {
 		if err != nil {
 			return nil, err
 		}
-		if err := exec(`UPDATE alert_rules SET server_id = ?, tag = ?, metric = ?, threshold = ?, minutes = ?, enabled = ?, mount = ? WHERE id = ?`,
-			v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, v.Mount, old.ID); err != nil {
+		if err := exec(`UPDATE alert_rules SET server_id = ?, tag = ?, metric = ?, threshold = ?, minutes = ?, enabled = ?, mount = ?, custom_id = ? WHERE id = ?`,
+			v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, v.Mount, v.CustomID, old.ID); err != nil {
 			return nil, err
 		}
 		if err := exec(`DELETE FROM alert_state WHERE rule_id = ?`, old.ID); err != nil { // re-evaluated on the next probe

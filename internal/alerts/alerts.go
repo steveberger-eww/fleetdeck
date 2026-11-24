@@ -67,6 +67,7 @@ var Metrics = MetricList{
 	{Key: "unhealthy", Label: "Unhealthy or restarting containers", Unit: "", Def: def(0)},
 	{Key: "net", Label: "Network traffic (in + out)", Unit: " MB/s", Col: "rx + tx", Scale: 1e-6, Def: def(50)},
 	{Key: "gpu", Label: "GPU usage (busiest GPU)", Unit: "%", Col: "gpu", Scale: 100, Def: def(90)},
+	{Key: "custom", Label: "Custom metric", Unit: "", Hint: "One of your custom metrics, from a server's Metrics panel"},
 }
 
 // ordered writes a JSON object with keys in slice order (Go maps would sort them).
@@ -218,7 +219,8 @@ type Rule struct {
 	Enabled   int     `db:"enabled" json:"enabled"`
 	CreatedAt int64   `db:"created_at" json:"created_at"`
 	Tag       *string `db:"tag" json:"tag"`
-	Mount     *string `db:"mount" json:"mount"` // disk and inodes only; nil = the fullest mount
+	Mount     *string `db:"mount" json:"mount"`         // disk and inodes only; nil = the fullest mount
+	CustomID  *string `db:"custom_id" json:"custom_id"` // metric "custom" only
 }
 
 // Label names what a rule watches, e.g. "Disk usage on /data" for a mount-specific rule.
@@ -255,7 +257,47 @@ func ValidateRule(b map[string]any) (*Rule, error) {
 		}
 		mount = &mt
 	}
-	return &Rule{Metric: metric, Threshold: threshold, Minutes: int64(minutes), ServerID: serverID, Tag: tag, Mount: mount, Enabled: enabled(b)}, nil
+	var customID *string
+	if metric == "custom" {
+		id := orEmpty(b["custom_id"])
+		ok, err := db.Get[int](`SELECT 1 FROM custom_metrics WHERE id = ?`, id)
+		if err != nil {
+			return nil, err
+		}
+		if ok == nil {
+			return nil, httperr.Bad("Pick a custom metric")
+		}
+		customID = &id
+	}
+	return &Rule{Metric: metric, Threshold: threshold, Minutes: int64(minutes), ServerID: serverID, Tag: tag, Mount: mount, CustomID: customID, Enabled: enabled(b)}, nil
+}
+
+// ValidateCustom checks a custom metric from a request body. It fills everything but ID and CreatedAt.
+func ValidateCustom(b map[string]any) (*probe.Custom, error) {
+	c := &probe.Custom{Name: cut(strings.TrimSpace(orEmpty(b["name"])), 60), Unit: cut(strings.TrimSpace(orEmpty(b["unit"])), 16),
+		Command: strings.TrimSpace(orEmpty(b["command"]))}
+	if c.Name == "" {
+		return nil, httperr.Bad("Name is required")
+	}
+	if c.Command == "" {
+		return nil, httperr.Bad("Command is required")
+	}
+	if len(c.Command) > 2000 || strings.ContainsRune(c.Command, 0) {
+		return nil, httperr.Bad("The command must be at most 2000 characters")
+	}
+	var err error
+	if c.ServerID, c.Tag, err = scope(b); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// UnitSuffix puts a space before a unit, except for % and degrees: "12 GB", "95%", "40°C".
+func UnitSuffix(u string) string {
+	if u == "" || strings.HasPrefix(u, "%") || strings.HasPrefix(u, "°") {
+		return u
+	}
+	return " " + u
 }
 
 func currentValue(r *Rule, m *Metric, s *db.Server, snap *probe.Snapshot) (*float64, error) {
@@ -290,6 +332,16 @@ func currentValue(r *Rule, m *Metric, s *db.Server, snap *probe.Snapshot) (*floa
 		return snap.Temp, nil
 	case "gpu":
 		return pct(snap.GPU), nil
+	case "custom":
+		id := db.Str(r.CustomID)
+		if r.Minutes > 0 {
+			v, err := db.Get[sql.NullFloat64](`SELECT AVG(v) v FROM custom_values WHERE server_id = ? AND metric_id = ? AND t >= ?`, s.ID, id, db.Now()-r.Minutes*60e3)
+			if err != nil || v == nil || !v.Valid {
+				return nil, err
+			}
+			return ptr(v.Float64), nil
+		}
+		return snap.Custom[id].V, nil
 	case "net":
 		if snap.Rx == nil {
 			return nil, nil
@@ -468,6 +520,7 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 		return err
 	}
 	tags := strings.Split(s.Tags, ",")
+	var customs map[string]*probe.Custom
 	for i := range rules {
 		r := &rules[i]
 		// Tag no longer on this server: drop its alert silently instead of leaving it firing forever.
@@ -480,6 +533,25 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 		m := Metrics.Get(r.Metric)
 		if m == nil {
 			continue
+		}
+		if r.Metric == "custom" { // name and unit come from the custom metric
+			if customs == nil {
+				list, err := db.Select[probe.Custom](`SELECT * FROM custom_metrics`)
+				if err != nil {
+					return err
+				}
+				customs = map[string]*probe.Custom{}
+				for j := range list {
+					customs[list[j].ID] = &list[j]
+				}
+			}
+			c := customs[db.Str(r.CustomID)]
+			if c == nil {
+				continue
+			}
+			cm := *m
+			cm.Label, cm.Unit = c.Name, UnitSuffix(c.Unit)
+			m = &cm
 		}
 		var firing bool
 		var msg string
@@ -511,7 +583,7 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 					vs = fmtNum(*v)
 				}
 				avg := ""
-				if r.Minutes != 0 && m.Col != "" {
+				if r.Minutes != 0 && (m.Col != "" || r.Metric == "custom") {
 					avg = fmt.Sprintf(", %d min avg", r.Minutes)
 				}
 				msg = fmt.Sprintf("%s: %s is %s%s (threshold %s%s%s)", s.Name, r.Label(m), vs, m.Unit, fmtNum(r.Threshold), m.Unit, avg)

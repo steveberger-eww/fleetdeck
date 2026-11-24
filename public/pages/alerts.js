@@ -4,7 +4,8 @@ import {
 } from '../ui.js';
 
 const NEEDS_THRESHOLD = (m) => !['down', 'reboot'].includes(m);
-const HAS_DURATION = (m) => ['down', 'cpu', 'mem', 'swap', 'load', 'temp', 'net', 'gpu'].includes(m);
+const HAS_DURATION = (m) => ['down', 'cpu', 'mem', 'swap', 'load', 'temp', 'net', 'gpu', 'custom'].includes(m);
+const unitOf = (u) => (!u ? '' : /^[%°]/.test(u) ? u : ` ${u}`);
 const HAS_MOUNT = (m) => ['disk', 'inodes'].includes(m);
 const inScope = (r, servers) => servers.filter((s) => (r.server_id ? s.id === r.server_id : !r.tag || s.tags.includes(r.tag)));
 // Servers in the rule's scope that report disks but not the rule's mount.
@@ -14,6 +15,7 @@ function ruleText(r, metrics) {
   const m = metrics[r.metric];
   if (r.metric === 'down') return `Unreachable for ${r.minutes} min`;
   if (r.metric === 'reboot') return 'Reboot required';
+  if (r.metric === 'custom') return `${r.custom_name} above ${r.threshold}${unitOf(r.custom_unit)}${r.minutes ? ` for ${r.minutes} min` : ''}`;
   const label = r.mount ? `${m.label.replace(' (fullest mount)', '')} on ${r.mount}` : m.label;
   return `${label} above ${r.threshold}${m.unit}${HAS_DURATION(r.metric) && r.minutes ? ` for ${r.minutes} min` : ''}`;
 }
@@ -27,7 +29,7 @@ export function AlertsPage() {
   const servers = useStore(serversStore) || [];
   if (a.loading || n.loading) return html`<div class="page"><${Loading} /></div>`;
   if (a.error) return html`<div class="page"><${ErrorNote} error=${a.error} retry=${a.reload} /></div>`;
-  const { metrics, rules, firing, history } = a.data;
+  const { metrics, rules, firing, history, custom } = a.data;
 
   const toggleRule = async (r) => { await api(`/api/alerts/rules/${r.id}`, { method: 'PUT', body: { enabled: !r.enabled } }); a.reload(true); };
   const delRule = async (r) => {
@@ -87,7 +89,7 @@ export function AlertsPage() {
         <td class="nowrap ink2 shrink" title=${when(e.t)}>${ago(e.t)}</td><td class="shrink"><span class=${`chip ${e.level === 'error' ? 'bad' : 'ok'}`}>${e.level === 'error' ? 'Fired' : 'Resolved'}</span></td><td>${e.message.replace(/^(Firing|Resolved): /, '')}</td></tr>`)}</tbody></table></div>`}
     </section>
 
-    ${rule && html`<${RuleDialog} rule=${rule} metrics=${metrics} onClose=${() => setRule(null)} onSaved=${() => { setRule(null); a.reload(true); }} />`}
+    ${rule && html`<${RuleDialog} rule=${rule} metrics=${metrics} custom=${custom} onClose=${() => setRule(null)} onSaved=${() => { setRule(null); a.reload(true); }} />`}
     ${channel && html`<${ChannelDialog} channel=${channel} types=${n.data.types} onClose=${() => setChannel(null)} onSaved=${() => { setChannel(null); n.reload(true); }} />`}
   </div>`;
 }
@@ -148,21 +150,21 @@ function QuietDialog({ tz, onClose, onSaved }) {
   </${Modal}>`;
 }
 
-function RuleDialog({ rule, metrics, onClose, onSaved }) {
+function RuleDialog({ rule, metrics, custom, onClose, onSaved }) {
   const servers = useStore(serversStore) || [];
   const tags = [...new Set(servers.flatMap((s) => s.tags))].sort();
   // scope: '' = all servers, 'tag:<name>', or a server id
-  const [v, setV] = useState({ metric: 'cpu', threshold: 90, minutes: 5, enabled: true, ...rule, mount: rule.mount || '', scope: rule.server_id || (rule.tag ? `tag:${rule.tag}` : '') });
+  const [v, setV] = useState({ metric: 'cpu', threshold: 90, minutes: 5, enabled: true, ...rule, mount: rule.mount || '', custom_id: rule.custom_id || custom[0]?.id || '', scope: rule.server_id || (rule.tag ? `tag:${rule.tag}` : '') });
   const dirty = useDirty(v);
   const [err, setErr] = useState('');
-  const m = metrics[v.metric];
+  const m = v.metric === 'custom' ? { ...metrics.custom, unit: custom.find((c) => c.id === v.custom_id)?.unit || '' } : metrics[v.metric];
   const tagOf = v.scope.startsWith('tag:') && v.scope.slice(4);
   const mounts = [...new Set(inScope({ server_id: tagOf ? null : v.scope, tag: tagOf }, servers).flatMap((s) => (s.snapshot?.disks || []).map((d) => d.mount)))].sort();
   const save = async () => {
     setErr('');
     try {
       const tag = v.scope.startsWith('tag:') ? v.scope.slice(4) : null;
-      const body = { metric: v.metric, enabled: v.enabled, threshold: Number(v.threshold), minutes: Number(v.minutes), tag, server_id: tag ? null : v.scope || null, mount: HAS_MOUNT(v.metric) ? v.mount : null };
+      const body = { metric: v.metric, enabled: v.enabled, threshold: Number(v.threshold), minutes: Number(v.minutes), tag, server_id: tag ? null : v.scope || null, mount: HAS_MOUNT(v.metric) ? v.mount : null, custom_id: v.metric === 'custom' ? v.custom_id : null };
       await api(rule.id ? `/api/alerts/rules/${rule.id}` : '/api/alerts/rules', { method: rule.id ? 'PUT' : 'POST', body });
       onSaved();
     } catch (e) { setErr(e.message); }
@@ -170,6 +172,8 @@ function RuleDialog({ rule, metrics, onClose, onSaved }) {
   return html`<${Modal} title=${rule.id ? 'Edit rule' : 'Add rule'} onClose=${onClose} dirty=${dirty}
     footer=${html`<${Footer} onClose=${onClose} onSave=${save} label="Save rule" />`}>
     <${Field} label="Alert when"><select value=${v.metric} onChange=${(e) => setV({ ...v, metric: e.target.value, threshold: metrics[e.target.value].def ?? v.threshold })}>${Object.entries(metrics).map(([k, x]) => html`<option value=${k}>${x.label}</option>`)}</select></${Field}>
+    ${v.metric === 'custom' && html`<${Field} label="Custom metric" hint=${!custom.length ? "Add one in a server's Metrics panel first." : null}><select value=${v.custom_id} onChange=${(e) => setV({ ...v, custom_id: e.target.value })}>
+      ${custom.map((c) => html`<option value=${c.id}>${c.name}${c.unit ? ` (${c.unit})` : ''}</option>`)}</select></${Field}>`}
     <div class="cols">
       ${NEEDS_THRESHOLD(v.metric) && html`<${Field} label=${`Is above${m.unit ? ` (${m.unit})` : ''}`}><input type="number" min="0" step="any" value=${v.threshold} onInput=${(e) => setV({ ...v, threshold: e.target.value })} /></${Field}>`}
       ${HAS_DURATION(v.metric) && html`<${Field} label=${v.metric === 'down' ? 'For at least (minutes)' : 'Averaged over (minutes)'} hint=${v.metric !== 'down' ? '0 uses the latest value' : null}><input type="number" min="0" max="1440" value=${v.minutes} onInput=${(e) => setV({ ...v, minutes: e.target.value })} /></${Field}>`}
