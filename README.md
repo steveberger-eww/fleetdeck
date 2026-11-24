@@ -21,7 +21,7 @@ Fleetdeck combines the core ideas of three projects in a single binary:
 
 | Inspired by | In Fleetdeck |
 |---|---|
-| **Beszel** | Per-minute metrics (CPU, memory, swap, disk and inodes per mount, disk I/O, network, load, temperature) with 30 days of history. Per-interface traffic and 30-day traffic totals, Docker containers with health and history, S.M.A.R.T. disk health. Alert rules for all servers, a tag or one server (disk and inode rules can watch one mount), sent via ntfy, Pushover, Discord, Slack, Telegram, Gotify or a webhook. Quiet hours and maintenance windows. |
+| **Beszel** | Per-minute metrics (CPU, memory, swap, disk and inodes per mount, disk I/O, network, load, temperature, NVIDIA and AMD GPUs) with 30 days of history. Per-interface traffic and 30-day traffic totals, Docker containers with health and history, S.M.A.R.T. disk health. Alert rules for all servers, a tag or one server (disk and inode rules can watch one mount), sent via ntfy, Pushover, Discord, Slack, Telegram, Gotify or a webhook. Quiet hours and maintenance windows. |
 | **Semaphore** | Script library with parameters (text, checkbox, choice) and encrypted shared variables. Run on servers, tags or everything. Jobs stream live, keep their output and can be cancelled or re-run (all hosts or failed only). Cron schedules, webhook URLs, an encrypted SSH key store, and **Git repositories with Ansible playbooks** (dry runs, per-host results). |
 | **Cockpit** | Per-server pages: package updates with install history, an OS end-of-life warning, services running replaced code, automatic updates, systemd services and timers, journal, processes, containers, a network tab (open ports checked against the real firewall, incl. Docker ports that bypass ufw, one-click [ufw-docker](https://github.com/chaifeng/ufw-docker)), a web terminal and system info. Every authorized SSH key across the fleet, with one-click removal. |
 
@@ -84,6 +84,7 @@ Every server is probed once a minute over its pooled SSH connection. New install
 - **Disk and inode rules** watch the fullest mount by default, or one mount such as `/data`. If that mount disappears, the rule stays quiet and shows **Mount not found** in the rule list.
 - **Traffic totals** next to the Network chart (and on the Overview) add up the last 30 days, or the retention period if it's shorter. Time when the probe was down counts as zero.
 - **OS end of life:** the server header shows an amber chip in the last six months of security support, and a red one after it ends. The Overview shows a warning icon. Covers Debian (LTS), Ubuntu (standard support), RHEL, Alma, Rocky and Fedora.
+- **GPUs:** NVIDIA cards are read with `nvidia-smi` (needs the NVIDIA driver), AMD cards from `/sys/class/drm` (no extra tools). The Metrics panel gets a GPU chart (busiest GPU's usage and memory) on servers that have one, and System lists every card. Intel GPUs aren't supported.
 - **Update history** lives in the server's Updates panel: the last 30 apt or dnf transactions, with what was installed, upgraded or removed and whether unattended-upgrades did it.
 
 > [!NOTE]

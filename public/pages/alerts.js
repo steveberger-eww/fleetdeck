@@ -4,7 +4,7 @@ import {
 } from '../ui.js';
 
 const NEEDS_THRESHOLD = (m) => !['down', 'reboot'].includes(m);
-const HAS_DURATION = (m) => ['down', 'cpu', 'mem', 'swap', 'load', 'temp', 'net'].includes(m);
+const HAS_DURATION = (m) => ['down', 'cpu', 'mem', 'swap', 'load', 'temp', 'net', 'gpu'].includes(m);
 const HAS_MOUNT = (m) => ['disk', 'inodes'].includes(m);
 const inScope = (r, servers) => servers.filter((s) => (r.server_id ? s.id === r.server_id : !r.tag || s.tags.includes(r.tag)));
 // Servers in the rule's scope that report disks but not the rule's mount.
