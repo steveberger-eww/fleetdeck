@@ -676,7 +676,7 @@ func OnJobDone(tenant string, id int64, name, status, actor string, runStatuses 
 	if status != "failed" || mode == "off" {
 		return
 	}
-	if mode == "scheduled" && !strings.HasPrefix(actor, "schedule") && !strings.HasPrefix(actor, "webhook") { // unattended runs
+	if mode == "scheduled" && !strings.HasPrefix(actor, "schedule") && !strings.HasPrefix(actor, "webhook") && !strings.HasPrefix(actor, "chain") { // unattended runs
 		return
 	}
 	bad := 0

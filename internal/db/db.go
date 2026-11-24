@@ -189,6 +189,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   hash TEXT PRIMARY KEY, created_at BIGINT NOT NULL, seen_at BIGINT NOT NULL, ip TEXT, ua TEXT,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, tenant_id TEXT REFERENCES tenants(id) ON DELETE SET NULL,
   locked INTEGER NOT NULL DEFAULT 0);
+
+-- Script chains: after a job of this script, run next_script_id on the same servers.
+-- next_when: success | failure | always; next_ok_only = 1: only on the servers where this step succeeded.
+ALTER TABLE scripts ADD COLUMN IF NOT EXISTS next_script_id TEXT REFERENCES scripts(id) ON DELETE SET NULL;
+ALTER TABLE scripts ADD COLUMN IF NOT EXISTS next_when TEXT NOT NULL DEFAULT 'success';
+ALTER TABLE scripts ADD COLUMN IF NOT EXISTS next_ok_only INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS parent_job BIGINT; -- the chain step that started this job
+CREATE INDEX IF NOT EXISTS jobs_parent ON jobs(parent_job);
 `
 
 // Open opens the Postgres database at url and creates or updates the schema. dataDir (created 0700) holds the files.

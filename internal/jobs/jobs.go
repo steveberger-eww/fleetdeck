@@ -192,6 +192,9 @@ type Script struct {
 	RepoID      *string `db:"repo_id" json:"repo_id"`
 	Playbook    *string `db:"playbook" json:"playbook"`
 	Vars        Names   `db:"vars" json:"vars"`
+	NextScript  *string `db:"next_script_id" json:"next_script_id"` // chain: run this script next
+	NextWhen    string  `db:"next_when" json:"next_when"`           // success | failure | always
+	NextOKOnly  bool    `db:"next_ok_only" json:"next_ok_only"`     // only on the servers where this one succeeded
 }
 
 // GetScript loads a script (nil, nil if missing).
@@ -215,6 +218,10 @@ type ScriptInput struct {
 	AsRoot      *bool    `json:"as_root"` // nil = true
 	Params      []Param  `json:"params"`
 	Vars        []string `json:"vars"`
+	NextScript  string   `json:"next_script_id"`
+	NextWhen    string   `json:"next_when"`
+	NextOKOnly  bool     `json:"next_ok_only"`
+	Self        string   `json:"-"` // the script's own id when editing: it can't chain to itself
 }
 
 // ScriptFields are the validated columns to store.
@@ -227,6 +234,9 @@ type ScriptFields struct {
 	Description string
 	AsRoot      int
 	Params      Params
+	NextScript  *string
+	NextWhen    string
+	NextOKOnly  int
 }
 
 var identRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
@@ -285,7 +295,23 @@ func ValidateScript(tenant string, b ScriptInput) (*ScriptFields, error) {
 			return nil, httperr.Bad(fmt.Sprintf("\"%s\" is both a parameter and a shared variable", p.Name))
 		}
 	}
-	out := &ScriptFields{Vars: vars, Name: name, Body: body, Kind: kind, Description: truncate(b.Description, 500), AsRoot: 1, Params: Params{}}
+	out := &ScriptFields{Vars: vars, Name: name, Body: body, Kind: kind, Description: truncate(b.Description, 500), AsRoot: 1, Params: Params{}, NextWhen: "success"}
+	if b.NextScript != "" {
+		if b.NextScript == b.Self {
+			return nil, httperr.Bad("A script can't run itself next")
+		}
+		// A shared script (tenant "") may only chain to another shared one: ScriptFor then matches the library only.
+		if next, err := ScriptFor(tenant, b.NextScript); next == nil || err != nil {
+			return nil, cmp.Or(err, httperr.Bad("Unknown next script"))
+		}
+		if !slices.Contains([]string{"success", "failure", "always"}, b.NextWhen) {
+			return nil, httperr.Bad("Run the next script on success, failure or always")
+		}
+		out.NextScript, out.NextWhen = &b.NextScript, b.NextWhen
+		if b.NextOKOnly {
+			out.NextOKOnly = 1
+		}
+	}
 	if kind == "ansible" {
 		out.RepoID, out.Playbook = &b.RepoID, &b.Playbook
 	}
@@ -464,6 +490,7 @@ type Spec struct {
 	Actor    string
 	TenantID string // the organization the job runs in; targets resolve within it
 	Member   string // a user who sees only their assigned servers; "" = every server of the organization
+	Parent   int64  // the job whose chain started this one (0 = none)
 }
 
 // SpecFromScript is everything needed to start a job from a saved script (Targets and Actor still to set).
@@ -688,16 +715,20 @@ func insertJob(sp Spec, servers []db.Server, ansible bool) (int64, error) {
 	var id int64
 	err := db.Tx(func(tx db.Txn) error {
 		var err error
+		var parent any
+		if sp.Parent != 0 {
+			parent = sp.Parent
+		}
 		asRoot := 0
 		if sp.AsRoot {
 			asRoot = 1
 		}
 		if ansible {
-			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at, kind, repo_id, options) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now(), "ansible", nullable(sp.RepoID), sp.Options)
+			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at, kind, repo_id, options, parent_job) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now(), "ansible", nullable(sp.RepoID), sp.Options, parent)
 		} else {
-			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now())
+			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at, parent_job) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now(), parent)
 		}
 		if err != nil {
 			return err
@@ -990,6 +1021,8 @@ type Job struct {
 	RepoID     *string `db:"repo_id" json:"repo_id"`
 	Options    Options `db:"options" json:"options"`
 	CommitSHA  *string `db:"commit_sha" json:"commit_sha"`
+	ParentJob  *int64  `db:"parent_job" json:"parent_job"`
+	NextJob    *int64  `db:"-" json:"next_job"` // the job this one's chain started
 	Runs       []Run   `db:"-" json:"runs"`
 }
 
@@ -999,6 +1032,9 @@ func loadJob(id int64) (*Job, error) {
 		return nil, err
 	}
 	if j.Runs, err = db.Select[Run](`SELECT * FROM job_runs WHERE job_id = ? ORDER BY server_name`, id); err != nil {
+		return nil, err
+	}
+	if j.NextJob, err = db.Get[int64](`SELECT id FROM jobs WHERE parent_job = ? ORDER BY id LIMIT 1`, id); err != nil {
 		return nil, err
 	}
 	if j.Params == nil {
@@ -1144,6 +1180,73 @@ func IsRunning(id int64) bool {
 	mu.Lock()
 	defer mu.Unlock()
 	return live[id] != nil
+}
+
+// ---------- chains ----------
+
+// MaxChain is how many jobs one chain runs at most, the first one included.
+const MaxChain = 10
+
+// chain is a job-done listener: it starts the script the finished job's script runs next, if any.
+// Cancelled jobs and dry runs never continue. The next step gets its own parameter defaults.
+func chain(tenant string, id int64, _, status, _ string, _ []string) {
+	if status != "success" && status != "failed" {
+		return
+	}
+	fail := func(err error) {
+		db.Event("job", fmt.Sprintf("Job #%d: next script in the chain not started: %s", id, err), db.EventOpts{Level: "error", TenantID: tenant})
+	}
+	j, err := loadJob(id)
+	if err != nil || j == nil || j.ScriptID == nil || (j.Options.Check != nil && *j.Options.Check) {
+		return
+	}
+	sc, err := ScriptFor(tenant, *j.ScriptID) // as it is now: an edit since the start counts
+	if err != nil || sc == nil || sc.NextScript == nil {
+		return
+	}
+	if sc.NextWhen != "always" && sc.NextWhen != map[string]string{"success": "success", "failed": "failure"}[status] {
+		return
+	}
+	depth := 1
+	for p := j.ParentJob; p != nil && depth < MaxChain; depth++ {
+		up, err := db.Get[*int64](`SELECT parent_job FROM jobs WHERE id = ?`, *p)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if p = nil; up != nil {
+			p = *up
+		}
+	}
+	if depth >= MaxChain {
+		fail(fmt.Errorf("stopped after %d steps", MaxChain))
+		return
+	}
+	next, err := ScriptFor(tenant, *sc.NextScript)
+	if err != nil || next == nil {
+		fail(cmp.Or(err, errors.New("the script no longer exists")))
+		return
+	}
+	params, err := next.Resolve(Values{})
+	if err != nil {
+		fail(err)
+		return
+	}
+	servers := []string{}
+	for _, r := range j.Runs {
+		if r.ServerID != Ansible && (!sc.NextOKOnly || r.Status == "success") {
+			servers = append(servers, r.ServerID)
+		}
+	}
+	if len(servers) == 0 {
+		fail(errors.New("no server succeeded"))
+		return
+	}
+	sp := SpecFromScript(next, params, false)
+	sp.Targets, sp.Actor, sp.TenantID, sp.Parent = Targets{Servers: servers, Tags: []string{}}, fmt.Sprintf("chain from #%d", id), tenant, id
+	if _, err := StartJob(sp); err != nil {
+		fail(err)
+	}
 }
 
 // ---------- cron ----------
@@ -1440,6 +1543,7 @@ func Start() error {
 	if err := Seed(); err != nil {
 		return err
 	}
+	OnJobDone(chain)
 	if _, err := db.Exec(`UPDATE job_runs SET status = 'interrupted' WHERE status IN ('running', 'queued')`); err != nil {
 		return err
 	}

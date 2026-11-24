@@ -145,7 +145,8 @@ func sudoField(b obj) (enc *string, keep bool, err error) {
 }
 
 func scriptInput(b obj) jobs.ScriptInput {
-	in := jobs.ScriptInput{Name: b.str("name"), Description: b.str("description"), Body: b.str("body"), RepoID: b.str("repo_id"), Playbook: b.str("playbook")}
+	in := jobs.ScriptInput{Name: b.str("name"), Description: b.str("description"), Body: b.str("body"), RepoID: b.str("repo_id"), Playbook: b.str("playbook"),
+		NextScript: b.str("next_script_id"), NextWhen: b.strOr("next_when", "success"), NextOKOnly: b.truthy("next_ok_only")}
 	if b["kind"] == "ansible" {
 		in.Kind = "ansible"
 	}
@@ -1092,8 +1093,9 @@ func (s *Server) libraryRoutes() {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
-			id, scope, v.Name, v.Description, v.Body, v.AsRoot, v.Params, db.Now(), v.Kind, v.RepoID, v.Playbook, v.Vars); err != nil {
+		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars, next_script_id, next_when, next_ok_only)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, scope, v.Name, v.Description, v.Body, v.AsRoot, v.Params, db.Now(), v.Kind, v.RepoID, v.Playbook, v.Vars, v.NextScript, v.NextWhen, v.NextOKOnly); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Created script "%s"`, v.Name), "")
@@ -1104,12 +1106,15 @@ func (s *Server) libraryRoutes() {
 		if err != nil {
 			return nil, err
 		}
-		v, err := jobs.ValidateScript(db.Str(sc.TenantID), scriptInput(c.body))
+		in := scriptInput(c.body)
+		in.Self = sc.ID
+		v, err := jobs.ValidateScript(db.Str(sc.TenantID), in)
 		if err != nil {
 			return nil, err
 		}
-		if err := exec(`UPDATE scripts SET name = ?, description = ?, body = ?, as_root = ?, params = ?, kind = ?, repo_id = ?, playbook = ?, vars = ? WHERE id = ?`,
-			v.Name, v.Description, v.Body, v.AsRoot, v.Params, v.Kind, v.RepoID, v.Playbook, v.Vars, sc.ID); err != nil {
+		if err := exec(`UPDATE scripts SET name = ?, description = ?, body = ?, as_root = ?, params = ?, kind = ?, repo_id = ?, playbook = ?, vars = ?,
+      next_script_id = ?, next_when = ?, next_ok_only = ? WHERE id = ?`,
+			v.Name, v.Description, v.Body, v.AsRoot, v.Params, v.Kind, v.RepoID, v.Playbook, v.Vars, v.NextScript, v.NextWhen, v.NextOKOnly, sc.ID); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Edited script "%s"`, v.Name), "")
@@ -1121,8 +1126,8 @@ func (s *Server) libraryRoutes() {
 			return nil, cmpErr(err, notFound("Script"))
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars)
-      SELECT ?, ?, left(name || ' (copy)', 100), description, body, as_root, params, 0, ?, kind, repo_id, playbook, vars FROM scripts WHERE id = ?`,
+		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars, next_script_id, next_when, next_ok_only)
+      SELECT ?, ?, left(name || ' (copy)', 100), description, body, as_root, params, 0, ?, kind, repo_id, playbook, vars, next_script_id, next_when, next_ok_only FROM scripts WHERE id = ?`,
 			id, c.tenant, db.Now(), sc.ID); err != nil {
 			return nil, err
 		}
