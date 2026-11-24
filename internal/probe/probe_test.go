@@ -220,3 +220,20 @@ func containerFixture() []string {
 		`cst={"Name":"web","CPUPerc":"150.25%","MemUsage":"12.5MiB / 1.9GiB"}`, `cst={"Name":"db","CPUPerc":"0.00%","MemUsage":"1.5GB / 4GB"}`, "cst={broken",
 		"if=eth0 5000 7000", "if=docker0 300 400", "net=5000 7000"}
 }
+
+func TestTraffic(t *testing.T) {
+	m := db.Now() - 3600e3
+	// Four probes a minute apart, a 10-minute outage, one probe after it, an extra "Check now" 30 s later, and one older than 30 days.
+	for _, r := range [][3]any{{m, 100.0, 10.0}, {m + 60e3, 200.0, 20.0}, {m + 120e3, nil, nil}, {m + 180e3, 100.0, 0.0},
+		{m + 780e3, 1000.0, 1000.0}, {m + 810e3, 100.0, 100.0}, {m - 31*864e5, 1e9, 1e9}} {
+		if _, err := db.Exec(`INSERT INTO metrics (server_id, t, rx, tx) VALUES ('tr', ?, ?, ?)`, r[0], r[1], r[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tr, err := Traffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// rx: (100 + 200 + 100 + 1000) * 60 s, the gap counts as one minute at most, the extra probe as 30 s.
+	eq(t, tr["tr"], Totals{Rx: 1400*60 + 100*30, Tx: 1030*60 + 100*30, Days: 30})
+}
