@@ -10,7 +10,7 @@ import { ScriptsPage, SchedulesPage } from './pages/scripts.js';
 import { AlertsPage } from './pages/alerts.js';
 import { KeysPage, VariablesPage } from './pages/keys.js';
 import { ReposPage } from './pages/repos.js';
-import { SettingsPage, AuditPage } from './pages/settings.js';
+import { SettingsPage, SsoPage, AuditPage } from './pages/settings.js';
 
 // ---------- sign in / first-run setup ----------
 function AuthFrame({ title, sub, children }) {
@@ -22,7 +22,7 @@ function AuthFrame({ title, sub, children }) {
     </form></div></main>`;
 }
 
-function Login({ onDone }) {
+function Login({ auth, onDone }) {
   const [pw, setPw] = useState('');
   const [code, setCode] = useState('');
   const [needCode, setNeedCode] = useState(false);
@@ -35,11 +35,14 @@ function Login({ onDone }) {
       if (r.totp_required) setNeedCode(true); else onDone();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
+  const sso = auth.sso && !needCode && html`<a class="btn primary" href="/api/auth/oidc/start">Sign in with ${auth.sso}</a>`;
+  if (!auth.password) return html`<${AuthFrame} title="Sign in">${sso}</${AuthFrame}>`;
   return html`<${AuthFrame} title="Sign in" sub=${needCode ? 'Enter the 6-digit code from your authenticator app.' : null}>
+    ${sso && html`${sso}<div class="or">or use your password</div>`}
     ${!needCode && html`<${Field} label="Password"><input type="password" autocomplete="current-password" autofocus value=${pw} onInput=${(e) => setPw(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && submit()} /></${Field}>`}
     ${needCode && html`<${Field} label="Authentication code"><input inputmode="numeric" autocomplete="one-time-code" autofocus maxlength="6" value=${code} onInput=${(e) => setCode(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && submit()} /></${Field}>`}
     ${err && html`<p class="err" role="alert">${err}</p>`}
-    <button class="btn primary" type="submit" disabled=${busy} onClick=${submit}>${busy ? 'Signing in…' : 'Sign in'}</button>
+    <button class=${`btn ${sso ? '' : 'primary'}`} type="submit" disabled=${busy} onClick=${submit}>${busy ? 'Signing in…' : 'Sign in'}</button>
   </${AuthFrame}>`;
 }
 
@@ -151,6 +154,7 @@ function Crumbs({ parts, servers }) {
     return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/">Fleet</a><span>/</span>
       ${parts[2] ? html`<a href=${`#/servers/${parts[1]}`}>${s?.name || 'Server'}</a><span>/</span><b>${TAB_LABEL[parts[2]] || parts[2]}</b>` : html`<b>${s?.name || 'Server'}</b>`}</nav>`;
   }
+  if (parts[0] === 'settings' && parts[1] === 'sso') return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/settings">Settings</a><span>/</span><b>Single sign-on</b></nav>`;
   if (parts[0] === 'jobs' && parts[1]) return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/jobs">Jobs</a><span>/</span><b>#${parts[1]}</b></nav>`;
   return html`<span class="crumbs" />`;
 }
@@ -188,6 +192,7 @@ function Shell() {
   else if (section === 'variables') page = html`<${VariablesPage} />`;
   else if (section === 'repos') page = html`<${ReposPage} />`;
   else if (section === 'audit') page = html`<${AuditPage} />`;
+  else if (section === 'settings' && parts[1] === 'sso') page = html`<${SsoPage} />`;
   else if (section === 'settings') page = html`<${SettingsPage} />`;
   else page = html`<div class="page"><h1>Page not found</h1><a href="#/">Back to the fleet</a></div>`;
 
@@ -237,7 +242,7 @@ function App() {
       <button class="btn primary" onClick=${() => { setAuth(null); check(); }}>Try again</button></div></div></main>`;
   }
   if (auth.setup) return html`<${Setup} onDone=${check} />`;
-  if (!auth.authed) return html`<${Login} onDone=${check} />`;
+  if (!auth.authed) return html`<${Login} auth=${auth} onDone=${check} />`;
   return html`<${Shell} />`;
 }
 

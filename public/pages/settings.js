@@ -1,4 +1,4 @@
-import { html, useState, useEffect, useMemo, api, useLoad, useQuery, toast, confirmBox, Btn, Th, useSort, Empty, Field, Loading, ErrorNote, ago, when, getClock, setClock } from '../ui.js';
+import { html, useState, useEffect, useMemo, api, useLoad, useQuery, toast, confirmBox, Btn, Th, useSort, Empty, Field, Loading, ErrorNote, Copy, ago, when, getClock, setClock } from '../ui.js';
 import { getTheme, setTheme } from '../theme.js';
 
 export function SettingsPage() {
@@ -9,6 +9,7 @@ export function SettingsPage() {
     <div class="grid-2">
       <div class="stack">
         <${PasswordPanel} />
+        <${SsoSummary} />
         ${acct.data && html`<${TotpPanel} enabled=${acct.data.totp} onChange=${() => acct.reload(true)} />`}
         <${ThemePanel} />
       </div>
@@ -73,6 +74,94 @@ function TotpPanel({ enabled, onChange }) {
             <div class="row"><${Btn} kind="primary" onClick=${enable}>Turn on</${Btn}><button class="btn ghost" onClick=${() => setSetup(null)}>Cancel</button></div></div></div>`}
       ${err && html`<p class="err" role="alert">${err}</p>`}
     </div></section>`;
+}
+
+function SsoSummary() {
+  const sso = useLoad(() => api('/api/sso'));
+  const on = sso.data?.linked;
+  return html`<section class="panel"><div class="panel-h"><h2>Single sign-on</h2>${sso.data && (on ? html`<span class="chip ok">On</span>` : html`<span class="chip">Off</span>`)}</div>
+    <div class="panel-b form">
+      <p class="small ink2">${on ? html`Signed in as <b>${sso.data.account}</b>. Password sign-in is ${sso.data.password_login ? 'still on as a fallback' : 'off'}.`
+        : 'Sign in with authentik, Keycloak or another OpenID Connect provider instead of a password.'}</p>
+      <div><a class=${`btn ${on ? '' : 'primary'}`} href="#/settings/sso">${on ? 'Manage' : 'Set up single sign-on'}</a></div>
+    </div></section>`;
+}
+
+// ---------- single sign-on (#/settings/sso) ----------
+const Step = ({ n, title, done, off, children }) => html`<section class=${`panel step ${off ? 'off' : ''}`}>
+  <div class="panel-h"><h2><span class=${`step-n ${done ? 'ok' : ''}`}>${done ? '✓' : n}</span>${title}</h2></div>
+  <div class="panel-b form">${children}</div></section>`;
+
+export function SsoPage() {
+  const sso = useLoad(() => api('/api/sso'));
+  const [f, setF] = useState(null);
+  const [err, setErr] = useState('');
+  useEffect(() => { if (sso.data && !f) setF({ issuer: sso.data.issuer, client_id: sso.data.client_id, client_secret: '' }); }, [sso.data]);
+  if (sso.error) return html`<div class="page"><${ErrorNote} error=${sso.error} retry=${sso.reload} /></div>`;
+  if (!sso.data || !f) return html`<div class="page"><${Loading} /></div>`;
+  const d = sso.data;
+  const configured = !!(d.issuer && d.client_id && d.has_secret);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const save = async () => {
+    setErr('');
+    try {
+      await api('/api/sso', { method: 'PUT', body: f });
+      setF(null); sso.reload(true);
+      toast('Saved. Fleetdeck can reach your provider.', 'ok');
+    } catch (e) { setErr(e.message); }
+  };
+  const setPw = async (enabled) => { await api('/api/sso/password-login', { method: 'PUT', body: { enabled } }); sso.reload(true); };
+  const remove = async () => {
+    if (!await confirmBox({ title: 'Remove single sign-on?', body: 'You will sign in with your password again.', confirm: 'Remove', danger: true })) return;
+    await api('/api/sso', { method: 'DELETE' }); setF(null); sso.reload(true); toast('Single sign-on removed');
+  };
+  const insecure = d.redirect_url.startsWith('http://') && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(d.redirect_url);
+  return html`<div class="page narrow">
+    <div class="page-h"><div><h1>Single sign-on</h1>
+      <p class="sub">Sign in with authentik or any OpenID Connect provider (Keycloak, Authelia, Zitadel…). The steps use authentik's names.</p></div></div>
+    <div class="stack">
+      <${Step} n="1" title="Create a provider in authentik" done=${configured}>
+        <p class="small">In the <b>Admin interface</b>, open <b>Applications → Applications</b> and click <b>Create with provider</b>. Choose <b>OAuth2/OpenID Provider</b>.</p>
+        <div class="field"><span>Redirect URI (paste into authentik, matching mode <b>Strict</b>)</span><${Copy} text=${d.redirect_url} /></div>
+        ${insecure && html`<p class="hint err">This starts with http://. If Fleetdeck runs behind a reverse proxy with HTTPS, start it with <span class="mono">FLEETDECK_TRUST_PROXY=1</span> and reload this page.</p>`}
+        <ul class="small ink2 checklist">
+          <li>Client type: <b>Confidential</b></li>
+          <li>Signing Key: pick one, e.g. <b>authentik Self-signed Certificate</b>. Without it, sign-in fails.</li>
+        </ul>
+      </${Step}>
+
+      <${Step} n="2" title="Enter the provider details" done=${configured}>
+        <${Field} label="Issuer URL" hint="On the provider's page: “OpenID Configuration Issuer”, like https://auth.example.com/application/o/fleetdeck/">
+          <input class="mono" placeholder="https://" value=${f.issuer} onInput=${set('issuer')} /></${Field}>
+        <div class="cols">
+          <${Field} label="Client ID" hint="On the provider's page."><input class="mono" value=${f.client_id} onInput=${set('client_id')} /></${Field}>
+          <${Field} label="Client secret" hint=${d.has_secret ? 'Saved. Leave empty to keep it.' : 'Click Edit on the provider to see it.'}>
+            <input type="password" autocomplete="off" value=${f.client_secret} onInput=${set('client_secret')} /></${Field}>
+        </div>
+        ${err && html`<p class="err" role="alert">${err}</p>`}
+        <div><${Btn} kind=${configured ? '' : 'primary'} onClick=${save} disabled=${!f.issuer || !f.client_id || (!d.has_secret && !f.client_secret)}>Save and test</${Btn}></div>
+      </${Step}>
+
+      <${Step} n="3" title="Connect your account" done=${d.linked} off=${!configured}>
+        ${d.linked ? html`<p class="small">Connected as <b>${d.account}</b>. Only this account can sign in.</p>`
+          : html`<p class="small">Sign in at your provider once. From then on, only that account can sign in to Fleetdeck.</p>`}
+        <p class="small ink2">Sign-ins this way skip Fleetdeck's own 2FA, so turn on MFA in authentik.</p>
+        <div>${configured ? html`<a class=${`btn ${d.linked ? '' : 'primary'}`} href="/api/auth/oidc/start?link=1">${d.linked ? 'Connect a different account' : 'Connect account'}</a>`
+          : html`<button class="btn" disabled>Connect account</button>`}</div>
+      </${Step}>
+
+      <${Step} n="4" title="Password sign-in (optional)" done=${d.linked && !d.password_login} off=${!d.linked}>
+        <p class="small">Keep your password as a fallback, or turn it off so only single sign-on works.</p>
+        ${d.password_forced ? html`<p class="small ink2"><span class="mono">FLEETDECK_PASSWORD_LOGIN=1</span> is set, so passwords always work right now.</p>`
+          : html`<p class="small ink2">Locked out? Start Fleetdeck with <span class="mono">FLEETDECK_PASSWORD_LOGIN=1</span> to use your password again.</p>`}
+        <div class="seg" role="group" aria-label="Password sign-in">
+          <button aria-pressed=${d.password_login} disabled=${!d.linked} onClick=${() => setPw(true)}>On</button>
+          <button aria-pressed=${!d.password_login} disabled=${!d.linked || d.password_forced} onClick=${() => setPw(false)}>Off</button></div>
+      </${Step}>
+
+      ${(d.issuer || d.client_id) && html`<div><${Btn} kind="quiet-danger" onClick=${remove}>Remove single sign-on</${Btn}></div>`}
+    </div>
+  </div>`;
 }
 
 function ThemePanel() {

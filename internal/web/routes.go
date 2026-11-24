@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -524,6 +525,7 @@ func detached(c *ctx) context.Context { return context.WithoutCancel(c.r.Context
 
 func (s *Server) routes() {
 	s.authRoutes()
+	s.ssoRoutes()
 	s.serverRoutes()
 	s.libraryRoutes()
 	s.jobRoutes()
@@ -532,7 +534,13 @@ func (s *Server) routes() {
 
 func (s *Server) authRoutes() {
 	s.route("GET /api/auth/state", func(c *ctx) (any, error) {
-		return J{"setup": needsSetup(), "authed": c.sess != nil, "totp": db.Setting("totp_secret", "") != ""}, nil
+		sso := ""
+		if ssoLinked() {
+			if u, err := url.Parse(db.Setting("oidc_issuer", "")); err == nil {
+				sso = u.Hostname()
+			}
+		}
+		return J{"setup": needsSetup(), "authed": c.sess != nil, "totp": db.Setting("totp_secret", "") != "", "sso": sso, "password": passwordLogin()}, nil
 	}, open)
 
 	s.route("POST /api/auth/setup", func(c *ctx) (any, error) {
@@ -577,6 +585,9 @@ func (s *Server) authRoutes() {
 		}
 		if needsSetup() {
 			return nil, httperr.New(409, "Setup required")
+		}
+		if !passwordLogin() {
+			return nil, httperr.New(403, "Password sign-in is turned off. Use single sign-on.")
 		}
 		if !sec.VerifyPassword(c.body.str("password"), db.Setting("password_hash", "")) {
 			s.recordFailure(c.ip)

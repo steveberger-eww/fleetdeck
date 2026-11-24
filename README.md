@@ -60,6 +60,9 @@ On first start, the console prints a **setup token**. Open the page, enter the t
 | `DATA_DIR` | `./data` | SQLite database and `secret.key` |
 | `FLEETDECK_SECRET` | – | Master key for encrypting SSH keys and tokens. Without it, a random key is written to `DATA_DIR/secret.key`. |
 | `FLEETDECK_TRUST_PROXY` | – | `1` trusts `X-Forwarded-*` headers (client IP, HTTPS detection for secure cookies) |
+| `FLEETDECK_PASSWORD_LOGIN` | – | `1` allows password sign-in even when it's turned off in favour of single sign-on (for when your provider is down) |
+
+Single sign-on (authentik, Keycloak, any OpenID Connect provider) is set up in the app under **Settings → Single sign-on**, step by step.
 
 ## Adding a server
 
@@ -98,6 +101,7 @@ Each run pulls the latest commit (recorded on the job), installs `collections/re
 Anyone with access to Fleetdeck has root on every server in it, so the defaults are strict:
 
 - **Sign-in:** scrypt-hashed password, optional TOTP, 5-attempt lockout per IP. First-run setup needs the console token.
+- **Single sign-on (optional):** OpenID Connect with PKCE, state bound to the browser, nonce and signed ID token checked. Only the one connected account (its `sub`) gets in. Password sign-in can then be turned off.
 - **Sessions:** random tokens stored hashed; `HttpOnly`, `SameSite=Strict`, `Secure` behind HTTPS cookies; 7-day idle expiry; revocable in Settings.
 - **CSRF / WebSocket hijacking:** cross-origin requests and terminal connections are rejected; API writes accept JSON only.
 - **Secrets at rest:** SSH keys, passphrases and tokens are encrypted with AES-256-GCM and decrypted only in memory.

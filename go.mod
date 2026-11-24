@@ -4,8 +4,11 @@ go 1.26.0
 
 require (
 	github.com/coder/websocket v1.8.15
+	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/jmoiron/sqlx v1.4.0
 	golang.org/x/crypto v0.59.0
+	golang.org/x/oauth2 v0.38.0
 	modernc.org/sqlite v1.63.0
 	rsc.io/qr v0.2.0
 )

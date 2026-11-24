@@ -45,13 +45,14 @@ type Server struct {
 	setupToken  string
 	failures    map[string]*failure // per-IP login failures
 	pendingTOTP map[string]string   // session hash -> secret awaiting confirmation
+	oidcPending map[string]oidcFlow // OIDC state -> flow in progress
 
 	totpMu sync.Mutex // makes checkTOTP's read-compare-write of totp_last atomic
 }
 
 // New returns the handler. static holds the UI (index.html at its root); trustProxy honours X-Forwarded-*.
 func New(static fs.FS, trustProxy bool) *Server {
-	s := &Server{trustProxy: trustProxy, static: static, mux: http.NewServeMux(), failures: map[string]*failure{}, pendingTOTP: map[string]string{}}
+	s := &Server{trustProxy: trustProxy, static: static, mux: http.NewServeMux(), failures: map[string]*failure{}, pendingTOTP: map[string]string{}, oidcPending: map[string]oidcFlow{}}
 	s.mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 404, errBody("Not found")) })
 	s.routes()
 	return s
