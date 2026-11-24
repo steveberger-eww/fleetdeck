@@ -310,6 +310,31 @@ func Explain(err error, s *db.Server) error {
 
 var errHostDenied = errors.New("host key verification failed")
 
+// ssh2's host key preference (ed25519 first), not x/crypto's (RSA first): sshd offers several host keys, and pins
+// made by the Node version must keep matching. The pinned key's type goes first, so a pin of another type matches too.
+var hostKeyOrder = []string{ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
+	ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+
+// x/crypto's defaults lack group-exchange and group16, which ssh2 offered: hardened sshd configs that allow
+// only those would refuse every connection after the switch from Node.
+var kexAlgos = ssh.SupportedAlgorithms().KeyExchanges
+
+func hostKeyAlgos(pinnedRaw string) []string {
+	typ, _, _ := strings.Cut(pinnedRaw, " ")
+	pinned := func(a string) bool { return a == typ || (typ == ssh.KeyAlgoRSA && strings.HasPrefix(a, "rsa-sha2-")) }
+	out := slices.Clone(hostKeyOrder)
+	slices.SortStableFunc(out, func(a, b string) int {
+		switch {
+		case pinned(a) && !pinned(b):
+			return -1
+		case pinned(b) && !pinned(a):
+			return 1
+		}
+		return 0
+	})
+	return out
+}
+
 func connect(s *db.Server) (*ssh.Client, error) {
 	signers, agentConn, err := credentials(s)
 	if err != nil {
@@ -325,9 +350,12 @@ func connect(s *db.Server) (*ssh.Client, error) {
 		return nil, Explain(err, s)
 	}
 	_ = c.SetDeadline(deadline)
+	pinnedRaw, _ := db.Get[string](`SELECT COALESCE(host_key_raw, '') FROM servers WHERE id = ?`, s.ID)
 	cc, chans, reqs, err := ssh.NewClientConn(c, addr, &ssh.ClientConfig{
-		User: s.User,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)},
+		Config:            ssh.Config{KeyExchanges: kexAlgos},
+		User:              s.User,
+		HostKeyAlgorithms: hostKeyAlgos(db.Str(pinnedRaw)),
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signers...)},
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			if verifyHost(s.ID, key) {
 				return nil

@@ -2,7 +2,9 @@ package ssh
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
@@ -12,6 +14,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,11 +100,14 @@ type testServer struct {
 	listener     net.Listener
 }
 
-func startServer(t *testing.T) *testServer {
+func startServer(t *testing.T, opts ...func(*ssh.ServerConfig)) *testServer {
 	_, hk, _ := ed25519.GenerateKey(rand.Reader)
 	signer, _ := ssh.NewSignerFromKey(hk)
 	cfg := &ssh.ServerConfig{PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) { return nil, nil }}
 	cfg.AddHostKey(signer)
+	for _, o := range opts {
+		o(cfg)
+	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -288,5 +294,35 @@ func TestHostKeyPinning(t *testing.T) {
 	}
 	if _, ok := AcceptHostKey(s.ID); ok {
 		t.Fatal("nothing pending")
+	}
+}
+
+// Node (ssh2) pinned the ed25519 key of hosts that offer several; x/crypto's default order would see a "changed" key.
+func TestHostKeyAlgos(t *testing.T) {
+	for raw, want := range map[string][]string{
+		"":                         {ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256},
+		"ssh-ed25519 AAAA":         {ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256},
+		"ecdsa-sha2-nistp256 AAAA": {ssh.KeyAlgoECDSA256, ssh.KeyAlgoED25519},
+		"ssh-rsa AAAA":             {ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA, ssh.KeyAlgoED25519},
+	} {
+		got := hostKeyAlgos(raw)
+		if len(got) != len(hostKeyOrder) || !slices.Equal(got[:len(want)], want) {
+			t.Errorf("hostKeyAlgos(%q) = %v", raw, got)
+		}
+	}
+}
+
+// A hardened sshd: ECDSA host key offered too, and only key exchanges outside x/crypto's defaults.
+func TestNodeCompatibleAlgorithms(t *testing.T) {
+	ts := startServer(t, func(c *ssh.ServerConfig) {
+		k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		signer, _ := ssh.NewSignerFromKey(k)
+		c.AddHostKey(signer)
+		c.KeyExchanges = []string{ssh.KeyExchangeDHGEXSHA256, ssh.KeyExchangeDH16SHA512}
+	})
+	s := addServer(t, ts.addr)
+	run(t, s, "true", ExecOpts{})
+	if s, _ = db.GetServer(s.ID); !strings.HasPrefix(db.Str(s.HostKeyRaw), "ssh-ed25519 ") {
+		t.Fatalf("pinned %v, want the ed25519 key like ssh2", db.Str(s.HostKeyRaw))
 	}
 }
