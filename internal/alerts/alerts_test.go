@@ -1,0 +1,207 @@
+package alerts
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"fleetdeck/internal/db"
+	"fleetdeck/internal/probe"
+	"fleetdeck/internal/sec"
+)
+
+func TestMain(m *testing.M) {
+	dir, _ := os.MkdirTemp("", "fleetdeck-test-")
+	if err := db.Open(dir); err != nil {
+		panic(err)
+	}
+	if err := sec.Init(); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+func eq(t *testing.T, got, want any) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func exec(t *testing.T, q string, args ...any) {
+	t.Helper()
+	_, err := db.Exec(q, args...)
+	must(t, err)
+}
+
+func srv(t *testing.T, id string) *db.Server {
+	t.Helper()
+	s, err := db.GetServer(id)
+	must(t, err)
+	return s
+}
+
+func message(t *testing.T, rule string) string {
+	t.Helper()
+	m, err := db.Get[string](`SELECT message FROM alert_state WHERE rule_id = ?`, rule)
+	must(t, err)
+	if m == nil {
+		t.Fatalf("rule %s is not firing", rule)
+	}
+	return *m
+}
+
+func TestTagScopedRules(t *testing.T) {
+	exec(t, `INSERT INTO servers (id, name, host, tags, created_at) VALUES ('s1', 'web1', 'h', 'prod,web', 0), ('s2', 'db1', 'h', 'db', 0)`)
+	exec(t, `INSERT INTO alert_rules (id, metric, threshold, tag, created_at) VALUES ('r1', 'updates', 0, 'web', 0)`)
+	firing := func() []string {
+		ids, err := db.Select[string](`SELECT server_id FROM alert_state`)
+		must(t, err)
+		return ids
+	}
+	three := 3.0
+	snap := &probe.Snapshot{Updates: &three} // JS passed the partial snapshot { updates: 3 }
+	Evaluate(srv(t, "s1"), snap, nil)
+	Evaluate(srv(t, "s2"), snap, nil)
+	eq(t, firing(), []string{"s1"})
+	exec(t, `UPDATE servers SET tags = 'prod' WHERE id = 's1'`) // tag removed -> alert dropped
+	Evaluate(srv(t, "s1"), snap, nil)
+	eq(t, firing(), []string{})
+	if _, err := ValidateRule(map[string]any{"metric": "cpu", "tag": "web", "server_id": "s1"}); err == nil {
+		t.Fatal("server and tag together must be rejected")
+	}
+}
+
+func TestSmartAlert(t *testing.T) {
+	// Same probe output as the probe package's S.M.A.R.T. test.
+	j := func(v any) string { b, _ := json.Marshal(v); return string(b) }
+	type M = map[string]any
+	sata := M{"smart_status": M{"passed": true}, "ata_smart_attributes": M{"table": []M{{"id": 5, "raw": M{"value": 8}}}}}
+	nvme := M{"smart_status": M{"passed": true}, "nvme_smart_health_information_log": M{"percentage_used": 3}}
+	pending := M{"smart_status": M{"passed": true}, "ata_smart_attributes": M{"table": []M{{"id": 197, "raw": M{"value": 2}}}}}
+	s := probe.Parse(strings.Join([]string{"auto_updates=on", "smart=ok", "smartdev=/dev/sda " + j(sata), "smartdev=/dev/nvme0 " + j(nvme),
+		"smartdev=/dev/sdb " + j(pending), `smartdev=/dev/sdc {"smartctl":{"exit_status":2}}`, "smartdev=/dev/sdd {broken"}, "\n"))
+
+	exec(t, `INSERT INTO servers (id, name, host, created_at) VALUES ('s9', 'nas', 'h', 0)`)
+	exec(t, `INSERT INTO alert_rules (id, metric, threshold, server_id, created_at) VALUES ('r9', 'smart', 0, 's9', 0)`)
+	Evaluate(srv(t, "s9"), s, nil)
+	if m := message(t, "r9"); !strings.Contains(m, "S.M.A.R.T. problems is 1") {
+		t.Fatal(m)
+	}
+}
+
+func TestContainerAndNetworkAlerts(t *testing.T) {
+	ps := func(name, state, status string) string {
+		b, _ := json.Marshal(map[string]string{"Names": name, "Image": "img", "State": state, "Status": status})
+		return "ctr=" + string(b)
+	}
+	s := probe.Parse(strings.Join([]string{"docker=2 3", ps("web", "running", "Up 2 hours (healthy)"), ps("db", "running", "Up 1 hour (unhealthy)"),
+		ps("job", "restarting", "Restarting (1) 3 seconds ago"), "if=eth0 5000 7000", "net=5000 7000"}, "\n"))
+	exec(t, `INSERT INTO servers (id, name, host, created_at) VALUES ('n1', 'edge', 'h', 0)`)
+	exec(t, `INSERT INTO alert_rules (id, metric, threshold, server_id, created_at) VALUES ('rn', 'net', 50, 'n1', 0), ('ru', 'unhealthy', 0, 'n1', 0)`)
+	rx, tx := 40e6, 20e6
+	s.Rx, s.Tx = &rx, &tx
+	Evaluate(srv(t, "n1"), s, nil)
+	if m := message(t, "rn"); !strings.Contains(m, "is 60 MB/s") {
+		t.Fatal(m)
+	}
+	message(t, "ru")
+}
+
+func TestQuietHours(t *testing.T) {
+	night, err := ValidateMute(map[string]any{"kind": "daily", "start": "22:00", "end": "06:30"})
+	must(t, err)
+	eq(t, []int64{night.StartAt, night.EndAt}, []int64{1320, 390})
+	at := func(h, m int) time.Time { return time.Date(2026, 1, 1, h, m, 0, 0, time.Local) }
+	eq(t, InWindow(night, at(23, 0)), true)
+	eq(t, InWindow(night, at(6, 29)), true)
+	eq(t, InWindow(night, at(6, 30)), false)
+	day, err := ValidateMute(map[string]any{"kind": "daily", "start": "09:00", "end": "17:00"})
+	must(t, err)
+	eq(t, InWindow(day, at(18, 0)), false)
+	now := float64(db.Now())
+	for _, b := range []map[string]any{{"start": "25:00", "end": "01:00"}, {"start": "10:00", "end": "10:00"}, {"kind": "once", "start": 1.0, "end": 2.0},
+		{"kind": "once", "start": now + 1e6, "end": now}} {
+		if _, err := ValidateMute(b); err == nil {
+			t.Fatalf("accepted %v", b)
+		}
+	}
+
+	exec(t, `INSERT INTO servers (id, name, host, tags, created_at) VALUES ('q1', 'quiet', 'h', 'lab', 0)`)
+	exec(t, `INSERT INTO alert_rules (id, metric, threshold, server_id, created_at) VALUES ('rq', 'failed', 0, 'q1', 0)`)
+	exec(t, `INSERT INTO mute_windows (id, tag, kind, start_at, end_at, created_at) VALUES ('m1', 'lab', 'once', ?, ?, 0)`, db.Now()-1000, db.Now()+3600e3)
+	s := srv(t, "q1")
+	w, err := QuietFor(s, time.Now())
+	must(t, err)
+	if w == nil || w.ID != "m1" {
+		t.Fatalf("quietFor = %v", w)
+	}
+	notified := func() int {
+		n, err := db.Get[int](`SELECT notified FROM alert_state WHERE rule_id = 'rq'`)
+		must(t, err)
+		return *n
+	}
+	snap := &probe.Snapshot{Failed: 2}
+	Evaluate(s, snap, nil)
+	eq(t, notified(), 0)                                // fired, not sent
+	exec(t, `DELETE FROM mute_windows WHERE id = 'm1'`) // window over, still firing -> sent now
+	Evaluate(s, snap, nil)
+	eq(t, notified(), 1)
+}
+
+// Not in test.js: the UI iterates these objects for its pickers, so order and shape must match the JS.
+func TestMetricsAndTypesJSON(t *testing.T) {
+	b, err := json.Marshal(Metrics)
+	must(t, err)
+	eq(t, string(b), `{"down":{"label":"Unreachable","unit":"min","hint":"Fires when the server cannot be reached for N minutes"},"cpu":{"label":"CPU usage","unit":"%","col":"cpu","scale":100,"def":90},"mem":{"label":"Memory usage","unit":"%","col":"mem","scale":100,"def":90},"swap":{"label":"Swap usage","unit":"%","col":"swap","scale":100,"def":50},"disk":{"label":"Disk usage (fullest mount)","unit":"%","def":90},"load":{"label":"Load per CPU core","unit":"","col":"load1","scale":1,"def":1.5},"temp":{"label":"Temperature","unit":"°C","col":"temp","scale":1,"def":80},"updates":{"label":"Pending updates","unit":"","def":0},"security":{"label":"Pending security updates","unit":"","def":0},"failed":{"label":"Failed systemd units","unit":"","def":0},"reboot":{"label":"Reboot required","unit":""},"smart":{"label":"Disks with S.M.A.R.T. problems","unit":"","def":0},"unhealthy":{"label":"Unhealthy or restarting containers","unit":"","def":0},"net":{"label":"Network traffic (in + out)","unit":" MB/s","col":"rx + tx","scale":0.000001,"def":50}}`)
+	b, err = json.Marshal(Types)
+	must(t, err)
+	eq(t, string(b), `{"webhook":{"label":"Webhook (JSON POST)","fields":[{"key":"url","label":"URL","secret":true}]},"ntfy":{"label":"ntfy","fields":[{"key":"url","label":"Topic URL (https://ntfy.sh/my-topic)"},{"key":"token","label":"Access token (optional)","secret":true,"optional":true}]},"discord":{"label":"Discord","fields":[{"key":"url","label":"Webhook URL","secret":true}]},"slack":{"label":"Slack","fields":[{"key":"url","label":"Incoming webhook URL","secret":true}]},"telegram":{"label":"Telegram","fields":[{"key":"token","label":"Bot token","secret":true},{"key":"chat_id","label":"Chat ID"}]},"pushover":{"label":"Pushover","fields":[{"key":"token","label":"Application API token","secret":true},{"key":"user","label":"User or group key","secret":true},{"key":"device","label":"Device (optional, all devices if empty)","optional":true}]},"gotify":{"label":"Gotify","fields":[{"key":"url","label":"Server URL"},{"key":"token","label":"App token","secret":true}]}}`)
+	eq(t, []string{fmtNum(60), fmtNum(12.25), fmtNum(0.123), fmtNum(1.5)}, []string{"60", "12.3", "0.1", "1.5"})
+}
+
+// Not in test.js: secrets masked in the view and kept on edit when blank; ntfy payload and failure text.
+func TestNotifiers(t *testing.T) {
+	var got struct {
+		path, auth string
+		body       map[string]any
+	}
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.path, got.auth = r.URL.Path, r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&got.body)
+		if got.body["title"] == "boom" {
+			http.Error(w, "nope", 500)
+		}
+	}))
+	defer hs.Close()
+
+	in, err := ValidateNotifier(map[string]any{"type": "ntfy", "name": " phone ", "config": map[string]any{"url": hs.URL + "/alerts/my-topic", "token": "tk"}}, nil)
+	must(t, err)
+	n := &Notifier{ID: "x", Name: in.Name, Type: in.Type, ConfigEnc: EncryptConfig(in.Config), Enabled: in.Enabled}
+	v, err := NotifierView(n)
+	must(t, err)
+	eq(t, v.Config, map[string]string{"url": hs.URL + "/alerts/my-topic", "token": "••••••"})
+	kept, err := ValidateNotifier(map[string]any{"type": "ntfy", "name": "phone", "config": map[string]any{"url": hs.URL + "/t", "token": ""}}, n)
+	must(t, err)
+	eq(t, kept.Config["token"], "tk")
+	_, err = ValidateNotifier(map[string]any{"type": "gotify", "name": "g", "config": map[string]any{"url": "ftp://x", "token": "t"}}, nil)
+	eq(t, err.Error(), "Server URL must start with http:// or https://")
+
+	must(t, SendOne(n, "hi", "msg", "error"))
+	eq(t, []any{got.path, got.auth, got.body["topic"], got.body["priority"]}, []any{"/alerts/", "Bearer tk", "my-topic", 4.0})
+	eq(t, SendOne(n, "boom", "msg", "info").Error(), "HTTP 500 nope\n")
+}
