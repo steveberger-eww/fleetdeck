@@ -1,7 +1,7 @@
 import {
   html, useState, useEffect, useRef, useMemo, api, go, store, useStore, useLoad, useQuery, useHold, serversStore, refreshServers, toast, confirmBox,
   Btn, Th, useSort, StatusChip, LineChart, Empty, Modal, Footer, Field, Loading, ErrorNote, Output, Icon, Copy, Menu, CellBar,
-  bytes, rate, pct, ago, dur, uptime, when, logTime, level,
+  bytes, rate, pct, ago, dur, uptime, when, logTime, level, eol,
 } from '../ui.js';
 import { ServerForm, serverBody, PRIV_TEXT } from './overview.js';
 import { JobsTable, openRun, confirmRun } from './jobs.js';
@@ -77,7 +77,7 @@ export function ServerPage({ id, tab }) {
       <div class="id grow">
         <div class="row"><h1>${s.name}</h1><${StatusChip} status=${s.status} />${s.tags.map((t) => html`<span class="tag">${t}</span>`)}</div>
         <div class="meta"><span class="mono">${s.user}@${s.host}${s.port !== 22 ? `:${s.port}` : ''}</span>
-          ${n && html`<span>${n.os}</span><span>Up ${uptime(n.uptime)}</span><span>Checked ${ago(n.t)}</span>`}</div>
+          ${n && html`<span>${n.os}${eol(n) && html` <span class=${`chip ${eol(n).kind}`} title="No more security updates from the vendor after this date">${eol(n).text}</span>`}</span><span>Up ${uptime(n.uptime)}</span><span>Checked ${ago(n.t)}</span>`}</div>
       </div>
       <div class="row">
         <${Btn} icon="refresh" title="Check now" onClick=${async () => { await api(`/api/servers/${s.id}/probe`, { method: 'POST' }); await refreshServers(); }} />

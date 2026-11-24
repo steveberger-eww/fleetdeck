@@ -1,6 +1,6 @@
 import {
   html, useState, useMemo, api, go, useStore, useLoad, useQuery, setQuery, useDirty, serversStore, runningStore, refreshServers,
-  Btn, Lamp, Gauge, Spark, Empty, Field, Modal, Footer, Copy, Loading, JobChip, bytes, rate, ago, uptime, plural,
+  Btn, Lamp, Gauge, Spark, Empty, Field, Modal, Footer, Copy, Loading, JobChip, Icon, bytes, rate, ago, uptime, plural, eol,
   flagList, byAttention, compare,
 } from '../ui.js';
 import { openRun, confirmRun } from './jobs.js';
@@ -20,10 +20,11 @@ function Unit({ s, selected, onSelect }) {
   const n = s.snapshot;
   const root = rootDisk(s);
   const info = n ? `${n.os || n.osId}, up ${uptime(n.uptime)}` : s.error ? s.error.message : 'Waiting for the first check';
+  const end = eol(n);
   return html`<div class=${`unit ${s.status}`} role="listitem" onClick=${(e) => !e.target.closest('a,input') && go(`/servers/${s.id}`)}>
     <input type="checkbox" checked=${selected} aria-label=${`Select ${s.name}`} onChange=${onSelect} />
     <div class="name">
-      <div class="row nw"><${Lamp} status=${s.status} label /><a class="trunc" href=${`#/servers/${s.id}`} title=${info}>${s.name}</a>${s.tags.map((t) => html`<span class="tag hide-md">${t}</span>`)}</div>
+      <div class="row nw"><${Lamp} status=${s.status} label /><a class="trunc" href=${`#/servers/${s.id}`} title=${info}>${s.name}</a>${end && html`<span class=${`eol ${end.kind}`} title=${`${n.os}: ${end.text}`} role="img" aria-label=${end.text}><${Icon} name="warn" size=${14} /></span>`}${s.tags.map((t) => html`<span class="tag hide-md">${t}</span>`)}</div>
       <span class="mono trunc" title=${info}>${s.user}@${s.host}</span>
     </div>
     <div class="gauge-col"><${Gauge} label="CPU" value=${n?.cpu} /><${Spark} points=${s.spark} idx=${1} /></div>
