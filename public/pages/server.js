@@ -324,13 +324,15 @@ function SettingsTab({ s }) {
   const [test, setTest] = useState(null);
   const save = async () => {
     let key_id = v.key_id;
-    if (key_id === '__new') {
-      const k = await api('/api/keys', { method: 'POST', body: { name: v.name, generate: true } });
-      key_id = k.id;
-      setV({ ...v, key_id });
-      keys.reload(true);
+    const fresh = key_id === '__new';
+    if (fresh) key_id = (await api('/api/keys', { method: 'POST', body: { name: v.name, generate: true } })).id;
+    try {
+      await api(`/api/servers/${s.id}`, { method: 'PUT', body: serverBody({ ...v, key_id }) });
+    } catch (e) {
+      if (fresh) await api(`/api/keys/${key_id}`, { method: 'DELETE' }).catch(() => {}); // no orphan key per failed save
+      throw e;
     }
-    await api(`/api/servers/${s.id}`, { method: 'PUT', body: serverBody({ ...v, key_id }) });
+    if (fresh) { setV((x) => ({ ...x, key_id })); keys.reload(true); }
     setV((x) => ({ ...x, sudo_password: '' }));
     await refreshServers();
     toast('Server saved', 'ok');

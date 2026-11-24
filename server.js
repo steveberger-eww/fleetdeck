@@ -94,7 +94,8 @@ const ruleView = (r) => ({ ...r, enabled: !!r.enabled, server_name: r.server_id 
 // ---------- auth ----------
 let setupToken = null;
 const needsSetup = () => !D.setting('password_hash');
-const clientIp = (req) => (TRUST_PROXY && req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress) || '';
+// Rightmost entry: added by our proxy. The leftmost is client-controlled and would let anyone dodge the login lockout.
+const clientIp = (req) => (TRUST_PROXY && req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',').pop().trim() : req.socket.remoteAddress) || '';
 const isHttps = (req) => !!req.socket.encrypted || (TRUST_PROXY && req.headers['x-forwarded-proto'] === 'https');
 const hostOf = (req) => (TRUST_PROXY && req.headers['x-forwarded-host']) || req.headers.host || '';
 
@@ -102,7 +103,8 @@ function cookies(req) {
   const out = {};
   for (const part of (req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch { /* malformed: ignore, never throw (upgrade handler would crash the process) */ }
   }
   return out;
 }
@@ -235,6 +237,7 @@ route('POST', '/api/account/password', (ctx) => {
 });
 
 route('POST', '/api/account/totp/begin', (ctx) => {
+  if (totpSecret()) throw bad('Two-factor sign-in is already on. Turn it off first (needs password and code).', 409);
   const secret = sec.newTotpSecret();
   pendingTotp.set(ctx.session.hash, secret);
   const uri = `otpauth://totp/Fleetdeck:admin?secret=${secret}&issuer=Fleetdeck&algorithm=SHA1&digits=6&period=30`;
@@ -306,7 +309,8 @@ route('PUT', '/api/servers/:id', (ctx) => {
     audit(ctx, `${sudo ? 'Set' : 'Removed'} the sudo password of ${v.name}`, old.id);
   }
   if (v.paused) { D.run('DELETE FROM alert_state WHERE server_id = ?', old.id); probe.errors.delete(old.id); }
-  ssh.drop(old.id);
+  // Reconnect only when the login changes: dropping the connection kills running jobs and open terminals.
+  if (moved || old.user !== v.user || old.key_id !== v.key_id) ssh.drop(old.id);
   audit(ctx, `Updated server ${v.name}${moved ? ' (address changed, host key will be re-pinned)' : ''}`, old.id);
   const s = getServer(old.id);
   if (!s.paused) probe.probe(s);
@@ -418,7 +422,7 @@ route('PUT', '/api/keys/:id', (ctx) => {
 route('DELETE', '/api/keys/:id', (ctx) => {
   const k = D.get('SELECT * FROM keys WHERE id = ?', ctx.params.id);
   if (!k) throw bad('Key not found', 404);
-  const used = D.all('SELECT name FROM servers WHERE key_id = ?', k.id);
+  const used = D.all("SELECT name FROM servers WHERE key_id = ? UNION ALL SELECT 'repository ' || name FROM repos WHERE key_id = ?", k.id, k.id);
   if (used.length) throw bad(`Key is used by: ${used.map((u) => u.name).join(', ')}`, 409);
   D.run('DELETE FROM keys WHERE id = ?', k.id);
   audit(ctx, `Deleted SSH key "${k.name}"`);
@@ -446,6 +450,7 @@ route('PUT', '/api/scripts/:id', (ctx) => {
 route('DELETE', '/api/scripts/:id', (ctx) => {
   const s = D.get('SELECT * FROM scripts WHERE id = ?', ctx.params.id);
   if (!s) throw bad('Script not found', 404);
+  if (s.builtin) throw bad('Built-in scripts can\'t be deleted (the server pages use them). Edit it instead.', 409);
   D.run('DELETE FROM scripts WHERE id = ?', s.id);
   audit(ctx, `Deleted script "${s.name}"`);
   return { ok: true };
@@ -507,7 +512,7 @@ route('GET', '/api/repos/:id/files', async (ctx) => {
 route('GET', '/api/tools', () => repos.tools());
 
 // ---- jobs ----
-route('GET', '/api/jobs', (ctx) => jobs.listJobs({ serverId: ctx.query.server, limit: ctx.query.limit, before: ctx.query.before }));
+route('GET', '/api/jobs', (ctx) => jobs.listJobs({ serverId: ctx.query.server, limit: ctx.query.limit, before: ctx.query.before, status: ctx.query.status }));
 route('POST', '/api/jobs', (ctx) => {
   const b = ctx.body;
   let spec;
@@ -663,7 +668,7 @@ route('GET', '/api/events', (ctx) => {
   for (const k of ['kind', 'level', 'server_id']) if (ctx.query[k]) { where.push(`${k} = ?`); p.push(ctx.query[k]); }
   if (ctx.query.before) { where.push('id < ?'); p.push(Number(ctx.query.before)); }
   if (ctx.query.q) { where.push('message LIKE ?'); p.push(`%${ctx.query.q}%`); }
-  const lim = Math.min(Number(ctx.query.limit) || 100, 500);
+  const lim = Math.min(Math.max(Math.floor(Number(ctx.query.limit)) || 100, 1), 500); // negative LIMIT = unlimited in SQLite
   return D.all(`SELECT e.*, s.name AS server_name FROM events e LEFT JOIN servers s ON s.id = e.server_id
     ${where.length ? 'WHERE ' + where.map((w) => 'e.' + w).join(' AND ') : ''} ORDER BY e.id DESC LIMIT ${lim}`, ...p).map((e) => ({ ...e }));
 });
@@ -742,6 +747,8 @@ async function handle(req, res) {
     if (!m) continue;
     const ctx = { req, res, ip: clientIp(req), params: m.groups || {}, query: Object.fromEntries(url.searchParams), session: session(req) };
     if (!r.open && !ctx.session) return json(res, 401, { error: 'Not signed in' });
+    // Sliding cookie, so "7 idle days" holds; otherwise the browser drops it 7 days after sign-in.
+    if (ctx.session && now() - ctx.session.seen_at > 3600e3) res.setHeader('Set-Cookie', sessionCookie(req, cookies(req).fd_session, SESSION_MS / 1000));
     ctx.body = mutating ? await readBody(req) : {};
     const out = await r.handler(ctx);
     if (out !== undefined && !res.headersSent) json(res, 200, out);
@@ -771,6 +778,7 @@ function terminal(ws, server, req) {
   D.event('audit', `Opened terminal on ${server.name}`, { actor: 'admin', ip: clientIp(req), serverId: server.id });
   ssh.shell(server, { cols: clamp(u.searchParams.get('cols'), 80, 500), rows: clamp(u.searchParams.get('rows'), 24, 200) }, (st) => {
     stream = st;
+    if (ws.readyState > 1) return st.close(); // browser left before the shell opened: don't leak the channel
     st.on('data', (d) => ws.readyState === 1 && ws.send(d));
     st.stderr?.on('data', (d) => ws.readyState === 1 && ws.send(d));
     st.on('close', () => ws.close(1000, 'session ended'));

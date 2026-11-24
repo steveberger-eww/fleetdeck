@@ -37,7 +37,7 @@ export function useLoad(fn, deps = [], { poll } = {}) {
     if (!poll) return;
     const t = setInterval(() => document.visibilityState === 'visible' && reload(true), poll);
     return () => clearInterval(t);
-  }, [reload]);
+  }, [reload, poll]); // poll in deps: toggling it (e.g. "Follow" in logs) must start/stop the timer
   return { ...state, reload };
 }
 

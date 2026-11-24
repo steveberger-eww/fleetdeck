@@ -45,6 +45,7 @@ export function Overview() {
   const [adding, setAdding] = useState(false);
   const alerts = useLoad(() => api('/api/alerts'), [], { poll: 30_000 });
   const jobs = useLoad(() => api('/api/jobs?limit=6'), [], { poll: 10_000 });
+  const runningJobs = useLoad(() => api('/api/jobs?status=running&limit=200'), [], { poll: 10_000 });
 
   const tags = useMemo(() => [...new Set((servers || []).flatMap((s) => s.tags))].sort(), [servers]);
   const list = useMemo(() => {
@@ -60,7 +61,7 @@ export function Overview() {
   const updates = servers.reduce((a, s) => a + (s.snapshot?.updates || 0), 0);
   const security = servers.reduce((a, s) => a + (s.snapshot?.security || 0), 0);
   const firing = alerts.data?.firing || [];
-  const running = (jobs.data || []).filter((j) => j.status === 'running').length;
+  const running = runningJobs.data?.length || 0;
   const toggle = (id) => setSel((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const allSel = list.length > 0 && list.every((s) => sel.has(s.id));
 
@@ -172,9 +173,14 @@ function ServerDialog({ onClose }) {
     try {
       let key = keys.data?.find((k) => k.id === v.key_id) || null;
       if (v.key_id === '__new') key = await api('/api/keys', { method: 'POST', body: { name: v.name || v.host, generate: true } });
-      const server = await api('/api/servers', { method: 'POST', body: serverBody({ ...v, key_id: key?.id || null }) });
-      refreshServers();
-      setCreated({ server, key });
+      try {
+        const server = await api('/api/servers', { method: 'POST', body: serverBody({ ...v, key_id: key?.id || null }) });
+        refreshServers();
+        setCreated({ server, key });
+      } catch (e) {
+        if (v.key_id === '__new') await api(`/api/keys/${key.id}`, { method: 'DELETE' }).catch(() => {}); // no orphan key per failed attempt
+        throw e;
+      }
     } catch (e) { setErr(e.message); }
   };
   const runTest = async () => setTest(await api(`/api/servers/${created.server.id}/test`, { method: 'POST' }));

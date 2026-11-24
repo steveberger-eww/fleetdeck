@@ -70,6 +70,7 @@ test('TOTP matches RFC 6238 vector', () => {
   assert.strictEqual(sec.totp(secret, 1), '287082'); // T=59s
   assert.strictEqual(sec.verifyTotp(secret, '287082', 59_000), 1);
   assert.strictEqual(sec.verifyTotp(secret, '000000', 59_000), null);
+  for (const junk of ['ééé', '12 345', '', undefined, '2870821']) assert.strictEqual(sec.verifyTotp(secret, junk, 59_000), null); // never throws
 });
 
 test('server validation blocks ssh option injection', () => {

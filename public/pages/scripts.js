@@ -27,7 +27,7 @@ export function ScriptsPage() {
           <td class="act"><div class="row nw">
             <${Btn} size="sm" icon="play" onClick=${() => openRun({ scriptId: s.id })}>Run</${Btn}>
             <${Btn} size="sm" kind="ghost" icon="edit" title="Edit" onClick=${() => setEdit(s)} />
-            <${Btn} size="sm" kind="ghost" icon="trash" title="Delete" onClick=${() => del(s)} />
+            ${!s.builtin && html`<${Btn} size="sm" kind="ghost" icon="trash" title="Delete" onClick=${() => del(s)} />`}
           </div></td></tr>`)}</tbody></table></div>`}
     </section>
     ${edit && html`<${ScriptDialog} script=${edit} onClose=${() => setEdit(null)} onSaved=${() => { setEdit(null); scripts.reload(true); }} />`}
