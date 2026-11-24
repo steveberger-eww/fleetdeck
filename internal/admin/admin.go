@@ -809,30 +809,39 @@ func clampLines(v string) string {
 
 var priorityRe = regexp.MustCompile(`^[0-7]$`)
 
-func Logs(ctx context.Context, s *db.Server, o LogsOpts) ([]LogEntry, error) {
+// LogsCommand is the journalctl command for o; a bad filter is an HTTP 400 error.
+func LogsCommand(o LogsOpts) (string, error) {
 	args := []string{"--no-pager", "-o", "json", "-n", clampLines(o.Lines)}
 	if o.Unit != "" {
 		if !UnitRe.MatchString(o.Unit) {
-			return nil, httperr.Bad("invalid unit name")
+			return "", httperr.Bad("invalid unit name")
 		}
 		args = append(args, "-u", o.Unit)
 	}
 	if o.Priority != "" {
 		if !priorityRe.MatchString(o.Priority) {
-			return nil, httperr.Bad("invalid priority")
+			return "", httperr.Bad("invalid priority")
 		}
 		args = append(args, "-p", o.Priority)
 	}
 	if o.Since != "" {
 		if since[o.Since] == "" {
-			return nil, httperr.Bad("invalid range")
+			return "", httperr.Bad("invalid range")
 		}
 		args = append(args, "--since", since[o.Since])
 	}
 	for i, a := range args {
 		args[i] = q(a)
 	}
-	out, err := sh(ctx, s, "journalctl "+strings.Join(args, " "), shOpts{allowFail: true, maxOutput: 8_000_000})
+	return "journalctl " + strings.Join(args, " "), nil
+}
+
+func Logs(ctx context.Context, s *db.Server, o LogsOpts) ([]LogEntry, error) {
+	cmd, err := LogsCommand(o)
+	if err != nil {
+		return nil, err
+	}
+	out, err := sh(ctx, s, cmd, shOpts{allowFail: true, maxOutput: 8_000_000})
 	if err != nil {
 		return nil, err
 	}
