@@ -63,10 +63,10 @@ func jsonValue(v any) (driver.Value, error) {
 
 // Param is a script parameter definition.
 type Param struct {
-	Name     string `json:"name"`
-	Label    string `json:"label"`
-	Default  string `json:"default"`
-	Required bool   `json:"required"`
+	Name     string   `json:"name"`
+	Label    string   `json:"label"`
+	Default  string   `json:"default"`
+	Required bool     `json:"required"`
 	Type     string   `json:"type,omitempty"`    // "" (text) | checkbox | choice
 	Options  []string `json:"options,omitempty"` // choice only
 }
