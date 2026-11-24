@@ -4,7 +4,6 @@ package jobs
 import (
 	"cmp"
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
@@ -20,8 +19,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/jmoiron/sqlx"
 
 	"fleetdeck/internal/db"
 	"fleetdeck/internal/httperr"
@@ -172,7 +169,7 @@ func (t Targets) Value() (driver.Value, error) { return jsonValue(t) }
 func Seed() error {
 	now := db.Now()
 	for _, s := range Builtin {
-		if _, err := db.Exec(`INSERT OR IGNORE INTO scripts (id, name, description, body, as_root, params, builtin, created_at) VALUES (?, ?, ?, ?, 1, ?, 1, ?)`,
+		if _, err := db.Exec(`INSERT INTO scripts (id, name, description, body, as_root, params, builtin, created_at) VALUES (?, ?, ?, ?, 1, ?, 1, ?) ON CONFLICT DO NOTHING`,
 			s.ID, s.Name, s.Description, s.Body, s.Params, now); err != nil {
 			return err
 		}
@@ -183,6 +180,7 @@ func Seed() error {
 // Script is a scripts row with params/vars decoded and the flags as booleans (the JS scriptRow).
 type Script struct {
 	ID          string  `db:"id" json:"id"`
+	TenantID    *string `db:"tenant_id" json:"-"` // nil = the shared library
 	Name        string  `db:"name" json:"name"`
 	Description string  `db:"description" json:"description"`
 	Body        string  `db:"body" json:"body"`
@@ -199,6 +197,11 @@ type Script struct {
 // GetScript loads a script (nil, nil if missing).
 func GetScript(id string) (*Script, error) {
 	return db.Get[Script](`SELECT * FROM scripts WHERE id = ?`, id)
+}
+
+// ScriptFor loads a script the organization can run: its own or one from the shared library (nil, nil if neither).
+func ScriptFor(tenant, id string) (*Script, error) {
+	return db.Get[Script](`SELECT * FROM scripts WHERE id = ? AND (tenant_id = ? OR tenant_id IS NULL)`, id, tenant)
 }
 
 // ScriptInput is the request body of script create/update.
@@ -228,7 +231,9 @@ type ScriptFields struct {
 
 var identRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 
-func ValidateScript(b ScriptInput) (*ScriptFields, error) {
+// ValidateScript checks a script of the organization tenant; tenant "" is the shared library, whose scripts run in
+// every organization: no playbooks (repositories belong to one organization), variables resolve where they run.
+func ValidateScript(tenant string, b ScriptInput) (*ScriptFields, error) {
 	name := strings.TrimSpace(b.Name)
 	kind := "shell"
 	if b.Kind == "ansible" {
@@ -244,8 +249,11 @@ func ValidateScript(b ScriptInput) (*ScriptFields, error) {
 	if kind == "shell" && (strings.TrimSpace(body) == "" || jsLen(body) > 100_000) {
 		return nil, httperr.Bad("script body required (max 100 KB)")
 	}
+	if kind == "ansible" && tenant == "" {
+		return nil, httperr.Bad("Shared scripts can't be playbooks: repositories belong to one organization")
+	}
 	if kind == "ansible" {
-		if ok, err := exists(`SELECT 1 FROM repos WHERE id = ?`, b.RepoID); err != nil || !ok {
+		if ok, err := exists(`SELECT 1 FROM repos WHERE id = ? AND tenant_id = ?`, b.RepoID, tenant); err != nil || !ok {
 			return nil, cmp.Or(err, httperr.Bad("Pick a repository"))
 		}
 		if !repos.ValidPlaybook(b.Playbook) {
@@ -262,7 +270,13 @@ func ValidateScript(b ScriptInput) (*ScriptFields, error) {
 		}
 	}
 	for _, n := range vars {
-		if ok, err := exists(`SELECT 1 FROM variables WHERE name = ?`, n); err != nil || !ok {
+		if !identRE.MatchString(n) {
+			return nil, httperr.Bad(fmt.Sprintf("invalid variable name \"%s\"", n))
+		}
+		if tenant == "" {
+			continue
+		}
+		if ok, err := exists(`SELECT 1 FROM variables WHERE name = ? AND tenant_id = ?`, n, tenant); err != nil || !ok {
 			return nil, cmp.Or(err, httperr.Bad(fmt.Sprintf("unknown variable \"%s\"", n)))
 		}
 	}
@@ -332,6 +346,7 @@ func truncate(s string, n int) string {
 // Variable is a row of the variables table.
 type Variable struct {
 	ID          string `db:"id"`
+	TenantID    string `db:"tenant_id" json:"-"`
 	Name        string `db:"name"`
 	ValueEnc    string `db:"value_enc"`
 	Secret      bool   `db:"secret"`
@@ -355,7 +370,7 @@ type VariableFields struct {
 	Description string
 }
 
-func ValidateVariable(b VariableInput, existing *Variable) (*VariableFields, error) {
+func ValidateVariable(tenant string, b VariableInput, existing *Variable) (*VariableFields, error) {
 	name := strings.TrimSpace(b.Name)
 	if existing != nil {
 		name = existing.Name // name is the reference scripts use: fixed once created
@@ -364,7 +379,7 @@ func ValidateVariable(b VariableInput, existing *Variable) (*VariableFields, err
 		return nil, httperr.Bad("Name: letters, digits and underscore, not starting with a digit")
 	}
 	if existing == nil {
-		if ok, err := exists(`SELECT 1 FROM variables WHERE name = ?`, name); err != nil || ok {
+		if ok, err := exists(`SELECT 1 FROM variables WHERE name = ? AND tenant_id = ?`, name, tenant); err != nil || ok {
 			return nil, cmp.Or(err, httperr.New(409, fmt.Sprintf("A variable named %s already exists", name)))
 		}
 	}
@@ -397,7 +412,7 @@ func ValidateVariable(b VariableInput, existing *Variable) (*VariableFields, err
 }
 
 // Decrypted only while a job starts; never written to the job row. Secret values are masked in output.
-func sharedVars(scriptID string) (vars map[string]string, secrets []string, err error) {
+func sharedVars(tenant, scriptID string) (vars map[string]string, secrets []string, err error) {
 	vars = map[string]string{}
 	if scriptID == "" {
 		return vars, nil, nil
@@ -407,7 +422,7 @@ func sharedVars(scriptID string) (vars map[string]string, secrets []string, err 
 		return vars, nil, err
 	}
 	for _, n := range *names {
-		v, err := db.Get[Variable](`SELECT * FROM variables WHERE name = ?`, n)
+		v, err := db.Get[Variable](`SELECT * FROM variables WHERE name = ? AND tenant_id = ?`, n, tenant)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -447,6 +462,8 @@ type Spec struct {
 	Params   Values
 	Targets  Targets
 	Actor    string
+	TenantID string // the organization the job runs in; targets resolve within it
+	Member   string // a user who sees only their assigned servers; "" = every server of the organization
 }
 
 // SpecFromScript is everything needed to start a job from a saved script (Targets and Actor still to set).
@@ -470,8 +487,10 @@ func tagsOf(s *db.Server) []string {
 	return out
 }
 
-func ResolveTargets(t Targets) ([]db.Server, error) {
-	all, err := db.Select[db.Server](`SELECT * FROM servers ORDER BY name`)
+// ResolveTargets lists the organization's servers the targets match; with member set, only those assigned to them.
+func ResolveTargets(tenant, member string, t Targets) ([]db.Server, error) {
+	all, err := db.Select[db.Server](`SELECT * FROM servers WHERE tenant_id = ?
+    AND (? = '' OR id IN (SELECT server_id FROM server_members WHERE user_id = ?)) ORDER BY name`, tenant, member, member)
 	if err != nil {
 		return nil, err
 	}
@@ -503,11 +522,11 @@ type liveJob struct {
 var (
 	mu            sync.Mutex
 	live          = map[int64]*liveJob{}
-	doneListeners []func(id int64, name, status, actor string, runStatuses []string)
+	doneListeners []func(tenant string, id int64, name, status, actor string, runStatuses []string)
 )
 
 // OnJobDone registers a listener called after every job finishes. runStatuses include the ansible pseudo-run.
-func OnJobDone(fn func(id int64, name, status, actor string, runStatuses []string)) {
+func OnJobDone(fn func(tenant string, id int64, name, status, actor string, runStatuses []string)) {
 	mu.Lock()
 	defer mu.Unlock()
 	doneListeners = append(doneListeners, fn)
@@ -552,7 +571,7 @@ func saveRun(jobID int64, server, status, output string, code *int) {
 		fin = nil
 	}
 	if _, err := db.Exec(`UPDATE job_runs SET status = ?, exit_code = ?, output = ?, started_at = COALESCE(started_at, ?), finished_at = ? WHERE job_id = ? AND server_id = ?`,
-		status, code, output, now, fin, jobID, server); err != nil {
+		status, code, db.PgText(output), now, fin, jobID, server); err != nil {
 		log.Printf("job #%d: save run %s: %v", jobID, server, err)
 	}
 }
@@ -578,14 +597,17 @@ var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // StartJob creates the job and runs it in the background; it returns the job id.
 func StartJob(sp Spec) (int64, error) {
-	servers, err := ResolveTargets(sp.Targets)
+	if sp.TenantID == "" {
+		return 0, errors.New("job without an organization")
+	}
+	servers, err := ResolveTargets(sp.TenantID, sp.Member, sp.Targets)
 	if err != nil {
 		return 0, err
 	}
 	if len(servers) == 0 {
 		return 0, httperr.Bad("No servers match the selected targets")
 	}
-	vars, secrets, err := sharedVars(sp.ScriptID)
+	vars, secrets, err := sharedVars(sp.TenantID, sp.ScriptID)
 	if err != nil {
 		return 0, err
 	}
@@ -629,11 +651,11 @@ func startShellJob(sp Spec, servers []db.Server, merged Values, mask func(string
 		return 0, err
 	}
 	j := newLive(jobID, servers, false, mask)
-	db.Event("job", fmt.Sprintf("Job #%d \"%s\" started on %s", jobID, sp.Name, serverNames(servers)), db.EventOpts{Actor: sp.Actor})
+	db.Event("job", fmt.Sprintf("Job #%d \"%s\" started on %s", jobID, sp.Name, serverNames(servers)), db.EventOpts{Actor: sp.Actor, TenantID: sp.TenantID})
 
 	go func() {
 		defer guard(fmt.Sprintf("job #%d", jobID))
-		defer finishJob(jobID, j, sp.Name, sp.Actor)
+		defer finishJob(jobID, j, sp)
 		queue := make(chan db.Server, len(servers))
 		for _, s := range servers {
 			queue <- s
@@ -664,24 +686,20 @@ func nullable(s string) any {
 
 func insertJob(sp Spec, servers []db.Server, ansible bool) (int64, error) {
 	var id int64
-	err := db.Tx(func(tx *sqlx.Tx) error {
-		var res sql.Result
+	err := db.Tx(func(tx db.Txn) error {
 		var err error
 		asRoot := 0
 		if sp.AsRoot {
 			asRoot = 1
 		}
 		if ansible {
-			res, err = tx.Exec(`INSERT INTO jobs (script_id, name, body, as_root, params, status, actor, created_at, kind, repo_id, options) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now(), "ansible", nullable(sp.RepoID), sp.Options)
+			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at, kind, repo_id, options) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now(), "ansible", nullable(sp.RepoID), sp.Options)
 		} else {
-			res, err = tx.Exec(`INSERT INTO jobs (script_id, name, body, as_root, params, status, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now())
+			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now())
 		}
 		if err != nil {
-			return err
-		}
-		if id, err = res.LastInsertId(); err != nil {
 			return err
 		}
 		if ansible {
@@ -725,7 +743,7 @@ func serverNames(servers []db.Server) string {
 	return strings.Join(names, ", ")
 }
 
-func finishJob(jobID int64, j *liveJob, name, actor string) {
+func finishJob(jobID int64, j *liveJob, sp Spec) {
 	mu.Lock()
 	statuses := make([]string, len(j.order))
 	status := "success"
@@ -750,7 +768,7 @@ func finishJob(jobID int64, j *liveJob, name, actor string) {
 	for _, fn := range fns {
 		func() {
 			defer guard("job done listener")
-			fn(jobID, name, status, actor, statuses)
+			fn(sp.TenantID, jobID, sp.Name, status, sp.Actor, statuses)
 		}()
 	}
 }
@@ -770,11 +788,11 @@ func startAnsibleJob(sp Spec, servers []db.Server, plain map[string]string, mask
 	if check {
 		dry = ", dry run"
 	}
-	db.Event("job", fmt.Sprintf("Job #%d \"%s\" (ansible %s%s) started on %s", jobID, sp.Name, sp.Body, dry, serverNames(servers)), db.EventOpts{Actor: sp.Actor})
+	db.Event("job", fmt.Sprintf("Job #%d \"%s\" (ansible %s%s) started on %s", jobID, sp.Name, sp.Body, dry, serverNames(servers)), db.EventOpts{Actor: sp.Actor, TenantID: sp.TenantID})
 
 	go func() {
 		defer guard(fmt.Sprintf("job #%d", jobID))
-		defer finishJob(jobID, j, sp.Name, sp.Actor) // also after a panic, so the job never stays live
+		defer finishJob(jobID, j, sp) // also after a panic, so the job never stays live
 		out := func(d string) { j.data(Ansible, mask(d)) }
 		for _, id := range j.order {
 			j.set(jobID, id, "running", nil)
@@ -958,6 +976,7 @@ type Run struct {
 // Job is a jobs row with its runs; live runs carry their current status and output.
 type Job struct {
 	ID         int64   `db:"id" json:"id"`
+	TenantID   string  `db:"tenant_id" json:"-"`
 	ScriptID   *string `db:"script_id" json:"script_id"`
 	Name       string  `db:"name" json:"name"`
 	Body       string  `db:"body" json:"body"`
@@ -1010,6 +1029,8 @@ func GetJob(id int64) (*Job, error) {
 // ListOpts are the query parameters of the job list, as strings (coerced like the JS did).
 type ListOpts struct {
 	Server, Limit, Before, Status string
+	Tenant                        string
+	Member                        string // a user who sees only jobs and runs on their assigned servers; "" = all
 }
 
 // JobSummary is a row of the job list.
@@ -1037,8 +1058,10 @@ func ListJobs(o ListOpts) ([]JobSummary, error) {
 	if f, err := strconv.ParseFloat(o.Limit, 64); err == nil && math.Floor(f) != 0 && !math.IsInf(f, 0) {
 		lim = int(min(max(math.Floor(f), 1), 200))
 	}
-	var where []string
-	var args []any
+	where, args := []string{"tenant_id = ?"}, []any{o.Tenant}
+	if o.Member != "" {
+		where, args = append(where, "id IN (SELECT job_id FROM job_runs WHERE server_id IN (SELECT server_id FROM server_members WHERE user_id = ?))"), append(args, o.Member)
+	}
 	if o.Status != "" {
 		where, args = append(where, "status = ?"), append(args, o.Status)
 	}
@@ -1058,7 +1081,8 @@ func ListJobs(o ListOpts) ([]JobSummary, error) {
 		return nil, err
 	}
 	for i := range rows {
-		if rows[i].Runs, err = db.Select[RunSummary](`SELECT server_id, server_name, status, exit_code FROM job_runs WHERE job_id = ? AND server_id != '__ansible__'`, rows[i].ID); err != nil {
+		if rows[i].Runs, err = db.Select[RunSummary](`SELECT server_id, server_name, status, exit_code FROM job_runs WHERE job_id = ? AND server_id != '__ansible__'
+      AND (? = '' OR server_id IN (SELECT server_id FROM server_members WHERE user_id = ?))`, rows[i].ID, o.Member, o.Member); err != nil {
 			return nil, err
 		}
 	}
@@ -1231,12 +1255,12 @@ type ScheduleFields struct {
 }
 
 // ValidateSchedule validates a schedule; withCron=false for webhook triggers, which share the shape but have no cron.
-func ValidateSchedule(b ScheduleInput, withCron bool) (*ScheduleFields, error) {
+func ValidateSchedule(tenant string, b ScheduleInput, withCron bool) (*ScheduleFields, error) {
 	name := strings.TrimSpace(b.Name)
 	if name == "" || jsLen(name) > 100 {
 		return nil, httperr.Bad("name required")
 	}
-	sc, err := GetScript(b.ScriptID)
+	sc, err := ScriptFor(tenant, b.ScriptID)
 	if sc == nil || err != nil {
 		return nil, cmp.Or(err, httperr.Bad("unknown script"))
 	}
@@ -1288,6 +1312,7 @@ func ValidateSchedule(b ScheduleInput, withCron bool) (*ScheduleFields, error) {
 // Schedule is a schedules row (JSON: targets/params decoded, enabled as bool).
 type Schedule struct {
 	ID        string  `db:"id" json:"id"`
+	TenantID  string  `db:"tenant_id" json:"-"`
 	Name      string  `db:"name" json:"name"`
 	ScriptID  string  `db:"script_id" json:"script_id"`
 	Cron      string  `db:"cron" json:"cron"`
@@ -1303,6 +1328,7 @@ type Schedule struct {
 // Trigger is a triggers (webhook) row; the token hash never leaves the server.
 type Trigger struct {
 	ID        string  `db:"id" json:"id"`
+	TenantID  string  `db:"tenant_id" json:"-"`
 	Name      string  `db:"name" json:"name"`
 	ScriptID  string  `db:"script_id" json:"script_id"`
 	Targets   Targets `db:"targets" json:"targets"`
@@ -1315,8 +1341,8 @@ type Trigger struct {
 }
 
 // Start a saved schedule or trigger row and record it as its last run.
-func runSaved(table, id, name, scriptID string, params Values, targets Targets, actor string) (int64, error) {
-	script, err := GetScript(scriptID)
+func runSaved(tenant, table, id, name, scriptID string, params Values, targets Targets, actor string) (int64, error) {
+	script, err := ScriptFor(tenant, scriptID)
 	if err != nil {
 		return 0, err
 	}
@@ -1334,7 +1360,7 @@ func runSaved(table, id, name, scriptID string, params Values, targets Targets, 
 		return 0, err
 	}
 	sp := SpecFromScript(script, merged, false)
-	sp.Name, sp.Targets, sp.Actor = script.Name+" · "+name, targets, actor
+	sp.Name, sp.Targets, sp.Actor, sp.TenantID = script.Name+" · "+name, targets, actor, tenant
 	jobID, err := StartJob(sp)
 	if err != nil {
 		return 0, err
@@ -1345,12 +1371,12 @@ func runSaved(table, id, name, scriptID string, params Values, targets Targets, 
 
 // RunSchedule starts a schedule now; actor "" = "schedule: <name>".
 func RunSchedule(s *Schedule, actor string) (int64, error) {
-	return runSaved("schedules", s.ID, s.Name, s.ScriptID, s.Params, s.Targets, cmp.Or(actor, "schedule: "+s.Name))
+	return runSaved(s.TenantID, "schedules", s.ID, s.Name, s.ScriptID, s.Params, s.Targets, cmp.Or(actor, "schedule: "+s.Name))
 }
 
 // RunTrigger starts a webhook's script.
 func RunTrigger(t *Trigger) (int64, error) {
-	return runSaved("triggers", t.ID, t.Name, t.ScriptID, t.Params, t.Targets, "webhook: "+t.Name)
+	return runSaved(t.TenantID, "triggers", t.ID, t.Name, t.ScriptID, t.Params, t.Targets, "webhook: "+t.Name)
 }
 
 func tick() {
@@ -1370,7 +1396,7 @@ func tick() {
 		if err == nil {
 			// No pile-ups: a slow or hung run blocks the next one instead of stacking more jobs on the same hosts.
 			if s.LastJob != nil && IsRunning(*s.LastJob) {
-				db.Event("schedule", fmt.Sprintf("Schedule \"%s\" skipped: job #%d from its previous run is still running", s.Name, *s.LastJob), db.EventOpts{Level: "warn"})
+				db.Event("schedule", fmt.Sprintf("Schedule \"%s\" skipped: job #%d from its previous run is still running", s.Name, *s.LastJob), db.EventOpts{Level: "warn", TenantID: s.TenantID})
 				continue
 			}
 			_, err = RunSchedule(s, "")
@@ -1380,7 +1406,7 @@ func tick() {
 			}
 		}
 		if err != nil {
-			db.Event("schedule", fmt.Sprintf("Schedule \"%s\" failed to start: %s", s.Name, err), db.EventOpts{Level: "error"})
+			db.Event("schedule", fmt.Sprintf("Schedule \"%s\" failed to start: %s", s.Name, err), db.EventOpts{Level: "error", TenantID: s.TenantID})
 		}
 	}
 }

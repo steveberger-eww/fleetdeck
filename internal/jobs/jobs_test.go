@@ -15,13 +15,14 @@ import (
 
 func TestMain(m *testing.M) {
 	dir, _ := os.MkdirTemp("", "fleetdeck-test-")
-	if err := db.Open(dir); err != nil {
+	if err := db.OpenTest(dir); err != nil {
 		panic(err)
 	}
 	if err := sec.Init(); err != nil {
 		panic(err)
 	}
 	code := m.Run()
+	db.DropTest()
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
@@ -64,24 +65,24 @@ func TestRebootDetection(t *testing.T) {
 
 func TestSharedVariables(t *testing.T) {
 	str := func(s string) *string { return &s }
-	if _, err := ValidateVariable(VariableInput{Name: "1BAD", Value: str("x")}, nil); err == nil {
+	if _, err := ValidateVariable("default", VariableInput{Name: "1BAD", Value: str("x")}, nil); err == nil {
 		t.Error("1BAD")
 	}
-	if _, err := ValidateVariable(VariableInput{Name: "TOKEN", Value: str("")}, nil); err == nil {
+	if _, err := ValidateVariable("default", VariableInput{Name: "TOKEN", Value: str("")}, nil); err == nil {
 		t.Error("empty value")
 	}
-	v, err := ValidateVariable(VariableInput{Name: "TOKEN", Value: str("s3cr3t-value")}, nil)
+	v, err := ValidateVariable("default", VariableInput{Name: "TOKEN", Value: str("s3cr3t-value")}, nil)
 	if err != nil || v.Secret != 1 || strings.Contains(v.ValueEnc, "s3cr3t") {
 		t.Fatal(v, err)
 	}
 	if _, err := db.Exec(`INSERT INTO variables (id, name, value_enc, secret, created_at) VALUES (?, ?, ?, ?, 0)`, "v1", v.Name, v.ValueEnc, v.Secret); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ValidateVariable(VariableInput{Name: "TOKEN", Value: str("y")}, nil); err == nil || !strings.Contains(err.Error(), "already exists") {
+	if _, err := ValidateVariable("default", VariableInput{Name: "TOKEN", Value: str("y")}, nil); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Error(err)
 	}
 	old, _ := db.Get[Variable](`SELECT * FROM variables WHERE id = 'v1'`)
-	kept, err := ValidateVariable(VariableInput{Value: str(""), Name: "RENAMED"}, old)
+	kept, err := ValidateVariable("default", VariableInput{Value: str(""), Name: "RENAMED"}, old)
 	if err != nil || kept.Name != "TOKEN" { // can't rename
 		t.Fatal(kept, err)
 	}
@@ -89,17 +90,17 @@ func TestSharedVariables(t *testing.T) {
 		t.Error(plain)
 	}
 	script := ScriptInput{Name: "s", Body: "echo", Vars: []string{"TOKEN"}}
-	if s, err := ValidateScript(script); err != nil || !slices.Equal(s.Vars, Names{"TOKEN"}) {
+	if s, err := ValidateScript("default", script); err != nil || !slices.Equal(s.Vars, Names{"TOKEN"}) {
 		t.Fatal(s, err)
 	}
 	nope := script
 	nope.Vars = []string{"NOPE"}
-	if _, err := ValidateScript(nope); err == nil || !strings.Contains(err.Error(), "unknown variable") {
+	if _, err := ValidateScript("default", nope); err == nil || !strings.Contains(err.Error(), "unknown variable") {
 		t.Error(err)
 	}
 	clash := script
 	clash.Params = []Param{{Name: "TOKEN"}}
-	if _, err := ValidateScript(clash); err == nil || !strings.Contains(err.Error(), "both a parameter") {
+	if _, err := ValidateScript("default", clash); err == nil || !strings.Contains(err.Error(), "both a parameter") {
 		t.Error(err)
 	}
 	if got := Masker([]string{"s3cr3t-value"})("token=s3cr3t-value; again s3cr3t-value"); got != "token=••••••; again ••••••" {
@@ -135,7 +136,7 @@ func TestRunAt(t *testing.T) {
 	}
 	when := time.Now().Add(3 * time.Hour)
 	in := ScheduleInput{Name: "later", ScriptID: "update", Targets: &Targets{All: true}, RunAt: new(when.UnixMilli())}
-	v, err := ValidateSchedule(in, true)
+	v, err := ValidateSchedule("default", in, true)
 	if err != nil || v.Once != 1 {
 		t.Fatal(v, err)
 	}
@@ -143,7 +144,7 @@ func TestRunAt(t *testing.T) {
 		t.Fatal("cron", *v.Cron)
 	}
 	in.RunAt = new(time.Now().UnixMilli())
-	if _, err := ValidateSchedule(in, true); err == nil {
+	if _, err := ValidateSchedule("default", in, true); err == nil {
 		t.Fatal("current minute must be rejected")
 	}
 }

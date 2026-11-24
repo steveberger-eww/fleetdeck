@@ -1,6 +1,6 @@
 import {
   html, useState, useEffect, useMemo, api, go, store, useStore, useLoad, useQuery, serversStore, toast, confirmBox,
-  Btn, Th, useSort, Lamp, JobChip, Empty, Field, ParamInput, Modal, Loading, ErrorNote, Output, ago, dur, when, plural,
+  Btn, Th, useSort, Lamp, JobChip, Empty, Field, ParamInput, Modal, Loading, ErrorNote, Output, ago, dur, when, plural, can,
 } from '../ui.js';
 
 // ---------- the one guard for destructive runs ----------
@@ -127,7 +127,7 @@ export function JobsTable({ serverId, limit = 30, status = '' }) {
   if (jobs.error) return html`<div class="panel-b"><${ErrorNote} error=${jobs.error} retry=${jobs.reload} /></div>`;
   if (!rows.length) {
     return status ? html`<${Empty} title=${`No ${status} jobs`} />`
-      : html`<${Empty} title="No jobs yet" action=${html`<${Btn} icon="play" onClick=${() => openRun(serverId ? { targets: { servers: [serverId] } } : {})}>Run a script</${Btn}>`}>Every script you run is kept here with its full output.</${Empty}>`;
+      : html`<${Empty} title="No jobs yet" action=${can('operator') && html`<${Btn} icon="play" onClick=${() => openRun(serverId ? { targets: { servers: [serverId] } } : {})}>Run a script</${Btn}>`}>Every script you run is kept here with its full output.</${Empty}>`;
   }
   return html`<div class="table-wrap"><table class="t">
     <thead><tr><${Th} sort=${sort} k="name">Job</${Th}><${Th} sort=${sort} k="status">Status</${Th}><${Th} sort=${sort} k="servers" get=${(j) => j.runs.length} desc>Servers</${Th}><${Th} sort=${sort} k="actor" class="hide-sm">Started by</${Th}><${Th} sort=${sort} k="created_at" desc>Started</${Th}><${Th} sort=${sort} k="took" get=${(j) => j.finished_at && j.finished_at - j.created_at} class="num hide-sm" desc>Took</${Th}></tr></thead>
@@ -149,7 +149,7 @@ export function JobsPage() {
   const [status, setStatus] = useQuery('status');
   return html`<div class="page">
     <div class="page-h"><div><h1>Jobs</h1><p class="sub">Every script run, with per-server output. Kept for 90 days by default.</p></div>
-      <div class="right"><${Btn} kind="primary" icon="play" onClick=${() => openRun()}>Run script</${Btn}></div></div>
+      ${can('operator') && html`<div class="right"><${Btn} kind="primary" icon="play" onClick=${() => openRun()}>Run script</${Btn}></div>`}</div>
     <section class="panel">
       <div class="panel-h"><div class="seg" role="group" aria-label="Status">${STATUS_FILTERS.map(([k, l]) => html`<button aria-pressed=${status === k} onClick=${() => setStatus(k)}>${l}</button>`)}</div></div>
       <${JobsTable} limit=${40} status=${status} />
@@ -210,11 +210,11 @@ export function JobPage({ id }) {
     <div class="page-h">
       <div><div class="row"><h1>${job.name}</h1><${JobChip} status=${job.status} /></div>
         <p class="sub">Job #${job.id}, started by ${job.actor} ${ago(job.created_at)}, ${job.finished_at ? 'took' : 'running for'} ${dur(took)}${job.options?.check ? '. Dry run, nothing was changed' : ''}</p></div>
-      <div class="row right">
+      ${can('operator') && html`<div class="row right">
         ${job.status === 'running' && html`<${Btn} kind="danger" icon="stop" onClick=${cancel}>Cancel</${Btn}>`}
         ${job.status !== 'running' && failed.length > 0 && failed.length < hosts.length && html`<${Btn} onClick=${() => rerun(true)}>Re-run failed</${Btn}>`}
         ${job.status !== 'running' && html`<${Btn} icon="refresh" onClick=${() => rerun(false)}>Re-run</${Btn}>`}
-      </div>
+      </div>`}
     </div>
     ${hosts.length > 1 && html`<div class="row">${SUMMARY.filter(([k]) => counts[k]).map(([k, cls, l]) => html`<span class=${`chip ${cls}`}>${counts[k]} ${l}</span>`)}</div>`}
     <div class="job-grid">

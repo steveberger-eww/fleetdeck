@@ -14,7 +14,7 @@ import (
 
 func TestMain(m *testing.M) {
 	dir, _ := os.MkdirTemp("", "fleetdeck-test-")
-	if err := db.Open(dir); err != nil {
+	if err := db.OpenTest(dir); err != nil {
 		panic(err)
 	}
 	if err := sec.Init(); err != nil {
@@ -24,12 +24,13 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	code := m.Run()
+	db.DropTest()
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
 
 func TestRepositoryValidation(t *testing.T) {
-	ok := func(b RepoInput) (*Repo, error) { b.Name = "infra"; return ValidateRepo(b, nil) }
+	ok := func(b RepoInput) (*Repo, error) { b.Name = "infra"; return ValidateRepo("default", b, nil) }
 	if r, err := ok(RepoInput{URL: "https://github.com/org/infra.git"}); err != nil || r.Branch != "main" {
 		t.Fatal(r, err)
 	}

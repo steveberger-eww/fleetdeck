@@ -1,7 +1,7 @@
 import {
   html, useState, useEffect, useRef, useMemo, api, go, store, useStore, useLoad, useQuery, useHold, useDirty, serversStore, refreshServers, toast, confirmBox,
   Btn, Th, useSort, StatusChip, LineChart, Empty, Modal, Footer, Field, ParamInput, Loading, ErrorNote, Output, Icon, Copy, Menu, CellBar,
-  bytes, rate, pct, ago, dur, uptime, when, logTime, level, eol, traffic,
+  bytes, rate, pct, ago, dur, uptime, when, logTime, level, eol, traffic, can,
 } from '../ui.js';
 import { ServerForm, serverBody, PRIV_TEXT } from './overview.js';
 import { JobsTable, openRun, confirmRun } from './jobs.js';
@@ -14,6 +14,7 @@ async function startJob(server, scriptId, params) {
   const { id } = await api('/api/jobs', { method: 'POST', body: { script_id: scriptId, params, targets: { servers: [server.id] } } });
   go(`/jobs/${id}`);
 }
+const NOT_ALLOWED = html`<${Empty} title="Not available with your role" />`;
 const logsHref = (s, unit) => `#/servers/${s.id}/logs?unit=${encodeURIComponent(unit)}`;
 
 // Counts on the tab that fixes them, instead of a row of chips above the tabs.
@@ -28,12 +29,13 @@ function tabBadge(k, n) {
 // Ordered, one bar per kind: host key → unreachable → sudo → alerts.
 function Attention({ s, acceptKey }) {
   const bars = [];
-  if (s.ssh?.hostKeyMismatch) bars.push(html`<div class="alert-bar" role="alert"><span class="grow"><b>The host key changed.</b> Fleetdeck refuses to connect, because this can mean someone is intercepting the connection. Pinned: <span class="mono">${s.host_key}</span>, offered: <span class="mono">${s.ssh.hostKeyMismatch}</span></span><${Btn} kind="danger" onClick=${acceptKey}>Trust new key</${Btn}></div>`);
-  else if (s.status === 'down') bars.push(html`<div class="alert-bar" role="alert"><span class="grow"><b>Unreachable${s.error ? ` for ${dur(Date.now() - s.error.since)}` : ''}.</b> ${s.error?.message}</span><a class="btn sm" href=${`#/servers/${s.id}/settings`}>Connection settings</a></div>`);
-  if (s.ssh?.sudoRejected) bars.push(html`<div class="alert-bar warn"><span class="grow"><b>The server rejected the stored sudo password.</b> Fleetdeck stopped using it so the account doesn't get locked. Update it to resume admin actions.</span><a class="btn sm" href=${`#/servers/${s.id}/settings`}>Update password</a></div>`);
+  if (s.ssh?.hostKeyMismatch) bars.push(html`<div class="alert-bar" role="alert"><span class="grow"><b>The host key changed.</b> Fleetdeck refuses to connect, because this can mean someone is intercepting the connection. Pinned: <span class="mono">${s.host_key}</span>, offered: <span class="mono">${s.ssh.hostKeyMismatch}</span></span>${can('owner') && html`<${Btn} kind="danger" onClick=${acceptKey}>Trust new key</${Btn}>`}</div>`);
+  else if (s.status === 'down') bars.push(html`<div class="alert-bar" role="alert"><span class="grow"><b>Unreachable${s.error ? ` for ${dur(Date.now() - s.error.since)}` : ''}.</b> ${s.error?.message}</span>${can('owner') && html`<a class="btn sm" href=${`#/servers/${s.id}/settings`}>Connection settings</a>`}</div>`);
+  if (s.ssh?.sudoRejected) bars.push(html`<div class="alert-bar warn"><span class="grow"><b>The server rejected the stored sudo password.</b> Fleetdeck stopped using it so the account doesn't get locked. Update it to resume admin actions.</span>${can('owner') && html`<a class="btn sm" href=${`#/servers/${s.id}/settings`}>Update password</a>`}</div>`);
   const f = (s.firing || []).filter((a) => !(s.status === 'down' && a.metric === 'down')); // the unreachable bar already says it
-  if (f.length === 1) bars.push(html`<div class="alert-bar"><span class="grow"><b>Alert firing ${ago(f[0].since)}:</b> ${f[0].message}</span><a class="btn sm" href="#/alerts">Alert rules</a></div>`);
-  else if (f.length > 1) bars.push(html`<div class="alert-bar"><span class="grow"><b>${f.length} alerts firing</b><ul>${f.map((a) => html`<li>${a.message} <span class="muted">(${ago(a.since)})</span></li>`)}</ul></span><a class="btn sm" href="#/alerts">Alert rules</a></div>`);
+  const rules = can('admin') && html`<a class="btn sm" href="#/alerts">Alert rules</a>`;
+  if (f.length === 1) bars.push(html`<div class="alert-bar"><span class="grow"><b>Alert firing ${ago(f[0].since)}:</b> ${f[0].message}</span>${rules}</div>`);
+  else if (f.length > 1) bars.push(html`<div class="alert-bar"><span class="grow"><b>${f.length} alerts firing</b><ul>${f.map((a) => html`<li>${a.message} <span class="muted">(${ago(a.since)})</span></li>`)}</ul></span>${rules}</div>`);
   return bars.length ? html`<div class="attention">${bars}</div>` : null;
 }
 
@@ -44,6 +46,7 @@ export function ServerPage({ id, tab }) {
   if (!servers) return html`<div class="page"><${Loading} /></div>`;
   if (!s) return html`<div class="page"><${Empty} title="Server not found" action=${html`<a class="btn" href="#/">Back to the fleet</a>`}>It may have been removed.</${Empty}></div>`;
   const n = s.snapshot;
+  const op = can('operator');
 
   const reboot = async () => {
     if (!await confirmRun({ scriptId: 'reboot', name: 'Reboot', count: 1, names: [s.name] })) return;
@@ -65,13 +68,13 @@ export function ServerPage({ id, tab }) {
   else if (tab === 'processes') body = html`<${ProcessesTab} s=${s} />`;
   else if (tab === 'containers') body = html`<${ContainersTab} s=${s} />`;
   else if (tab === 'network') body = html`<${NetworkTab} s=${s} />`;
-  else if (tab === 'terminal') body = html`<${TerminalTab} s=${s} />`;
-  else if (tab === 'jobs') body = html`<div class="stack"><${ScheduledPanel} s=${s} /><section class="panel"><${JobsTable} serverId=${s.id} /></section></div>`;
-  else if (tab === 'settings') body = html`<${SettingsTab} s=${s} />`;
+  else if (tab === 'terminal') body = op ? html`<${TerminalTab} s=${s} />` : NOT_ALLOWED;
+  else if (tab === 'jobs') body = html`<div class="stack">${can('admin') && html`<${ScheduledPanel} s=${s} />`}<section class="panel"><${JobsTable} serverId=${s.id} /></section></div>`;
+  else if (tab === 'settings') body = can('owner') ? html`<${SettingsTab} s=${s} />` : NOT_ALLOWED;
   else body = html`<${OverviewTab} s=${s} />`;
 
-  // Containers only when Docker is there (the route still works and explains).
-  const tabs = TABS.filter(([k]) => k !== 'containers' || n?.docker || tab === 'containers');
+  // Containers only when Docker is there (the route still works and explains). Terminal from operator, settings from owner up.
+  const tabs = TABS.filter(([k]) => (k !== 'containers' || n?.docker || tab === 'containers') && (k !== 'terminal' || op) && (k !== 'settings' || can('owner')));
   return html`<div class="page">
     <div class="srv-h">
       <div class="id grow">
@@ -80,17 +83,17 @@ export function ServerPage({ id, tab }) {
           ${n && html`<span>${n.os}${eol(n) && html` <span class=${`chip ${eol(n).kind}`} title="No more security updates from the vendor after this date">${eol(n).text}</span>`}</span><span>Up ${uptime(n.uptime)}</span><span>Checked ${ago(n.t)}</span>`}</div>
       </div>
       <div class="row">
-        <${Btn} icon="refresh" title="Check now" onClick=${async () => { await api(`/api/servers/${s.id}/probe`, { method: 'POST' }); await refreshServers(); }} />
-        ${tab !== 'terminal' && html`<a class="btn" href=${`#/servers/${s.id}/terminal`}><${Icon} name="term" /><span class="hide-sm">Terminal</span></a>`}
-        <${Btn} icon="play" onClick=${() => openRun({ targets: { servers: [s.id] } })}>Run script</${Btn}>
-        <${Menu} label=${`More actions for ${s.name}`}>
+        ${op && html`<${Btn} icon="refresh" title="Check now" onClick=${async () => { await api(`/api/servers/${s.id}/probe`, { method: 'POST' }); await refreshServers(); }} />`}
+        ${op && tab !== 'terminal' && html`<a class="btn" href=${`#/servers/${s.id}/terminal`}><${Icon} name="term" /><span class="hide-sm">Terminal</span></a>`}
+        ${op && html`<${Btn} icon="play" onClick=${() => openRun({ targets: { servers: [s.id] } })}>Run script</${Btn}>`}
+        ${(op || n?.cockpit) && html`<${Menu} label=${`More actions for ${s.name}`}>
           ${n?.cockpit ? html`<a class="mi" href=${cockpitUrl} target="_blank" rel="noopener noreferrer"><${Icon} name="ext" />Open Cockpit</a>`
             : n && html`<button class="mi" title="Storage, networking and firewall management" onClick=${() => startJob(s, 'cockpit').catch((e) => toast(e.message, 'bad'))}><${Icon} name="plus" />Install Cockpit</button>`}
-          <button class="mi" onClick=${() => mute(1).catch((e) => toast(e.message, 'bad'))}><${Icon} name="mute" />Mute alerts for 1 h</button>
-          <button class="mi" onClick=${() => mute(4).catch((e) => toast(e.message, 'bad'))}><${Icon} name="mute" />Mute alerts for 4 h</button>
-          <hr />
-          <button class="mi bad" onClick=${() => reboot().catch((e) => toast(e.message, 'bad'))}><${Icon} name="power" />Reboot…</button>
-        </${Menu}>
+          ${can('admin') && html`<button class="mi" onClick=${() => mute(1).catch((e) => toast(e.message, 'bad'))}><${Icon} name="mute" />Mute alerts for 1 h</button>
+          <button class="mi" onClick=${() => mute(4).catch((e) => toast(e.message, 'bad'))}><${Icon} name="mute" />Mute alerts for 4 h</button>`}
+          ${op && html`<hr />
+          <button class="mi bad" onClick=${() => reboot().catch((e) => toast(e.message, 'bad'))}><${Icon} name="power" />Reboot…</button>`}
+        </${Menu}>`}
       </div>
     </div>
 
@@ -116,7 +119,7 @@ function OverviewTab({ s }) {
   const custom = useLoad(() => api(`/api/servers/${s.id}/custom?range=${range}`), [s.id, range], { poll: 60_000 });
   const [edit, setEdit] = useState(null); // custom metric being added ({}) or edited
   return html`<div class="stack">
-    <div class="row"><h2>Metrics</h2><div class="row right"><${Btn} size="sm" icon="plus" onClick=${() => setEdit({})}>Add custom metric</${Btn}><${RangePicker} value=${range} onChange=${setRange} /></div></div>
+    <div class="row"><h2>Metrics</h2><div class="row right">${can('admin') && html`<${Btn} size="sm" icon="plus" onClick=${() => setEdit({})}>Add custom metric</${Btn}>`}<${RangePicker} value=${range} onChange=${setRange} /></div></div>
     ${m.error && html`<${ErrorNote} error=${m.error} retry=${m.reload} />`}
     ${custom.error && html`<${ErrorNote} error=${custom.error} retry=${custom.reload} />`}
     <div class="charts">
@@ -128,7 +131,7 @@ function OverviewTab({ s }) {
       ${hasTemp && html`<${LineChart} sync=${sync} title="Temperature" data=${m.data} fmt=${(v) => `${Math.round(v)}°`} series=${[{ key: 'temp', label: 'Temperature', color: 'var(--s1)' }]} current=${n?.temp != null && `${Math.round(n.temp)} °C`} />`}
       ${hasGPU && html`<${LineChart} sync=${sync} title="GPU" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'gpu', label: 'Usage', color: 'var(--s1)' }, { key: 'gpu_mem', label: 'Memory', color: 'var(--s2)' }]} current=${n?.gpu != null && `${pct(n.gpu)}${n.gpus.length > 1 ? ` (busiest of ${n.gpus.length})` : ''}`} />`}
       ${custom.data?.map((c) => html`<${LineChart} sync=${sync} title=${c.unit ? `${c.name} (${c.unit})` : c.name} data=${c.series} fmt=${customNum} series=${[{ key: 'v', label: c.name, color: 'var(--s1)' }]}
-        current=${customNow(n?.custom?.[c.id], c.unit)} actions=${html`<${Btn} size="sm" kind="ghost" icon="edit" title=${`Edit ${c.name}`} onClick=${() => setEdit(c)} />`} />`)}
+        current=${customNow(n?.custom?.[c.id], c.unit)} actions=${can('admin') && html`<${Btn} size="sm" kind="ghost" icon="edit" title=${`Edit ${c.name}`} onClick=${() => setEdit(c)} />`} />`)}
     </div>
     ${edit && html`<${CustomMetricDialog} s=${s} metric=${edit} onClose=${() => setEdit(null)} onSaved=${() => { setEdit(null); custom.reload(true); }} />`}
     ${n && html`<div class="grid-2">
@@ -155,7 +158,7 @@ function OverviewTab({ s }) {
           <dt class="sub">Access</dt>
           <dt>Hostname</dt><dd class="mono">${n.hostname}</dd>
           <dt>Addresses</dt><dd class="mono">${n.ips.join(', ') || '–'}</dd>
-          <dt>Checks run as</dt><dd>${n.probeUser}${n.probeUser !== 'root' && html` <span class="chip warn">no passwordless sudo</span> <a class="small" href=${`#/servers/${s.id}/settings`}>Settings</a>`}</dd>
+          <dt>Checks run as</dt><dd>${n.probeUser}${n.probeUser !== 'root' && html` <span class="chip warn">no passwordless sudo</span>${can('owner') && html` <a class="small" href=${`#/servers/${s.id}/settings`}>Settings</a>`}`}</dd>
           ${s.notes && html`<dt>Notes</dt><dd class="pre-wrap">${s.notes}</dd>`}
         </dl></div></section>
     </div>`}
@@ -212,7 +215,7 @@ function CustomMetricDialog({ s, metric, onClose, onSaved }) {
 function DiskHealth({ s }) {
   const sm = s.snapshot.smart;
   if (!sm || (s.snapshot.virt && !sm.disks.length)) return null;
-  if (sm.status === 'none') return html`<div class="alert-bar info"><span class="grow">Install smartmontools to watch the health of this server's disks (S.M.A.R.T.).</span><${Btn} size="sm" onClick=${() => startJob(s, 'smartmontools')}>Install smartmontools</${Btn}></div>`;
+  if (sm.status === 'none') return can('operator') ? html`<div class="alert-bar info"><span class="grow">Install smartmontools to watch the health of this server's disks (S.M.A.R.T.).</span><${Btn} size="sm" onClick=${() => startJob(s, 'smartmontools')}>Install smartmontools</${Btn}></div>` : null;
   if (sm.status === 'noroot') return null; // smartctl needs root; the System panel already says sudo is missing
   if (!sm.disks.length) return null;
   const n = (v) => (v == null ? '–' : v);
@@ -238,6 +241,7 @@ function UpdatesTab({ s }) {
   const sort = useSort(list, 'security', 1, (x) => (x.security ? 0 : 1)); // security fixes first
   const toggle = (name) => setSel((x) => { const n = new Set(x); n.has(name) ? n.delete(name) : n.add(name); return n; });
   const auto = s.snapshot?.autoUpdates;
+  const op = can('operator');
   const [later, setLater] = useState(false);
   const timers = useLoad(() => (auto ? api(`/api/servers/${s.id}/timers`) : null), [s.id, auto]);
   const autoNext = timers.data?.find((x) => AUTO_TIMERS.includes(x.unit) && x.active === 'active' && x.next)?.next;
@@ -252,18 +256,19 @@ function UpdatesTab({ s }) {
       ${p.data && html`<span class="small muted">${p.data.manager || 'unknown package manager'}</span>`}
       ${view === 'available' && html`<div class="row right">
         <${Btn} size="sm" icon="refresh" onClick=${() => setRefresh((r) => r + 1)} disabled=${p.loading}>Refresh package lists</${Btn}>
-        ${sel.size > 0 && html`<${Btn} size="sm" onClick=${() => startJob(s, 'upgrade-packages', { PACKAGES: [...sel].join(' ') })}>Upgrade ${sel.size} selected</${Btn}>`}
-        ${list.length > 0 && html`<${Btn} size="sm" icon="clock" onClick=${() => setLater(true)}>Later…</${Btn}><${Btn} size="sm" kind="primary" onClick=${() => startJob(s, 'update')}>Upgrade all ${list.length}</${Btn}>`}
+        ${op && sel.size > 0 && html`<${Btn} size="sm" onClick=${() => startJob(s, 'upgrade-packages', { PACKAGES: [...sel].join(' ') })}>Upgrade ${sel.size} selected</${Btn}>`}
+        ${can('admin') && list.length > 0 && html`<${Btn} size="sm" icon="clock" onClick=${() => setLater(true)}>Later…</${Btn}>`}
+        ${op && list.length > 0 && html`<${Btn} size="sm" kind="primary" onClick=${() => startJob(s, 'update')}>Upgrade all ${list.length}</${Btn}>`}
       </div>`}</div>
     ${later && html`<${ScheduleRun} s=${s} scriptId="update" onClose=${() => setLater(false)} />`}
     ${auto != null && html`<div class="panel-b row b-bottom">
-      <label class="check"><input type="checkbox" class="switch" role="switch" checked=${auto} onChange=${(e) => toggleAuto(e).catch((x) => toast(x.message, 'bad'))} />Automatic security updates</label>
+      <label class="check"><input type="checkbox" class="switch" role="switch" checked=${auto} disabled=${!op} onChange=${(e) => toggleAuto(e).catch((x) => toast(x.message, 'bad'))} />Automatic security updates</label>
       <span class="small muted">${auto ? `${s.snapshot.pkg === 'apt' ? 'unattended-upgrades' : 'dnf-automatic'} installs updates by itself${autoNext ? `, next run ${when(autoNext)}` : ''}.` : 'Updates are only installed when you or a schedule run them.'}</span></div>`}
     ${view === 'history' ? html`<${UpdateHistory} s=${s} />` : p.loading ? html`<${Loading} />` : p.error ? html`<div class="panel-b"><${ErrorNote} error=${p.error} retry=${p.reload} /></div>`
       : !list.length ? html`<${Empty} title="Everything is up to date">Fleetdeck checks the package cache every minute. Refresh the package lists to look for new releases now.</${Empty}>`
-      : html`<div class="table-wrap"><table class="t"><thead><tr><th class="shrink"><input type="checkbox" aria-label="Select all" checked=${sel.size === list.length} onChange=${() => setSel(sel.size === list.length ? new Set() : new Set(list.map((x) => x.name)))} /></th>
+      : html`<div class="table-wrap"><table class="t"><thead><tr><th class="shrink"><input type="checkbox" aria-label="Select all" disabled=${!op} checked=${sel.size === list.length} onChange=${() => setSel(sel.size === list.length ? new Set() : new Set(list.map((x) => x.name)))} /></th>
         <${Th} sort=${sort} k="security" get=${(x) => (x.security ? 0 : 1)} class="shrink"><span class="sr">Security</span></${Th}><${Th} sort=${sort} k="name">Package</${Th}><${Th} sort=${sort} k="from" class="hide-sm">Installed</${Th}><${Th} sort=${sort} k="version">Available</${Th}><${Th} sort=${sort} k="source" class="hide-sm">Source</${Th}></tr></thead>
-        <tbody>${sort.rows.map((x) => html`<tr><td><input type="checkbox" checked=${sel.has(x.name)} onChange=${() => toggle(x.name)} aria-label=${`Select ${x.name}`} /></td>
+        <tbody>${sort.rows.map((x) => html`<tr><td><input type="checkbox" disabled=${!op} checked=${sel.has(x.name)} onChange=${() => toggle(x.name)} aria-label=${`Select ${x.name}`} /></td>
           <td>${x.security && html`<span class="chip warn">security</span>`}</td>
           <td class="mono">${x.name}</td><td class="mono ink2 hide-sm">${x.from || '–'}</td><td class="mono">${x.version}</td><td class="ink2 hide-sm">${x.source}</td></tr>`)}</tbody></table></div>`}
   </section></div>`;
@@ -355,15 +360,16 @@ function RestartsPanel({ s }) {
   const r = useLoad(() => api(`/api/servers/${s.id}/restarts`), [s.id]);
   if (r.loading || !r.data?.length) return r.error ? html`<${ErrorNote} error=${`Couldn't check for services to restart: ${r.error}`} retry=${r.reload} />` : null;
   const safe = r.data.filter((x) => !x.careful).map((x) => x.unit);
+  const op = can('operator');
   const one = async (x) => {
     if (x.careful && !await confirmBox({ title: `Restart ${x.unit}?`, body: 'Restarting it can end logins, desktop sessions or networking on this server.', confirm: 'Restart', danger: true })) return;
     await startJob(s, 'restart-services', { SERVICES: x.unit });
   };
   return html`<section class="panel">
     <div class="panel-h"><h2>Services to restart</h2><span class="small muted">Still running code that an update replaced. Restart them to finish the update without a reboot.</span>
-      ${safe.length > 0 && html`<${Btn} size="sm" kind="primary" class="right" onClick=${() => startJob(s, 'restart-services', { SERVICES: safe.join(' ') })}>Restart ${safe.length === r.data.length ? 'all' : `${safe.length} safe`}</${Btn}>`}</div>
+      ${op && safe.length > 0 && html`<${Btn} size="sm" kind="primary" class="right" onClick=${() => startJob(s, 'restart-services', { SERVICES: safe.join(' ') })}>Restart ${safe.length === r.data.length ? 'all' : `${safe.length} safe`}</${Btn}>`}</div>
     <div class="panel-b row">${r.data.map((x) => html`<span class="row nw"><span class=${`chip ${x.careful ? 'warn' : ''}`} title=${x.careful ? 'Can interrupt sessions or networking: restart on its own' : ''}>${x.unit.replace(/\.service$/, '')}</span>
-      <${Btn} size="sm" kind="ghost" icon="refresh" title=${`Restart ${x.unit}`} onClick=${() => one(x)} /></span>`)}</div>
+      ${op && html`<${Btn} size="sm" kind="ghost" icon="refresh" title=${`Restart ${x.unit}`} onClick=${() => one(x)} />`}</span>`)}</div>
   </section>`;
 }
 
@@ -377,6 +383,7 @@ function ServicesTab({ s }) {
   const filter = f || (failedCount ? 'failed' : 'running');
   const [q, setQ] = useQuery('q');
   const [status, setStatus] = useState(null);
+  const op = can('operator');
   const list = useMemo(() => (svc.data || []).filter((u) => {
     if (filter === 'running' && u.active !== 'active') return false;
     if (filter === 'failed' && u.active !== 'failed') return false;
@@ -408,15 +415,15 @@ function ServicesTab({ s }) {
         <td><button class="btn ghost sm cell" title="Show status" onClick=${() => showStatus(u)}>${u.unit.replace(/\.service$/, '')}</button></td>
         <td class="ink2 trunc max-cell hide-sm">${u.description}</td>
         <td class="ink2 hide-sm">${u.enabled}</td>
-        <td class="act"><div class="row nw">
+        <td class="act">${op && html`<div class="row nw">
           ${u.active === 'active' ? html`<${Btn} size="sm" kind="ghost" onClick=${() => act(u, 'restart')}>Restart</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => act(u, 'stop')}>Stop</${Btn}>`
             : html`<${Btn} size="sm" kind="ghost" onClick=${() => act(u, 'start')}>Start</${Btn}>`}
           ${u.enabled === 'enabled' ? html`<${Btn} size="sm" kind="quiet-danger" onClick=${() => act(u, 'disable')}>Disable</${Btn}>`
             : u.enabled === 'disabled' ? html`<${Btn} size="sm" kind="ghost" onClick=${() => act(u, 'enable')}>Enable</${Btn}>` : ''}
-        </div></td></tr>`)}</tbody></table></div>`}
+        </div>`}</td></tr>`)}</tbody></table></div>`}
     ${status && html`<${Modal} wide title=${status.u.unit} onClose=${() => setStatus(null)}
       footer=${html`<a class="btn ghost" href=${logsHref(s, status.u.unit)}>Open logs</a><span class="grow" />
-        ${status.u.active === 'active' ? html`<${Btn} kind="danger" onClick=${() => fromModal('stop')}>Stop</${Btn}><${Btn} kind="primary" onClick=${() => fromModal('restart')}>Restart</${Btn}>`
+        ${!op ? '' : status.u.active === 'active' ? html`<${Btn} kind="danger" onClick=${() => fromModal('stop')}>Stop</${Btn}><${Btn} kind="primary" onClick=${() => fromModal('restart')}>Restart</${Btn}>`
           : html`<${Btn} kind="primary" onClick=${() => fromModal('start')}>Start</${Btn}>`}`}>
       <${Output} name=${status.u.unit} text=${status.text} /></${Modal}>`}
   </section>`;
@@ -427,6 +434,7 @@ function TimersTable({ s, q }) {
   const t = useLoad(() => api(`/api/servers/${s.id}/timers`), [s.id]);
   const list = useMemo(() => (t.data || []).filter((x) => !q || `${x.unit} ${x.description}`.toLowerCase().includes(q.toLowerCase())), [t.data, q]);
   const sort = useSort(list, 'next');
+  const op = can('operator');
   const svc = (unit, action) => api(`/api/servers/${s.id}/services`, { method: 'POST', body: { unit, action } });
   const runNow = async (x) => { await svc(x.activates, 'start'); toast(`${x.activates} started`, 'ok'); t.reload(true); };
   const toggle = async (x) => {
@@ -448,8 +456,8 @@ function TimersTable({ s, q }) {
       <td>${x.running ? html`<span class="chip info">running</span>` : x.result && x.last ? html`<span class=${`chip ${x.result === 'success' ? 'ok' : 'bad'}`}>${x.result}</span>` : ''}</td>
       <td class="ink2 hide-sm">${x.enabled}</td>
       <td class="act"><div class="row nw">
-        <${Btn} size="sm" kind="ghost" icon="play" disabled=${!x.activates || x.running} onClick=${() => runNow(x)}>Run now</${Btn}>
-        ${['enabled', 'disabled'].includes(x.enabled) && html`<${Btn} size="sm" kind=${x.enabled === 'enabled' ? 'quiet-danger' : 'ghost'} onClick=${() => toggle(x)}>${x.enabled === 'enabled' ? 'Disable' : 'Enable'}</${Btn}>`}
+        ${op && html`<${Btn} size="sm" kind="ghost" icon="play" disabled=${!x.activates || x.running} onClick=${() => runNow(x)}>Run now</${Btn}>`}
+        ${op && ['enabled', 'disabled'].includes(x.enabled) && html`<${Btn} size="sm" kind=${x.enabled === 'enabled' ? 'quiet-danger' : 'ghost'} onClick=${() => toggle(x)}>${x.enabled === 'enabled' ? 'Disable' : 'Enable'}</${Btn}>`}
         ${x.activates && html`<a class="btn sm ghost" href=${logsHref(s, x.activates)}>Logs</a>`}
       </div></td></tr>`)}</tbody></table></div>`;
 }
@@ -517,7 +525,7 @@ function ProcessesTab({ s }) {
       : html`<div class="table-wrap" ...${bind}><table class="t"><thead><tr><${Th} sort=${sort} k="pid" class="num">PID</${Th}><${Th} sort=${sort} k="user" class="hide-sm">User</${Th}><${Th} sort=${sort} k="cpu" class="num" desc>CPU</${Th}><${Th} sort=${sort} k="mem" class="num" desc>Memory</${Th}><${Th} sort=${sort} k="rss" class="num hide-sm" desc>RSS</${Th}><${Th} sort=${sort} k="elapsed" desc class="hide-sm">Running</${Th}><${Th} sort=${sort} k="args">Command</${Th}><th class="act"></th></tr></thead>
       <tbody>${list.map((p) => html`<tr><td class="num mono">${p.pid}</td><td class="ink2 hide-sm">${p.user}</td><td class="num">${p.cpu.toFixed(1)}%</td><td class="num">${p.mem.toFixed(1)}%</td>
         <td class="num ink2 hide-sm">${bytes(p.rss)}</td><td class="ink2 nowrap hide-sm">${dur(p.elapsed * 1000)}</td><td class="mono trunc max-cell" title=${p.args}>${p.args}</td>
-        <td class="act"><div class="row nw"><${Btn} size="sm" kind="ghost" onClick=${() => kill(p, 'TERM')}>Terminate</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => kill(p, 'KILL')}>Force kill</${Btn}></div></td></tr>`)}</tbody></table></div>`}
+        <td class="act">${can('operator') && html`<div class="row nw"><${Btn} size="sm" kind="ghost" onClick=${() => kill(p, 'TERM')}>Terminate</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => kill(p, 'KILL')}>Force kill</${Btn}></div>`}</td></tr>`)}</tbody></table></div>`}
   </section>`;
 }
 
@@ -539,9 +547,10 @@ function ContainersTab({ s }) {
   if (c.error) return html`<${ErrorNote} error=${c.error} retry=${c.reload} />`;
   if (!c.data.installed) return html`<section class="panel"><${Empty} title="Docker isn't installed on this server">Install Docker and its containers show up here with live stats.</${Empty}></section>`;
   const cores = s.snapshot?.cores || 1;
+  const op = can('operator');
   return html`<section class="panel">
     <div class="panel-h"><h2>Containers</h2><span class="small muted">${c.data.containers.filter((x) => x.state === 'running').length} of ${c.data.containers.length} running${held ? ' · paused while you point at the table' : ''}</span>
-      <${Btn} size="sm" kind="ghost" class="right" onClick=${() => startJob(s, 'docker-prune')}>Clean up unused data</${Btn}></div>
+      ${op && html`<${Btn} size="sm" kind="ghost" class="right" onClick=${() => startJob(s, 'docker-prune')}>Clean up unused data</${Btn}>`}</div>
     ${!c.data.containers.length ? html`<${Empty} title="No containers" />` : html`<div class="table-wrap" ...${bind}><table class="t">
       <thead><tr><${Th} sort=${sort} k="state">State</${Th}><${Th} sort=${sort} k="name">Name</${Th}><${Th} sort=${sort} k="image" class="hide-sm">Image</${Th}><${Th} sort=${sort} k="status" class="hide-sm">Status</${Th}><${Th} sort=${sort} k="cpu" get=${(x) => parseFloat(x.cpu)} class="num" desc>CPU</${Th}><${Th} sort=${sort} k="mem" get=${(x) => parseFloat(x.memPct)} class="num" desc>Memory</${Th}><${Th} sort=${sort} k="ports" class="hide-sm">Ports</${Th}><th class="act"></th></tr></thead>
       <tbody>${sort.rows.map((x) => html`<tr>
@@ -554,7 +563,7 @@ function ContainersTab({ s }) {
         <td class="act"><div class="row nw">
           <${Btn} size="sm" kind="ghost" onClick=${() => setHist(x.name)}>History</${Btn}>
           <${Btn} size="sm" kind="ghost" onClick=${() => showLogs(x)}>Logs</${Btn}>
-          ${x.state === 'running' ? html`<${Btn} size="sm" kind="ghost" onClick=${() => act(x, 'restart')}>Restart</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => act(x, 'stop')}>Stop</${Btn}>`
+          ${!op ? '' : x.state === 'running' ? html`<${Btn} size="sm" kind="ghost" onClick=${() => act(x, 'restart')}>Restart</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => act(x, 'stop')}>Stop</${Btn}>`
             : html`<${Btn} size="sm" kind="ghost" onClick=${() => act(x, 'start')}>Start</${Btn}><${Btn} size="sm" kind="quiet-danger" onClick=${() => act(x, 'rm')}>Remove</${Btn}>`}
         </div></td></tr>`)}</tbody></table></div>`}
     ${logs && html`<${Modal} wide title=${`Logs: ${logs.name}`} onClose=${() => setLogs(null)}><${Output} name=${logs.name} text=${logs.text} /></${Modal}>`}
@@ -592,7 +601,8 @@ function NetworkTab({ s }) {
   const exposed = n.ports.filter((p) => p.exposure !== 'local');
   const list = all ? n.ports : exposed;
   const bypass = n.ports.filter((p) => p.exposure === 'bypass');
-  const canUfwDocker = n.docker && n.firewall.kind === 'ufw' && n.ufwDocker !== 'active';
+  const op = can('operator');
+  const canUfwDocker = op && n.docker && n.firewall.kind === 'ufw' && n.ufwDocker !== 'active';
   const check = async () => setReach(await api(`/api/servers/${s.id}/network/reach`, { method: 'POST', body: { ports: exposed.filter((p) => p.proto === 'tcp').map((p) => p.port) } }));
   const allow = async (p) => {
     const route = p.docker && n.ufwDocker === 'active';
@@ -607,14 +617,14 @@ function NetworkTab({ s }) {
   for (const i of s.snapshot?.ifaces || []) ifaces.set(i.name, { ...(ifaces.get(i.name) || { name: i.name, addrs: [] }), ...i });
   return html`<div class="stack">
     ${bypass.length > 0 && html`<div class="alert-bar"><span class="grow"><b>Docker publishes ${bypass.map((p) => `${p.port}/${p.proto}`).join(', ')} past ufw.</b> These ports are reachable even though ufw blocks them, because Docker's own rules come first.</span>
-      <${Btn} size="sm" onClick=${() => setUfwDocker(true)}>Let ufw control Docker</${Btn}></div>`}
+      ${op && html`<${Btn} size="sm" onClick=${() => setUfwDocker(true)}>Let ufw control Docker</${Btn}>`}</div>`}
     ${n.ufwDocker === 'written' && html`<div class="alert-bar warn"><span class="grow"><b>The ufw-docker rules are written but not active.</b> Reboot the server to apply them.</span></div>`}
 
     <section class="panel">
       <div class="panel-h"><h2>Open ports</h2><span class="small muted">What is listening, and whether the firewall lets it through.</span>
         <div class="seg" role="group" aria-label="Show"><button aria-pressed=${!all} onClick=${() => setAll('')}>Reachable (${exposed.length})</button><button aria-pressed=${!!all} onClick=${() => setAll('all')}>All (${n.ports.length})</button></div>
         <div class="row right">
-          <${Btn} size="sm" title="Try a TCP connection to each port from the Fleetdeck host" onClick=${check} disabled=${!exposed.some((p) => p.proto === 'tcp')}>Test from Fleetdeck</${Btn}>
+          ${op && html`<${Btn} size="sm" title="Try a TCP connection to each port from the Fleetdeck host" onClick=${check} disabled=${!exposed.some((p) => p.proto === 'tcp')}>Test from Fleetdeck</${Btn}>`}
           <${Btn} size="sm" kind="ghost" icon="refresh" title="Refresh" onClick=${() => { setReach(null); net.reload(); }} /></div></div>
       ${!list.length ? html`<${Empty} title=${all ? 'Nothing is listening' : 'Nothing is reachable from outside'}>${!all && n.ports.length ? 'Every listening port is bound to this server only.' : ''}</${Empty}>`
         : html`<div class="table-wrap"><table class="t"><thead><tr><th class="num">Port</th><th class="hide-sm">Listening on</th><th>Program</th><th>Exposure</th>${reach && html`<th title="TCP connect from the Fleetdeck host">From Fleetdeck</th>`}<th class="act"></th></tr></thead>
@@ -624,7 +634,7 @@ function NetworkTab({ s }) {
           <td>${p.published.length ? p.published.map((x) => html`<div><span class="tag">docker</span> ${x.container} <span class="muted small">→ ${x.containerPort}</span></div>`) : html`<span class="mono">${p.processes.join(', ') || '–'}</span>`}</td>
           <td><span class=${`chip ${EXPOSURE[p.exposure][0]}`}>${EXPOSURE[p.exposure][1]}</span></td>
           ${reach && html`<td>${p.proto !== 'tcp' || reach[p.port] == null ? html`<span class="muted">–</span>` : reach[p.port] ? html`<span class=${`chip ${p.exposure === 'blocked' ? 'bad' : ''}`} title=${p.exposure === 'blocked' ? 'The firewall should block this, but it answered' : ''}>Reachable</span>` : html`<span class="chip">No answer</span>`}</td>`}
-          <td class="act">${['blocked', 'restricted'].includes(p.exposure) && html`<${Btn} size="sm" kind="ghost" onClick=${() => allow(p)}>Allow</${Btn}>`}</td></tr>`)}</tbody></table></div>`}
+          <td class="act">${op && ['blocked', 'restricted'].includes(p.exposure) && html`<${Btn} size="sm" kind="ghost" onClick=${() => allow(p)}>Allow</${Btn}>`}</td></tr>`)}</tbody></table></div>`}
       ${reach && html`<div class="panel-b small muted b-top">"From Fleetdeck" shows what the Fleetdeck host can reach. If it sits in the same network or VPN, the internet may see less.</div>`}
     </section>
 
@@ -786,14 +796,33 @@ function SettingsTab({ s }) {
       <section class="panel"><div class="panel-h"><h2>Monitoring</h2></div><div class="panel-b stack">
         <label class="check"><input type="checkbox" class="switch" role="switch" checked=${!s.paused} onChange=${(e) => { e.target.checked = !s.paused; pause().catch((x) => toast(x.message, 'bad')); }} />Monitor this server</label>
         <p class="ink2 small">${s.paused ? 'Paused: no checks, no alerts. Jobs and the terminal still work.' : 'Checked every minute. Pause during maintenance to silence alerts.'}</p>
-        <p class="ink2 small">Planned work? Keep monitoring but hold back notifications for a while. Anything still firing afterwards is sent then.</p>
+        ${can('admin') && html`<p class="ink2 small">Planned work? Keep monitoring but hold back notifications for a while. Anything still firing afterwards is sent then.</p>
         <div class="row">${[1, 4].map((h) => html`<${Btn} size="sm" onClick=${async () => { await muteFor(s.id, h, `Maintenance on ${s.name}`); toast(`Notifications for ${s.name} muted for ${h} h`, 'ok'); }}>Mute for ${h} h</${Btn}>`)}
-          <a class="btn sm ghost" href="#/alerts">Quiet hours</a></div>
+          <a class="btn sm ghost" href="#/alerts">Quiet hours</a></div>`}
       </div></section>
+      <${AccessPanel} s=${s} />
       <section class="panel danger-zone"><div class="panel-h"><h2>Remove server</h2></div><div class="panel-b stack">
         <p class="ink2 small">Deletes its history from Fleetdeck. The server itself is not touched.</p>
         <div><${Btn} kind="danger" icon="trash" onClick=${remove}>Remove ${s.name}</${Btn}></div>
       </div></section>
     </div>
   </div>`;
+}
+
+// Who besides the admins sees this server (owners, operators and viewers of the organization).
+function AccessPanel({ s }) {
+  const m = useLoad(() => api(`/api/servers/${s.id}/members`), [s.id]);
+  const [sel, setSel] = useState(null);
+  useEffect(() => { if (m.data) setSel(new Set(m.data.filter((u) => u.assigned).map((u) => u.id))); }, [m.data]);
+  const changed = m.data && sel && m.data.some((u) => !!u.assigned !== sel.has(u.id));
+  const flip = (id) => setSel((x) => { const n = new Set(x); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const save = async () => { await api(`/api/servers/${s.id}/members`, { method: 'PUT', body: { user_ids: [...sel] } }); toast('Access saved', 'ok'); m.reload(true); };
+  return html`<section class="panel"><div class="panel-h"><h2>Access</h2></div><div class="panel-b stack">
+    <p class="ink2 small">Admins always see every server. Pick who else sees ${s.name}; what they can do depends on their role.</p>
+    ${m.error ? html`<${ErrorNote} error=${m.error} retry=${m.reload} />` : !sel ? html`<${Loading} />`
+      : !m.data.length ? html`<p class="small muted">Nobody else is in this organization yet.${can('admin') ? html` Invite people under <a href="#/settings/org">Settings → Organization</a>.` : ''}</p>`
+      : html`<div>${m.data.map((u) => html`<label class="check list"><input type="checkbox" checked=${sel.has(u.id)} onChange=${() => flip(u.id)} />
+          <span>${u.name || u.email}</span><span class="small muted">${u.role}${u.name ? `, ${u.email}` : ''}</span></label>`)}</div>
+        <div><${Btn} kind=${changed ? 'primary' : ''} disabled=${!changed} onClick=${save}>Save access</${Btn}></div>`}
+  </div></section>`;
 }

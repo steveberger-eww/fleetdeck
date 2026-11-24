@@ -20,9 +20,10 @@ import (
 
 // A fake provider signs ID tokens for whichever subject the test picks; Fleetdeck must only let the connected one in.
 func TestSSOFlow(t *testing.T) {
-	if err := db.Open(t.TempDir()); err != nil {
+	if err := db.OpenTest(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(db.DropTest)
 	t.Setenv("FLEETDECK_SECRET", "")
 	t.Setenv("FLEETDECK_PASSWORD_LOGIN", "")
 	if err := sec.Init(); err != nil {
@@ -31,7 +32,7 @@ func TestSSOFlow(t *testing.T) {
 
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	signer, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, (&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "k"))
-	var sub, nonce string
+	var sub, email, nonce string
 	var idp *httptest.Server
 	idp = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -42,7 +43,7 @@ func TestSSOFlow(t *testing.T) {
 		case "/jwks":
 			_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "k", Algorithm: "RS256", Use: "sig"}}})
 		case "/token":
-			claims, _ := json.Marshal(map[string]any{"iss": idp.URL + "/o/", "aud": "fd", "sub": sub, "nonce": nonce, "preferred_username": sub,
+			claims, _ := json.Marshal(map[string]any{"iss": idp.URL + "/o/", "aud": "fd", "sub": sub, "email": email, "nonce": nonce, "preferred_username": sub,
 				"iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix()})
 			jws, _ := signer.Sign(claims)
 			raw, _ := jws.CompactSerialize()
@@ -74,8 +75,9 @@ func TestSSOFlow(t *testing.T) {
 		}
 		return ""
 	}
-	// start -> provider -> callback, as a browser would. Returns the callback's response.
+	// start -> provider -> callback, as a browser would; as is "subject" or "subject email". Returns the callback's response.
 	flow := func(start, session, as string, tamper bool) *httptest.ResponseRecorder {
+		as, email, _ = strings.Cut(as, " ")
 		t.Helper()
 		w := do("GET", start, "", session)
 		loc, err := url.Parse(w.Header().Get("Location"))
@@ -90,7 +92,11 @@ func TestSSOFlow(t *testing.T) {
 		return do("GET", ssoCallback+"?code=c&state="+url.QueryEscape(loc.Query().Get("state")), "", flowCookie)
 	}
 
-	session := cookieOf(do("POST", "/api/auth/setup", `{"token":"`+token+`","password":"correct horse battery"}`, ""), "fd_session")
+	session := cookieOf(do("POST", "/api/auth/setup", `{"token":"`+token+`","email":"boss@example.com","name":"Boss","password":"correct horse battery"}`, ""), "fd_session")
+	linked := func() string {
+		s, _ := db.Get[string](`SELECT subject FROM identities WHERE provider = 'instance'`)
+		return db.Str(s)
+	}
 	if w := do("PUT", "/api/sso", `{"issuer":"`+idp.URL+`/o","client_id":"fd","client_secret":"s"}`, session); w.Code != 200 {
 		t.Fatalf("save: %d %s", w.Code, w.Body)
 	}
@@ -101,10 +107,10 @@ func TestSSOFlow(t *testing.T) {
 		t.Fatalf("passwords turned off before an account was connected: %d", w.Code)
 	}
 
-	if w := flow("/api/auth/oidc/start?link=1", session, "owner", true); db.Setting("oidc_sub", "") != "" || !strings.Contains(w.Body.String(), "another browser") {
+	if w := flow("/api/auth/oidc/start?link=1", session, "owner", true); linked() != "" || !strings.Contains(w.Body.String(), "another browser") {
 		t.Fatalf("link accepted without the flow cookie: %s", w.Body)
 	}
-	if w := flow("/api/auth/oidc/start?link=1", session, "owner", false); db.Setting("oidc_sub", "") != "owner" {
+	if w := flow("/api/auth/oidc/start?link=1", session, "owner", false); linked() != "owner" {
 		t.Fatalf("link failed: %s", w.Body)
 	}
 
@@ -119,11 +125,40 @@ func TestSSOFlow(t *testing.T) {
 	if w := do("PUT", "/api/sso/password-login", `{"enabled":false}`, session); w.Code != 200 {
 		t.Fatalf("password off: %d %s", w.Code, w.Body)
 	}
-	if w := do("POST", "/api/auth/login", `{"password":"correct horse battery"}`, ""); w.Code != 403 {
+	if w := do("POST", "/api/auth/login", `{"email":"boss@example.com","password":"correct horse battery"}`, ""); w.Code != 403 {
 		t.Fatalf("password sign-in still works when off: %d", w.Code)
 	}
 	t.Setenv("FLEETDECK_PASSWORD_LOGIN", "1")
-	if w := do("POST", "/api/auth/login", `{"password":"correct horse battery"}`, ""); w.Code != 200 {
+	if w := do("POST", "/api/auth/login", `{"email":"boss@example.com","password":"correct horse battery"}`, ""); w.Code != 200 {
 		t.Fatalf("recovery env var ignored: %d %s", w.Code, w.Body)
+	}
+
+	// The organization's own provider: new people join with its default role, locked to the organization.
+	if w := do("PUT", "/api/tenant/sso", `{"issuer":"`+idp.URL+`/o","client_id":"fd","client_secret":"s","role":"viewer"}`, session); w.Code != 200 {
+		t.Fatalf("tenant sso: %d %s", w.Code, w.Body)
+	}
+	slug, _ := db.Get[string](`SELECT slug FROM tenants WHERE id = ?`, db.DefaultTenant)
+	w = flow("/api/auth/oidc/start?org="+*slug, "", "alice alice@example.com", false)
+	alice := cookieOf(w, "fd_session")
+	if alice == "" {
+		t.Fatalf("tenant sign-in failed: %s", w.Body)
+	}
+	var me struct {
+		Role   string
+		Locked bool
+		User   struct {
+			SuperAdmin bool `json:"super_admin"`
+		}
+	}
+	_ = json.Unmarshal(do("GET", "/api/me", "", alice).Body.Bytes(), &me)
+	if me.Role != "viewer" || !me.Locked || me.User.SuperAdmin {
+		t.Fatalf("tenant sso session: %+v", me)
+	}
+	if w := do("POST", "/api/account/password", `{"next":"taken over by the idp"}`, alice); w.Code != 403 {
+		t.Fatalf("locked session changed the password: %d", w.Code)
+	}
+	// It vouches for its own members only: not for the super admin's email.
+	if w := flow("/api/auth/oidc/start?org="+*slug, "", "mallory boss@example.com", false); cookieOf(w, "fd_session") != "" {
+		t.Fatalf("organization provider signed in the super admin: %s", w.Body)
 	}
 }

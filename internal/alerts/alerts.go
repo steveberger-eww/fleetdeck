@@ -177,10 +177,10 @@ func jsRound(f float64) float64 { return math.Floor(f + 0.5) }
 var tagRe = regexp.MustCompile(`^[a-z0-9_.-]{1,32}$`)
 
 // scope validates the server_id / tag pair that rules and quiet hours share.
-func scope(b map[string]any) (serverID, tag *string, err error) {
+func scope(tenant string, b map[string]any) (serverID, tag *string, err error) {
 	if truthy(b["server_id"]) {
 		id := jsStr(b["server_id"])
-		ok, err := db.Get[int](`SELECT 1 FROM servers WHERE id = ?`, id)
+		ok, err := db.Get[int](`SELECT 1 FROM servers WHERE id = ? AND tenant_id = ?`, id, tenant)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -212,6 +212,7 @@ func enabled(b map[string]any) int {
 // Rule is a row of alert_rules. ValidateRule fills everything but ID and CreatedAt.
 type Rule struct {
 	ID        string  `db:"id" json:"id"`
+	TenantID  string  `db:"tenant_id" json:"-"`
 	ServerID  *string `db:"server_id" json:"server_id"`
 	Metric    string  `db:"metric" json:"metric"`
 	Threshold float64 `db:"threshold" json:"threshold"`
@@ -233,8 +234,8 @@ func (r *Rule) Label(m *Metric) string {
 
 var mountRe = regexp.MustCompile(`^/[^\x00-\x1f]{0,255}$`)
 
-// ValidateRule checks a rule from a request body (decoded JSON).
-func ValidateRule(b map[string]any) (*Rule, error) {
+// ValidateRule checks a rule of the organization tenant from a request body (decoded JSON).
+func ValidateRule(tenant string, b map[string]any) (*Rule, error) {
 	metric, _ := b["metric"].(string)
 	if Metrics.Get(metric) == nil {
 		return nil, httperr.Bad("unknown metric")
@@ -246,7 +247,7 @@ func ValidateRule(b map[string]any) (*Rule, error) {
 	if !finite(minutes) || minutes < 0 || minutes > 1440 {
 		return nil, httperr.Bad("minutes must be 0-1440")
 	}
-	serverID, tag, err := scope(b)
+	serverID, tag, err := scope(tenant, b)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +261,7 @@ func ValidateRule(b map[string]any) (*Rule, error) {
 	var customID *string
 	if metric == "custom" {
 		id := orEmpty(b["custom_id"])
-		ok, err := db.Get[int](`SELECT 1 FROM custom_metrics WHERE id = ?`, id)
+		ok, err := db.Get[int](`SELECT 1 FROM custom_metrics WHERE id = ? AND tenant_id = ?`, id, tenant)
 		if err != nil {
 			return nil, err
 		}
@@ -273,7 +274,7 @@ func ValidateRule(b map[string]any) (*Rule, error) {
 }
 
 // ValidateCustom checks a custom metric from a request body. It fills everything but ID and CreatedAt.
-func ValidateCustom(b map[string]any) (*probe.Custom, error) {
+func ValidateCustom(tenant string, b map[string]any) (*probe.Custom, error) {
 	c := &probe.Custom{Name: cut(strings.TrimSpace(orEmpty(b["name"])), 60), Unit: cut(strings.TrimSpace(orEmpty(b["unit"])), 16),
 		Command: strings.TrimSpace(orEmpty(b["command"]))}
 	if c.Name == "" {
@@ -286,7 +287,7 @@ func ValidateCustom(b map[string]any) (*probe.Custom, error) {
 		return nil, httperr.Bad("The command must be at most 2000 characters")
 	}
 	var err error
-	if c.ServerID, c.Tag, err = scope(b); err != nil {
+	if c.ServerID, c.Tag, err = scope(tenant, b); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -419,6 +420,7 @@ func fmtNum(v float64) string {
 // Mute is a row of mute_windows. daily: start/end are minutes after local midnight; once: epoch ms.
 type Mute struct {
 	ID        string  `db:"id" json:"id"`
+	TenantID  string  `db:"tenant_id" json:"-"`
 	Name      string  `db:"name" json:"name"`
 	ServerID  *string `db:"server_id" json:"server_id"`
 	Tag       *string `db:"tag" json:"tag"`
@@ -431,7 +433,7 @@ type Mute struct {
 var hhmm = regexp.MustCompile(`^([01]?\d|2[0-3]):([0-5]\d)$`)
 
 // ValidateMute checks a quiet-hours window from a request body. It fills everything but ID and CreatedAt.
-func ValidateMute(b map[string]any) (*Mute, error) {
+func ValidateMute(tenant string, b map[string]any) (*Mute, error) {
 	w := &Mute{Kind: "daily"}
 	if b["kind"] == "once" {
 		w.Kind = "once"
@@ -466,7 +468,7 @@ func ValidateMute(b map[string]any) (*Mute, error) {
 		w.StartAt, w.EndAt = int64(start), int64(end)
 	}
 	var err error
-	if w.ServerID, w.Tag, err = scope(b); err != nil {
+	if w.ServerID, w.Tag, err = scope(tenant, b); err != nil {
 		return nil, err
 	}
 	w.Name = cut(strings.TrimSpace(orEmpty(b["name"])), 100)
@@ -489,7 +491,7 @@ func InWindow(w *Mute, now time.Time) bool {
 
 // QuietFor returns the quiet-hours window that currently covers the server, or nil.
 func QuietFor(s *db.Server, now time.Time) (*Mute, error) {
-	ws, err := db.Select[Mute](`SELECT * FROM mute_windows WHERE server_id IS NULL OR server_id = ?`, s.ID)
+	ws, err := db.Select[Mute](`SELECT * FROM mute_windows WHERE tenant_id = ? AND (server_id IS NULL OR server_id = ?)`, s.TenantID, s.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -511,7 +513,7 @@ func Evaluate(s *db.Server, snap *probe.Snapshot, err error) {
 }
 
 func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
-	rules, err := db.Select[Rule](`SELECT * FROM alert_rules WHERE enabled = 1 AND (server_id IS NULL OR server_id = ?)`, s.ID)
+	rules, err := db.Select[Rule](`SELECT * FROM alert_rules WHERE tenant_id = ? AND enabled = 1 AND (server_id IS NULL OR server_id = ?)`, s.TenantID, s.ID)
 	if err != nil || len(rules) == 0 {
 		return err
 	}
@@ -536,7 +538,7 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 		}
 		if r.Metric == "custom" { // name and unit come from the custom metric
 			if customs == nil {
-				list, err := db.Select[probe.Custom](`SELECT * FROM custom_metrics`)
+				list, err := db.Select[probe.Custom](`SELECT * FROM custom_metrics WHERE tenant_id = ?`, s.TenantID)
 				if err != nil {
 					return err
 				}
@@ -608,7 +610,7 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 			}
 			db.Event("alert", "Firing: "+msg+note, db.EventOpts{Level: "error", ServerID: s.ID})
 			if quiet == nil {
-				Notify("🔴 "+s.Name+": "+r.Label(m), msg, "error")
+				Notify(s.TenantID, "🔴 "+s.Name+": "+r.Label(m), msg, "error")
 			}
 		case !firing && cur != nil:
 			if _, err := db.Exec(`DELETE FROM alert_state WHERE rule_id = ? AND server_id = ?`, r.ID, s.ID); err != nil {
@@ -617,7 +619,7 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 			db.Event("alert", "Resolved: "+s.Name+" "+r.Label(m), db.EventOpts{Level: "success", ServerID: s.ID})
 			// Only tell people it's fixed if they were told it broke. Muted-and-gone stays silent.
 			if *cur != 0 {
-				Notify("✅ "+s.Name+": "+r.Label(m)+" resolved", s.Name+": "+r.Label(m)+" is back to normal", "success")
+				Notify(s.TenantID, "✅ "+s.Name+": "+r.Label(m)+" resolved", s.Name+": "+r.Label(m)+" is back to normal", "success")
 			}
 		case firing:
 			// Still firing when quiet hours end: send what was held back.
@@ -630,7 +632,7 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 				return err
 			}
 			if send {
-				Notify("🔴 "+s.Name+": "+r.Label(m), msg+" (still firing after quiet hours)", "error")
+				Notify(s.TenantID, "🔴 "+s.Name+": "+r.Label(m), msg+" (still firing after quiet hours)", "error")
 			}
 		}
 	}
@@ -647,32 +649,30 @@ type FiringAlert struct {
 	ServerName string `db:"server_name" json:"server_name"`
 }
 
-func Firing() ([]FiringAlert, error) {
+// Firing lists an organization's firing alerts.
+func Firing(tenant string) ([]FiringAlert, error) {
 	return db.Select[FiringAlert](`SELECT a.rule_id, a.server_id, a.since, a.message, r.metric, s.name AS server_name
-  FROM alert_state a JOIN alert_rules r ON r.id = a.rule_id JOIN servers s ON s.id = a.server_id ORDER BY a.since DESC`)
+  FROM alert_state a JOIN alert_rules r ON r.id = a.rule_id JOIN servers s ON s.id = a.server_id WHERE s.tenant_id = ? ORDER BY a.since DESC`, tenant)
 }
 
-// Seed adds the default rules (unreachable 2 min, disk > 90%, memory > 90% for 10 min) once per install.
-func Seed() error {
-	if db.Setting("seeded_rules", "") != "" {
-		return nil
-	}
+// Seed adds the default rules (unreachable 2 min, disk > 90%, memory > 90% for 10 min) to a new organization.
+func Seed(tenant string) error {
 	now := db.Now()
 	for _, r := range []struct {
 		metric             string
 		threshold, minutes int
 	}{{"down", 0, 2}, {"disk", 90, 0}, {"mem", 90, 10}} {
-		if _, err := db.Exec(`INSERT INTO alert_rules (id, server_id, metric, threshold, minutes, enabled, created_at) VALUES (?, NULL, ?, ?, ?, 1, ?)`,
-			db.NewID(), r.metric, r.threshold, r.minutes, now); err != nil {
+		if _, err := db.Exec(`INSERT INTO alert_rules (id, tenant_id, server_id, metric, threshold, minutes, enabled, created_at) VALUES (?, ?, NULL, ?, ?, ?, 1, ?)`,
+			db.NewID(), tenant, r.metric, r.threshold, r.minutes, now); err != nil {
 			return err
 		}
 	}
-	return db.SetSetting("seeded_rules", "1")
+	return nil
 }
 
 // OnJobDone notifies about failed jobs, per the notify_jobs setting (off | scheduled | all).
-func OnJobDone(id int64, name, status, actor string, runStatuses []string) {
-	mode := db.Setting("notify_jobs", "scheduled")
+func OnJobDone(tenant string, id int64, name, status, actor string, runStatuses []string) {
+	mode := db.TenantSetting(tenant, "notify_jobs", "scheduled")
 	if status != "failed" || mode == "off" {
 		return
 	}
@@ -685,5 +685,5 @@ func OnJobDone(id int64, name, status, actor string, runStatuses []string) {
 			bad++
 		}
 	}
-	Notify("❌ Job failed: "+name, fmt.Sprintf(`Job #%d "%s" failed (%d/%d hosts).`, id, name, bad, len(runStatuses)), "error")
+	Notify(tenant, "❌ Job failed: "+name, fmt.Sprintf(`Job #%d "%s" failed (%d/%d hosts).`, id, name, bad, len(runStatuses)), "error")
 }

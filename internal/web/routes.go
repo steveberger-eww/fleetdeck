@@ -9,7 +9,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jmoiron/sqlx"
 	"rsc.io/qr"
 
 	"fleetdeck/internal/admin"
@@ -64,7 +62,7 @@ var (
 
 // ValidateServer checks a server from a request body (decoded JSON, coerced like the JS did).
 // Host and user are allowlisted: they end up on the ssh command line of Ansible runs.
-func ValidateServer(body map[string]any) (*ServerFields, error) {
+func ValidateServer(tenant string, body map[string]any) (*ServerFields, error) {
 	if body == nil {
 		return nil, httperr.Bad("invalid body")
 	}
@@ -90,7 +88,7 @@ func ValidateServer(body map[string]any) (*ServerFields, error) {
 	var keyID *string
 	if b.truthy("key_id") {
 		k := jsString(b["key_id"])
-		if ok, err := db.Get[int](`SELECT 1 FROM keys WHERE id = ?`, k); err != nil || ok == nil {
+		if ok, err := db.Get[int](`SELECT 1 FROM keys WHERE id = ? AND tenant_id = ?`, k, tenant); err != nil || ok == nil {
 			return nil, cmpErr(err, httperr.Bad("Selected key does not exist"))
 		}
 		keyID = &k
@@ -303,6 +301,7 @@ func serverView(s *db.Server, spark any) (*serverOut, error) {
 	return out, err
 }
 
+// getServer reloads a server the request already checked with c.server.
 func getServer(id string) (*db.Server, error) {
 	s, err := db.GetServer(id)
 	if s == nil && err == nil {
@@ -311,16 +310,9 @@ func getServer(id string) (*db.Server, error) {
 	return s, err
 }
 
-func serverViewByID(id string) (any, error) {
-	s, err := getServer(id)
-	if err != nil {
-		return nil, err
-	}
-	return serverView(s, nil)
-}
-
 type keyRow struct {
 	ID            string  `db:"id"`
+	TenantID      string  `db:"tenant_id" json:"-"`
 	Name          string  `db:"name"`
 	PublicKey     string  `db:"public_key"`
 	PrivateEnc    string  `db:"private_enc"`
@@ -333,20 +325,26 @@ func keyView(k keyRow) (any, error) {
 	return J{"id": k.ID, "name": k.Name, "public_key": k.PublicKey, "created_at": k.CreatedAt, "has_passphrase": db.Str(k.PassphraseEnc) != "", "used_by": used}, err
 }
 
-func keyViewByID(id string) (any, error) {
-	k, err := db.Get[keyRow](`SELECT * FROM keys WHERE id = ?`, id)
+func keyViewByID(tenant, id string) (any, error) {
+	k, err := db.Get[keyRow](`SELECT * FROM keys WHERE id = ? AND tenant_id = ?`, id, tenant)
 	if k == nil || err != nil {
 		return nil, cmpErr(err, notFound("Key"))
 	}
 	return keyView(*k)
 }
 
-func scriptView(id string) (any, error) {
-	sc, err := jobs.GetScript(id)
+// scriptOut is a script with whether it is from the shared library (read-only for organizations).
+type scriptOut struct {
+	*jobs.Script
+	Shared bool `json:"shared"`
+}
+
+func scriptView(tenant, id string) (*scriptOut, error) {
+	sc, err := jobs.ScriptFor(tenant, id)
 	if sc == nil || err != nil {
 		return nil, cmpErr(err, notFound("Script"))
 	}
-	return sc, nil
+	return &scriptOut{sc, sc.TenantID == nil}, nil
 }
 
 type scheduleOut struct {
@@ -355,8 +353,10 @@ type scheduleOut struct {
 	Next       *int64  `db:"-" json:"next"`
 }
 
-func schedules(where string, args ...any) ([]scheduleOut, error) {
-	list, err := db.Select[scheduleOut](`SELECT x.*, s.name AS script_name FROM schedules x LEFT JOIN scripts s ON s.id = x.script_id `+where, args...)
+// schedules lists the organization's schedules; rest goes after "WHERE x.tenant_id = ?" (AND …, ORDER BY …).
+func schedules(tenant, rest string, args ...any) ([]scheduleOut, error) {
+	list, err := db.Select[scheduleOut](`SELECT x.*, s.name AS script_name FROM schedules x LEFT JOIN scripts s ON s.id = x.script_id WHERE x.tenant_id = ? `+rest,
+		append([]any{tenant}, args...)...)
 	for i := range list {
 		if next, err := jobs.NextRuns(list[i].Cron, 1, time.Now()); err == nil && len(next) > 0 {
 			list[i].Next = &next[0]
@@ -365,8 +365,8 @@ func schedules(where string, args ...any) ([]scheduleOut, error) {
 	return list, err
 }
 
-func scheduleView(id string) (any, error) {
-	list, err := schedules(`WHERE x.id = ?`, id)
+func scheduleView(tenant, id string) (any, error) {
+	list, err := schedules(tenant, `AND x.id = ?`, id)
 	if len(list) == 0 || err != nil {
 		return nil, cmpErr(err, notFound("Schedule"))
 	}
@@ -378,12 +378,13 @@ type triggerOut struct {
 	ScriptName *string `db:"script_name" json:"script_name,omitempty"`
 }
 
-func triggers(where string, args ...any) ([]triggerOut, error) {
-	return db.Select[triggerOut](`SELECT x.*, s.name AS script_name FROM triggers x LEFT JOIN scripts s ON s.id = x.script_id `+where, args...)
+func triggers(tenant, rest string, args ...any) ([]triggerOut, error) {
+	return db.Select[triggerOut](`SELECT x.*, s.name AS script_name FROM triggers x LEFT JOIN scripts s ON s.id = x.script_id WHERE x.tenant_id = ? `+rest,
+		append([]any{tenant}, args...)...)
 }
 
-func getTrigger(id string) (*jobs.Trigger, error) {
-	t, err := db.Get[jobs.Trigger](`SELECT * FROM triggers WHERE id = ?`, id)
+func getTrigger(tenant, id string) (*jobs.Trigger, error) {
+	t, err := db.Get[jobs.Trigger](`SELECT * FROM triggers WHERE id = ? AND tenant_id = ?`, id, tenant)
 	if t == nil && err == nil {
 		err = notFound("Webhook")
 	}
@@ -398,17 +399,17 @@ type ruleOut struct {
 	CustomUnit *string `db:"custom_unit" json:"custom_unit"`
 }
 
-func rules(where string, args ...any) ([]ruleOut, error) {
+func rules(tenant, rest string, args ...any) ([]ruleOut, error) {
 	list, err := db.Select[ruleOut](`SELECT r.*, s.name AS server_name, c.name AS custom_name, c.unit AS custom_unit FROM alert_rules r
-    LEFT JOIN servers s ON s.id = r.server_id LEFT JOIN custom_metrics c ON c.id = r.custom_id `+where, args...)
+    LEFT JOIN servers s ON s.id = r.server_id LEFT JOIN custom_metrics c ON c.id = r.custom_id WHERE r.tenant_id = ? `+rest, append([]any{tenant}, args...)...)
 	for i := range list {
 		list[i].Enabled = list[i].Rule.Enabled != 0
 	}
 	return list, err
 }
 
-func ruleView(id string) (any, error) {
-	list, err := rules(`WHERE r.id = ?`, id)
+func ruleView(tenant, id string) (any, error) {
+	list, err := rules(tenant, `AND r.id = ?`, id)
 	if len(list) == 0 || err != nil {
 		return nil, cmpErr(err, notFound("Rule"))
 	}
@@ -421,8 +422,9 @@ type muteOut struct {
 	ServerName *string `db:"server_name" json:"server_name"`
 }
 
-func mutes(where string, args ...any) ([]muteOut, error) {
-	list, err := db.Select[muteOut](`SELECT w.*, s.name AS server_name FROM mute_windows w LEFT JOIN servers s ON s.id = w.server_id `+where, args...)
+func mutes(tenant, rest string, args ...any) ([]muteOut, error) {
+	list, err := db.Select[muteOut](`SELECT w.*, s.name AS server_name FROM mute_windows w LEFT JOIN servers s ON s.id = w.server_id WHERE w.tenant_id = ? `+rest,
+		append([]any{tenant}, args...)...)
 	for i := range list {
 		list[i].Active = alerts.InWindow(&list[i].Mute, time.Now())
 	}
@@ -431,7 +433,7 @@ func mutes(where string, args ...any) ([]muteOut, error) {
 
 // Secret values never leave the server; plain ones are shown so they can be edited.
 func variableView(v *jobs.Variable) (any, error) {
-	used, err := varUsers(v.Name)
+	used, err := varUsers(v.TenantID, v.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -446,22 +448,22 @@ func variableView(v *jobs.Variable) (any, error) {
 	return J{"id": v.ID, "name": v.Name, "secret": v.Secret, "description": v.Description, "created_at": v.CreatedAt, "value": value, "used_by": used}, nil
 }
 
-func varUsers(name string) ([]idName, error) {
-	return db.Select[idName](`SELECT id, name FROM scripts WHERE EXISTS (SELECT 1 FROM json_each(scripts.vars) WHERE value = ?) ORDER BY name`, name)
+func varUsers(tenant, name string) ([]idName, error) {
+	return db.Select[idName](`SELECT id, name FROM scripts WHERE tenant_id = ? AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(scripts.vars::jsonb) v WHERE v = ?) ORDER BY name`, tenant, name)
 }
 
-func getVariable(id string) (*jobs.Variable, error) {
-	v, err := db.Get[jobs.Variable](`SELECT * FROM variables WHERE id = ?`, id)
+func getVariable(tenant, id string) (*jobs.Variable, error) {
+	v, err := db.Get[jobs.Variable](`SELECT * FROM variables WHERE id = ? AND tenant_id = ?`, id, tenant)
 	if v == nil && err == nil {
 		err = notFound("Variable")
 	}
 	return v, err
 }
 
-func getRepo(id string) (*repos.Repo, error) {
+func getRepo(tenant, id string) (*repos.Repo, error) {
 	r, err := repos.GetRepo(id)
-	if r == nil && err == nil {
-		err = notFound("Repository")
+	if (r == nil || r.TenantID != tenant) && err == nil {
+		return nil, notFound("Repository")
 	}
 	return r, err
 }
@@ -533,221 +535,12 @@ func detached(c *ctx) context.Context { return context.WithoutCancel(c.r.Context
 // ---------- routes ----------
 
 func (s *Server) routes() {
-	s.authRoutes()
+	s.tenancyRoutes()
 	s.ssoRoutes()
 	s.serverRoutes()
 	s.libraryRoutes()
 	s.jobRoutes()
 	s.alertRoutes()
-}
-
-func (s *Server) authRoutes() {
-	s.route("GET /api/auth/state", func(c *ctx) (any, error) {
-		sso := ""
-		if ssoLinked() {
-			if u, err := url.Parse(db.Setting("oidc_issuer", "")); err == nil {
-				sso = u.Hostname()
-			}
-		}
-		return J{"setup": needsSetup(), "authed": c.sess != nil, "totp": db.Setting("totp_secret", "") != "", "sso": sso, "password": passwordLogin()}, nil
-	}, open)
-
-	s.route("POST /api/auth/setup", func(c *ctx) (any, error) {
-		if !needsSetup() {
-			return nil, httperr.New(409, "Already set up")
-		}
-		if err := s.checkRate(c.ip); err != nil {
-			return nil, err
-		}
-		tok := strings.TrimSpace(c.body.str("token"))
-		s.mu.Lock()
-		valid := s.setupToken != "" && tok == s.setupToken
-		s.mu.Unlock()
-		if !valid {
-			s.recordFailure(c.ip)
-			return nil, httperr.New(401, "Invalid setup token (see the server console)")
-		}
-		pw := c.body.str("password")
-		if jsLen(pw) < 10 {
-			return nil, httperr.Bad("Password must be at least 10 characters")
-		}
-		s.mu.Lock()
-		claimed := s.setupToken != ""
-		s.setupToken = ""
-		s.mu.Unlock()
-		if !claimed { // a concurrent setup won
-			return nil, httperr.New(409, "Already set up")
-		}
-		if err := db.SetSetting("password_hash", sec.HashPassword(pw)); err != nil {
-			return nil, err
-		}
-		if err := c.createSession(); err != nil {
-			return nil, err
-		}
-		c.audit("Initial setup completed", "")
-		return okResp, nil
-	}, open)
-
-	s.route("POST /api/auth/login", func(c *ctx) (any, error) {
-		if err := s.checkRate(c.ip); err != nil {
-			return nil, err
-		}
-		if needsSetup() {
-			return nil, httperr.New(409, "Setup required")
-		}
-		if !passwordLogin() {
-			return nil, httperr.New(403, "Password sign-in is turned off. Use single sign-on.")
-		}
-		if !sec.VerifyPassword(c.body.str("password"), db.Setting("password_hash", "")) {
-			s.recordFailure(c.ip)
-			db.Event("security", "Failed login (password)", db.EventOpts{Level: "warn", IP: c.ip})
-			return nil, httperr.New(401, "Wrong password")
-		}
-		secret, err := totpSecret()
-		if err != nil {
-			return nil, err
-		}
-		if secret != "" && !c.body.truthy("code") {
-			return J{"totp_required": true}, nil
-		}
-		if ok, err := s.checkTOTP(c.body["code"]); err != nil || !ok {
-			if err != nil {
-				return nil, err
-			}
-			s.recordFailure(c.ip)
-			db.Event("security", "Failed login (2FA code)", db.EventOpts{Level: "warn", IP: c.ip})
-			return nil, httperr.New(401, "Invalid 2FA code")
-		}
-		s.mu.Lock()
-		delete(s.failures, c.ip)
-		s.mu.Unlock()
-		if err := c.createSession(); err != nil {
-			return nil, err
-		}
-		db.Event("security", "Logged in", db.EventOpts{Actor: "admin", IP: c.ip})
-		return okResp, nil
-	}, open)
-
-	s.route("POST /api/auth/logout", func(c *ctx) (any, error) {
-		if c.sess != nil {
-			if err := exec(`DELETE FROM sessions WHERE hash = ?`, c.sess.Hash); err != nil {
-				return nil, err
-			}
-		}
-		c.w.Header().Set("Set-Cookie", s.sessionCookie(c.r, "", 0))
-		return okResp, nil
-	}, open)
-
-	// ---- account ----
-	s.route("GET /api/account", func(c *ctx) (any, error) {
-		list, err := db.Select[session](`SELECT * FROM sessions ORDER BY seen_at DESC`)
-		if err != nil {
-			return nil, err
-		}
-		out := []J{}
-		for _, x := range list {
-			out = append(out, J{"id": x.Hash[:16], "created_at": x.CreatedAt, "seen_at": x.SeenAt, "ip": x.IP, "ua": x.UA, "current": x.Hash == c.sess.Hash})
-		}
-		return J{"totp": db.Setting("totp_secret", "") != "", "sessions": out}, nil
-	})
-
-	s.route("POST /api/account/password", func(c *ctx) (any, error) {
-		if err := s.checkRate(c.ip); err != nil {
-			return nil, err
-		}
-		if !sec.VerifyPassword(c.body.str("current"), db.Setting("password_hash", "")) {
-			s.recordFailure(c.ip)
-			return nil, httperr.New(401, "Current password is wrong")
-		}
-		next := c.body.str("next")
-		if jsLen(next) < 10 {
-			return nil, httperr.Bad("New password must be at least 10 characters")
-		}
-		if err := db.SetSetting("password_hash", sec.HashPassword(next)); err != nil {
-			return nil, err
-		}
-		if err := exec(`DELETE FROM sessions WHERE hash != ?`, c.sess.Hash); err != nil {
-			return nil, err
-		}
-		c.audit("Password changed; other sessions signed out", "")
-		return okResp, nil
-	})
-
-	s.route("POST /api/account/totp/begin", func(c *ctx) (any, error) {
-		if secret, err := totpSecret(); err != nil || secret != "" {
-			return nil, cmpErr(err, httperr.New(409, "Two-factor sign-in is already on. Turn it off first (needs password and code)."))
-		}
-		secret := sec.NewTOTPSecret()
-		s.mu.Lock()
-		s.pendingTOTP[c.sess.Hash] = secret
-		s.mu.Unlock()
-		uri := "otpauth://totp/Fleetdeck:admin?secret=" + secret + "&issuer=Fleetdeck&algorithm=SHA1&digits=6&period=30"
-		img, err := qrDataURI(uri)
-		return J{"secret": secret, "uri": uri, "qr": img}, err
-	})
-
-	s.route("POST /api/account/totp/enable", func(c *ctx) (any, error) {
-		s.mu.Lock()
-		secret := s.pendingTOTP[c.sess.Hash]
-		s.mu.Unlock()
-		if secret == "" {
-			return nil, httperr.Bad("Start 2FA setup first")
-		}
-		if _, ok := sec.VerifyTOTP(secret, strings.Join(strings.Fields(c.body.str("code")), ""), time.Now()); !ok {
-			return nil, httperr.Bad("Code does not match, check your device clock")
-		}
-		if err := db.SetSetting("totp_secret", sec.Encrypt(secret)); err != nil {
-			return nil, err
-		}
-		if err := db.SetSetting("totp_last", -1); err != nil {
-			return nil, err
-		}
-		s.mu.Lock()
-		delete(s.pendingTOTP, c.sess.Hash)
-		s.mu.Unlock()
-		c.audit("Two-factor authentication enabled", "")
-		return okResp, nil
-	})
-
-	s.route("POST /api/account/totp/disable", func(c *ctx) (any, error) {
-		if err := s.checkRate(c.ip); err != nil {
-			return nil, err
-		}
-		ok := sec.VerifyPassword(c.body.str("password"), db.Setting("password_hash", ""))
-		if ok {
-			var err error
-			if ok, err = s.checkTOTP(c.body["code"]); err != nil {
-				return nil, err
-			}
-		}
-		if !ok {
-			s.recordFailure(c.ip)
-			return nil, httperr.New(401, "Password or code is wrong")
-		}
-		if err := db.SetSetting("totp_secret", nil); err != nil {
-			return nil, err
-		}
-		c.audit("Two-factor authentication disabled", "")
-		return okResp, nil
-	})
-
-	s.route("DELETE /api/account/sessions/{id}", func(c *ctx) (any, error) {
-		r, err := db.Exec(`DELETE FROM sessions WHERE substr(hash, 1, 16) = ? AND hash != ?`, c.param("id"), c.sess.Hash)
-		if err != nil {
-			return nil, err
-		}
-		n, _ := r.RowsAffected()
-		c.audit("Revoked a session", "")
-		return J{"ok": n > 0}, nil
-	})
-
-	s.route("POST /api/account/sessions/revoke-others", func(c *ctx) (any, error) {
-		if err := exec(`DELETE FROM sessions WHERE hash != ?`, c.sess.Hash); err != nil {
-			return nil, err
-		}
-		c.audit("Revoked all other sessions", "")
-		return okResp, nil
-	})
 }
 
 func (s *Server) serverRoutes() {
@@ -760,7 +553,7 @@ func (s *Server) serverRoutes() {
 		if err != nil {
 			return nil, err
 		}
-		list, err := db.Select[db.Server](`SELECT * FROM servers ORDER BY name COLLATE NOCASE`)
+		list, err := c.visibleServers("")
 		if err != nil {
 			return nil, err
 		}
@@ -781,7 +574,10 @@ func (s *Server) serverRoutes() {
 	})
 
 	s.route("POST /api/servers", func(c *ctx) (any, error) {
-		v, err := ValidateServer(c.body)
+		if c.level() < roleOwner {
+			return nil, httperr.New(403, "Only owners and admins can add servers")
+		}
+		v, err := ValidateServer(c.tenant, c.body)
 		if err != nil {
 			return nil, err
 		}
@@ -790,9 +586,14 @@ func (s *Server) serverRoutes() {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO servers (id, name, host, port, user, key_id, tags, notes, paused, created_at, sudo_enc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, v.Name, v.Host, v.Port, v.User, v.KeyID, v.Tags, v.Notes, v.Paused, db.Now(), sudo); err != nil {
+		if err := exec(`INSERT INTO servers (id, tenant_id, name, host, port, "user", key_id, tags, notes, paused, created_at, sudo_enc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, c.tenant, v.Name, v.Host, v.Port, v.User, v.KeyID, v.Tags, v.Notes, v.Paused, db.Now(), sudo); err != nil {
 			return nil, err
+		}
+		if c.level() < roleAdmin { // owners own what they add
+			if err := exec(`INSERT INTO server_members (server_id, user_id) VALUES (?, ?)`, id, c.user.ID); err != nil {
+				return nil, err
+			}
 		}
 		c.audit(fmt.Sprintf("Added server %s (%s@%s:%d)", v.Name, v.User, v.Host, v.Port), id)
 		srv, err := getServer(id)
@@ -805,14 +606,20 @@ func (s *Server) serverRoutes() {
 		return serverView(srv, nil)
 	})
 
-	s.route("GET /api/servers/{id}", func(c *ctx) (any, error) { return serverViewByID(c.param("id")) })
-
-	s.route("PUT /api/servers/{id}", func(c *ctx) (any, error) {
-		old, err := getServer(c.param("id"))
+	s.route("GET /api/servers/{id}", func(c *ctx) (any, error) {
+		srv, err := c.server(c.param("id"), roleViewer)
 		if err != nil {
 			return nil, err
 		}
-		v, err := ValidateServer(merge(toObj(old), c.body))
+		return serverView(srv, nil)
+	})
+
+	s.route("PUT /api/servers/{id}", func(c *ctx) (any, error) {
+		old, err := c.server(c.param("id"), roleOwner)
+		if err != nil {
+			return nil, err
+		}
+		v, err := ValidateServer(c.tenant, merge(toObj(old), c.body))
 		if err != nil {
 			return nil, err
 		}
@@ -826,7 +633,7 @@ func (s *Server) serverRoutes() {
 		if moved {
 			hostKey, hostKeyRaw = nil, nil
 		}
-		if err := exec(`UPDATE servers SET name = ?, host = ?, port = ?, user = ?, key_id = ?, tags = ?, notes = ?, paused = ?, host_key = ?, host_key_raw = ? WHERE id = ?`,
+		if err := exec(`UPDATE servers SET name = ?, host = ?, port = ?, "user" = ?, key_id = ?, tags = ?, notes = ?, paused = ?, host_key = ?, host_key_raw = ? WHERE id = ?`,
 			v.Name, v.Host, v.Port, v.User, v.KeyID, v.Tags, v.Notes, v.Paused, hostKey, hostKeyRaw, old.ID); err != nil {
 			return nil, err
 		}
@@ -866,12 +673,12 @@ func (s *Server) serverRoutes() {
 	})
 
 	s.route("DELETE /api/servers/{id}", func(c *ctx) (any, error) {
-		srv, err := getServer(c.param("id"))
+		srv, err := c.server(c.param("id"), roleOwner)
 		if err != nil {
 			return nil, err
 		}
 		ssh.Drop(srv.ID)
-		if err := db.Tx(func(tx *sqlx.Tx) error {
+		if err := db.Tx(func(tx db.Txn) error {
 			for _, q := range []string{`DELETE FROM metrics WHERE server_id = ?`, `DELETE FROM container_metrics WHERE server_id = ?`, `DELETE FROM custom_values WHERE server_id = ?`, `DELETE FROM servers WHERE id = ?`} {
 				if _, err := tx.Exec(q, srv.ID); err != nil {
 					return err
@@ -887,16 +694,19 @@ func (s *Server) serverRoutes() {
 	})
 
 	s.route("POST /api/servers/{id}/probe", func(c *ctx) (any, error) {
-		srv, err := getServer(c.param("id"))
+		srv, err := c.server(c.param("id"), roleOperator)
 		if err != nil {
 			return nil, err
 		}
 		probe.Probe(srv)
-		return serverViewByID(srv.ID)
+		if srv, err = getServer(srv.ID); err != nil {
+			return nil, err
+		}
+		return serverView(srv, nil)
 	})
 
 	s.route("POST /api/servers/{id}/test", func(c *ctx) (any, error) {
-		srv, err := getServer(c.param("id"))
+		srv, err := c.server(c.param("id"), roleOperator)
 		if err != nil {
 			return nil, err
 		}
@@ -935,7 +745,7 @@ func (s *Server) serverRoutes() {
 	})
 
 	s.route("POST /api/servers/{id}/hostkey/accept", func(c *ctx) (any, error) {
-		srv, err := getServer(c.param("id"))
+		srv, err := c.server(c.param("id"), roleOwner)
 		if err != nil {
 			return nil, err
 		}
@@ -943,16 +753,21 @@ func (s *Server) serverRoutes() {
 		if !ok {
 			return nil, httperr.Bad("No pending host key change for this server")
 		}
-		db.Event("security", fmt.Sprintf("Accepted new host key %s for %s", fp, srv.Name), db.EventOpts{Level: "warn", Actor: "admin", IP: c.ip, ServerID: srv.ID})
+		db.Event("security", fmt.Sprintf("Accepted new host key %s for %s", fp, srv.Name), db.EventOpts{Level: "warn", Actor: c.actor(), IP: c.ip, ServerID: srv.ID})
 		go probe.Probe(srv)
 		return J{"ok": true, "host_key": fp}, nil
 	})
 
 	// Admin views read with the request's context (they stop when the browser leaves);
 	// actions use detached(c), so they finish like they did in the JS server.
+	// Viewers read, operators act.
 	onServer := func(pattern string, fn func(c *ctx, srv *db.Server) (any, error)) {
+		need := roleOperator
+		if strings.HasPrefix(pattern, "GET ") {
+			need = roleViewer
+		}
 		s.route(pattern, func(c *ctx) (any, error) {
-			srv, err := getServer(c.param("id"))
+			srv, err := c.server(c.param("id"), need)
 			if err != nil {
 				return nil, err
 			}
@@ -1072,7 +887,7 @@ func (s *Server) serverRoutes() {
 
 	// ---- authorized_keys across the fleet ----
 	s.route("GET /api/accounts", func(c *ctx) (any, error) {
-		list, err := db.Select[db.Server](`SELECT * FROM servers WHERE paused = 0 ORDER BY name COLLATE NOCASE`)
+		list, err := c.visibleServers("AND paused = 0")
 		if err != nil {
 			return nil, err
 		}
@@ -1100,7 +915,7 @@ func (s *Server) serverRoutes() {
 			idName
 			PublicKey string `db:"public_key" json:"-"`
 			FP        string `db:"-" json:"fp"`
-		}](`SELECT id, name, public_key FROM keys`)
+		}](`SELECT id, name, public_key FROM keys WHERE tenant_id = ?`, c.tenant)
 		if err != nil {
 			return nil, err
 		}
@@ -1117,10 +932,10 @@ func (s *Server) serverRoutes() {
 			}
 		}
 		return J{"servers": out, "keys": keys, "own": own}, nil
-	})
+	}, admins)
 
 	s.route("POST /api/servers/{id}/authorized-keys/revoke", func(c *ctx) (any, error) {
-		srv, err := getServer(c.param("id"))
+		srv, err := c.server(c.param("id"), roleOwner)
 		if err != nil {
 			return nil, err
 		}
@@ -1139,7 +954,7 @@ func (s *Server) serverRoutes() {
 			return nil, err
 		}
 		db.Event("security", fmt.Sprintf("Removed SSH key %s from %s@%s", admin.BlobFingerprint(blob), user, srv.Name),
-			db.EventOpts{Level: "warn", Actor: "admin", IP: c.ip, ServerID: srv.ID})
+			db.EventOpts{Level: "warn", Actor: c.actor(), IP: c.ip, ServerID: srv.ID})
 		return J{"ok": true, "output": out}, nil
 	})
 }
@@ -1153,8 +968,12 @@ func blobOf(pub string) string {
 
 func (s *Server) libraryRoutes() {
 	// ---- keys ----
+	// Owners see and add keys (they pick one when adding a server); renaming and deleting is for admins.
 	s.route("GET /api/keys", func(c *ctx) (any, error) {
-		list, err := db.Select[keyRow](`SELECT * FROM keys ORDER BY name COLLATE NOCASE`)
+		if c.level() < roleOwner {
+			return nil, httperr.New(403, "Only owners and admins manage SSH keys")
+		}
+		list, err := db.Select[keyRow](`SELECT * FROM keys WHERE tenant_id = ? ORDER BY lower(name)`, c.tenant)
 		if err != nil {
 			return nil, err
 		}
@@ -1168,6 +987,9 @@ func (s *Server) libraryRoutes() {
 	})
 
 	s.route("POST /api/keys", func(c *ctx) (any, error) {
+		if c.level() < roleOwner {
+			return nil, httperr.New(403, "Only owners and admins manage SSH keys")
+		}
 		name := strings.TrimSpace(c.body.str("name"))
 		if name == "" || jsLen(name) > 64 {
 			return nil, httperr.Bad("Name is required")
@@ -1190,8 +1012,8 @@ func (s *Server) libraryRoutes() {
 			passEnc = new(sec.Encrypt(passphrase))
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO keys (id, name, public_key, private_enc, passphrase_enc, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			id, name, pub, sec.Encrypt(priv), passEnc, db.Now()); err != nil {
+		if err := exec(`INSERT INTO keys (id, tenant_id, name, public_key, private_enc, passphrase_enc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			id, c.tenant, name, pub, sec.Encrypt(priv), passEnc, db.Now()); err != nil {
 			return nil, err
 		}
 		verb := "Imported"
@@ -1199,7 +1021,7 @@ func (s *Server) libraryRoutes() {
 			verb = "Generated"
 		}
 		c.audit(fmt.Sprintf(`%s SSH key "%s"`, verb, name), "")
-		return keyViewByID(id)
+		return keyViewByID(c.tenant, id)
 	})
 
 	s.route("PUT /api/keys/{id}", func(c *ctx) (any, error) {
@@ -1207,7 +1029,7 @@ func (s *Server) libraryRoutes() {
 		if name == "" || jsLen(name) > 64 {
 			return nil, httperr.Bad("Name is required")
 		}
-		old, err := db.Get[string](`SELECT name FROM keys WHERE id = ?`, c.param("id"))
+		old, err := db.Get[string](`SELECT name FROM keys WHERE id = ? AND tenant_id = ?`, c.param("id"), c.tenant)
 		if old == nil || err != nil {
 			return nil, cmpErr(err, notFound("Key"))
 		}
@@ -1215,11 +1037,11 @@ func (s *Server) libraryRoutes() {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Renamed SSH key "%s" to "%s"`, *old, name), "")
-		return keyViewByID(c.param("id"))
-	})
+		return keyViewByID(c.tenant, c.param("id"))
+	}, admins)
 
 	s.route("DELETE /api/keys/{id}", func(c *ctx) (any, error) {
-		k, err := db.Get[keyRow](`SELECT * FROM keys WHERE id = ?`, c.param("id"))
+		k, err := db.Get[keyRow](`SELECT * FROM keys WHERE id = ? AND tenant_id = ?`, c.param("id"), c.tenant)
 		if k == nil || err != nil {
 			return nil, cmpErr(err, notFound("Key"))
 		}
@@ -1235,44 +1057,82 @@ func (s *Server) libraryRoutes() {
 		}
 		c.audit(fmt.Sprintf(`Deleted SSH key "%s"`, k.Name), "")
 		return okResp, nil
-	})
+	}, admins)
 
-	// ---- scripts ----
+	// ---- scripts: the organization's own, plus the shared library (built-ins) that only super admins edit ----
 	s.route("GET /api/scripts", func(c *ctx) (any, error) {
-		return db.Select[jobs.Script](`SELECT * FROM scripts ORDER BY builtin DESC, name COLLATE NOCASE`)
+		list, err := db.Select[jobs.Script](`SELECT * FROM scripts WHERE tenant_id = ? OR tenant_id IS NULL ORDER BY builtin DESC, (tenant_id IS NULL) DESC, lower(name)`, c.tenant)
+		out := make([]scriptOut, len(list))
+		for i := range list {
+			out[i] = scriptOut{&list[i], list[i].TenantID == nil}
+		}
+		return out, err
 	})
+	// editable loads a script the user may change: the organization's own (admins), or a shared one (super admins).
+	editable := func(c *ctx) (*jobs.Script, error) {
+		sc, err := jobs.ScriptFor(c.tenant, c.param("id"))
+		if sc == nil || err != nil {
+			return nil, cmpErr(err, notFound("Script"))
+		}
+		if sc.TenantID == nil && !c.super {
+			return nil, httperr.New(403, "This script is from the shared library. Make a copy to change it.")
+		}
+		return sc, nil
+	}
 	s.route("POST /api/scripts", func(c *ctx) (any, error) {
-		v, err := jobs.ValidateScript(scriptInput(c.body))
+		scope := &c.tenant // nil = the shared library
+		if c.body.truthy("shared") {
+			if !c.super {
+				return nil, httperr.New(403, "Only super admins add to the shared library")
+			}
+			scope = nil
+		}
+		v, err := jobs.ValidateScript(db.Str(scope), scriptInput(c.body))
 		if err != nil {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO scripts (id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
-			id, v.Name, v.Description, v.Body, v.AsRoot, v.Params, db.Now(), v.Kind, v.RepoID, v.Playbook, v.Vars); err != nil {
+		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+			id, scope, v.Name, v.Description, v.Body, v.AsRoot, v.Params, db.Now(), v.Kind, v.RepoID, v.Playbook, v.Vars); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Created script "%s"`, v.Name), "")
-		return scriptView(id)
-	})
+		return scriptView(c.tenant, id)
+	}, admins)
 	s.route("PUT /api/scripts/{id}", func(c *ctx) (any, error) {
-		if _, err := scriptView(c.param("id")); err != nil {
+		sc, err := editable(c)
+		if err != nil {
 			return nil, err
 		}
-		v, err := jobs.ValidateScript(scriptInput(c.body))
+		v, err := jobs.ValidateScript(db.Str(sc.TenantID), scriptInput(c.body))
 		if err != nil {
 			return nil, err
 		}
 		if err := exec(`UPDATE scripts SET name = ?, description = ?, body = ?, as_root = ?, params = ?, kind = ?, repo_id = ?, playbook = ?, vars = ? WHERE id = ?`,
-			v.Name, v.Description, v.Body, v.AsRoot, v.Params, v.Kind, v.RepoID, v.Playbook, v.Vars, c.param("id")); err != nil {
+			v.Name, v.Description, v.Body, v.AsRoot, v.Params, v.Kind, v.RepoID, v.Playbook, v.Vars, sc.ID); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Edited script "%s"`, v.Name), "")
-		return scriptView(c.param("id"))
-	})
-	s.route("DELETE /api/scripts/{id}", func(c *ctx) (any, error) {
-		sc, err := jobs.GetScript(c.param("id"))
+		return scriptView(c.tenant, sc.ID)
+	}, admins)
+	s.route("POST /api/scripts/{id}/copy", func(c *ctx) (any, error) {
+		sc, err := jobs.ScriptFor(c.tenant, c.param("id"))
 		if sc == nil || err != nil {
 			return nil, cmpErr(err, notFound("Script"))
+		}
+		id := db.NewID()
+		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars)
+      SELECT ?, ?, left(name || ' (copy)', 100), description, body, as_root, params, 0, ?, kind, repo_id, playbook, vars FROM scripts WHERE id = ?`,
+			id, c.tenant, db.Now(), sc.ID); err != nil {
+			return nil, err
+		}
+		c.audit(fmt.Sprintf(`Copied script "%s"`, sc.Name), "")
+		return scriptView(c.tenant, id)
+	}, admins)
+	s.route("DELETE /api/scripts/{id}", func(c *ctx) (any, error) {
+		sc, err := editable(c)
+		if err != nil {
+			return nil, err
 		}
 		if sc.Builtin {
 			return nil, httperr.New(409, "Built-in scripts can't be deleted (the server pages use them). Edit it instead.")
@@ -1282,11 +1142,11 @@ func (s *Server) libraryRoutes() {
 		}
 		c.audit(fmt.Sprintf(`Deleted script "%s"`, sc.Name), "")
 		return okResp, nil
-	})
+	}, admins)
 
 	// ---- shared variables ----
 	s.route("GET /api/variables", func(c *ctx) (any, error) {
-		list, err := db.Select[jobs.Variable](`SELECT * FROM variables ORDER BY name`)
+		list, err := db.Select[jobs.Variable](`SELECT * FROM variables WHERE tenant_id = ? ORDER BY name`, c.tenant)
 		if err != nil {
 			return nil, err
 		}
@@ -1299,13 +1159,13 @@ func (s *Server) libraryRoutes() {
 		return out, nil
 	})
 	s.route("POST /api/variables", func(c *ctx) (any, error) {
-		v, err := jobs.ValidateVariable(variableInput(c.body), nil)
+		v, err := jobs.ValidateVariable(c.tenant, variableInput(c.body), nil)
 		if err != nil {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO variables (id, name, value_enc, secret, description, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			id, v.Name, v.ValueEnc, v.Secret, v.Description, db.Now()); err != nil {
+		if err := exec(`INSERT INTO variables (id, tenant_id, name, value_enc, secret, description, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			id, c.tenant, v.Name, v.ValueEnc, v.Secret, v.Description, db.Now()); err != nil {
 			return nil, err
 		}
 		secret := ""
@@ -1313,18 +1173,18 @@ func (s *Server) libraryRoutes() {
 			secret = "secret "
 		}
 		c.audit(fmt.Sprintf("Created %svariable %s", secret, v.Name), "")
-		nv, err := getVariable(id)
+		nv, err := getVariable(c.tenant, id)
 		if err != nil {
 			return nil, err
 		}
 		return variableView(nv)
 	})
 	s.route("PUT /api/variables/{id}", func(c *ctx) (any, error) {
-		old, err := getVariable(c.param("id"))
+		old, err := getVariable(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
-		v, err := jobs.ValidateVariable(variableInput(c.body), old)
+		v, err := jobs.ValidateVariable(c.tenant, variableInput(c.body), old)
 		if err != nil {
 			return nil, err
 		}
@@ -1332,18 +1192,18 @@ func (s *Server) libraryRoutes() {
 			return nil, err
 		}
 		c.audit("Updated variable "+v.Name, "")
-		nv, err := getVariable(old.ID)
+		nv, err := getVariable(c.tenant, old.ID)
 		if err != nil {
 			return nil, err
 		}
 		return variableView(nv)
 	})
 	s.route("DELETE /api/variables/{id}", func(c *ctx) (any, error) {
-		v, err := getVariable(c.param("id"))
+		v, err := getVariable(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
-		used, err := varUsers(v.Name)
+		used, err := varUsers(c.tenant, v.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -1359,7 +1219,7 @@ func (s *Server) libraryRoutes() {
 
 	// ---- git repositories ----
 	s.route("GET /api/repos", func(c *ctx) (any, error) {
-		list, err := db.Select[repos.Repo](`SELECT * FROM repos ORDER BY name COLLATE NOCASE`)
+		list, err := db.Select[repos.Repo](`SELECT * FROM repos WHERE tenant_id = ? ORDER BY lower(name)`, c.tenant)
 		if err != nil {
 			return nil, err
 		}
@@ -1377,17 +1237,17 @@ func (s *Server) libraryRoutes() {
 		return out, nil
 	})
 	s.route("POST /api/repos", func(c *ctx) (any, error) {
-		v, err := repos.ValidateRepo(repoInput(c.body), nil)
+		v, err := repos.ValidateRepo(c.tenant, repoInput(c.body), nil)
 		if err != nil {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO repos (id, name, url, branch, auth, key_id, username, token_enc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, v.Name, v.URL, v.Branch, v.Auth, v.KeyID, v.Username, v.TokenEnc, db.Now()); err != nil {
+		if err := exec(`INSERT INTO repos (id, tenant_id, name, url, branch, auth, key_id, username, token_enc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, c.tenant, v.Name, v.URL, v.Branch, v.Auth, v.KeyID, v.Username, v.TokenEnc, db.Now()); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Added repository "%s" (%s)`, v.Name, v.URL), "")
-		r, err := getRepo(id)
+		r, err := getRepo(c.tenant, id)
 		if err != nil {
 			return nil, err
 		}
@@ -1395,12 +1255,12 @@ func (s *Server) libraryRoutes() {
 		return repos.RepoView(r), nil
 	})
 	s.route("PUT /api/repos/{id}", func(c *ctx) (any, error) {
-		old, err := getRepo(c.param("id"))
+		old, err := getRepo(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
 		base := obj{"name": old.Name, "url": old.URL, "branch": old.Branch, "auth": old.Auth, "key_id": db.Str(old.KeyID), "username": db.Str(old.Username)}
-		v, err := repos.ValidateRepo(repoInput(merge(base, c.body)), old)
+		v, err := repos.ValidateRepo(c.tenant, repoInput(merge(base, c.body)), old)
 		if err != nil {
 			return nil, err
 		}
@@ -1412,14 +1272,14 @@ func (s *Server) libraryRoutes() {
 			repos.RemoveCheckout(old.ID) // fresh clone for a different remote
 		}
 		c.audit(fmt.Sprintf(`Updated repository "%s"`, v.Name), "")
-		r, err := getRepo(old.ID)
+		r, err := getRepo(c.tenant, old.ID)
 		if err != nil {
 			return nil, err
 		}
 		return repos.RepoView(r), nil
 	})
 	s.route("DELETE /api/repos/{id}", func(c *ctx) (any, error) {
-		r, err := getRepo(c.param("id"))
+		r, err := getRepo(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
@@ -1441,21 +1301,21 @@ func (s *Server) libraryRoutes() {
 		if _, err := repos.Sync(r, nil); err != nil {
 			return nil, httperr.New(502, err.Error())
 		}
-		r, err := getRepo(r.ID)
+		r, err := getRepo(r.TenantID, r.ID)
 		if err != nil {
 			return nil, err
 		}
 		return repos.RepoView(r), nil
 	}
 	s.route("POST /api/repos/{id}/sync", func(c *ctx) (any, error) {
-		r, err := getRepo(c.param("id"))
+		r, err := getRepo(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
 		return syncView(r)
 	})
 	s.route("POST /api/repos/{id}/forget-hostkey", func(c *ctx) (any, error) {
-		r, err := getRepo(c.param("id"))
+		r, err := getRepo(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
@@ -1464,11 +1324,11 @@ func (s *Server) libraryRoutes() {
 			return nil, err
 		}
 		db.Event("security", fmt.Sprintf(`Forgot the pinned Git host key of %s (repository "%s"); the next sync pins the new one`, host, r.Name),
-			db.EventOpts{Level: "warn", Actor: "admin", IP: c.ip})
+			db.EventOpts{Level: "warn", Actor: c.actor(), IP: c.ip, TenantID: c.tenant})
 		return syncView(r)
 	})
 	s.route("GET /api/repos/{id}/files", func(c *ctx) (any, error) {
-		r, err := getRepo(c.param("id"))
+		r, err := getRepo(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
@@ -1486,14 +1346,15 @@ func (s *Server) libraryRoutes() {
 
 func (s *Server) jobRoutes() {
 	s.route("GET /api/jobs", func(c *ctx) (any, error) {
-		return jobs.ListJobs(jobs.ListOpts{Server: c.query("server"), Limit: c.query("limit"), Before: c.query("before"), Status: c.query("status")})
+		return jobs.ListJobs(jobs.ListOpts{Server: c.query("server"), Limit: c.query("limit"), Before: c.query("before"), Status: c.query("status"),
+			Tenant: c.tenant, Member: c.member()})
 	})
 
 	s.route("POST /api/jobs", func(c *ctx) (any, error) {
 		b := c.body
 		var spec jobs.Spec
 		if b.truthy("script_id") {
-			sc, err := jobs.GetScript(jsString(b["script_id"]))
+			sc, err := jobs.ScriptFor(c.tenant, jsString(b["script_id"]))
 			if sc == nil || err != nil {
 				return nil, cmpErr(err, notFound("Script"))
 			}
@@ -1519,7 +1380,7 @@ func (s *Server) jobRoutes() {
 			name := b.strOr("name", strings.Split(strings.TrimSpace(body), "\n")[0])
 			spec = jobs.Spec{Name: jsSlice(name, 100), Body: body, AsRoot: b["as_root"] != false, Params: jobs.Values{}}
 		}
-		spec.Targets, spec.Actor = targetsOf(b["targets"]), "admin"
+		spec.Targets, spec.Actor, spec.TenantID, spec.Member = targetsOf(b["targets"]), c.actor(), c.tenant, c.member()
 		id, err := jobs.StartJob(spec)
 		if err != nil {
 			return nil, err
@@ -1528,21 +1389,49 @@ func (s *Server) jobRoutes() {
 		return J{"id": id}, nil
 	})
 
-	getJob := func(c *ctx) (*jobs.Job, error) {
+	// getJob loads a job of the organization. Members see only the runs on their servers, and a job with none of
+	// those not at all; all = every run of the job is on their servers (needed to cancel or re-run it).
+	getJob := func(c *ctx) (j *jobs.Job, all bool, err error) {
 		id, ok := jobID(c)
 		if !ok {
-			return nil, notFound("Job")
+			return nil, false, notFound("Job")
 		}
-		j, err := jobs.GetJob(id)
-		if j == nil && err == nil {
-			err = notFound("Job")
+		if j, err = jobs.GetJob(id); err != nil {
+			return nil, false, err
 		}
-		return j, err
+		if j == nil || j.TenantID != c.tenant {
+			return nil, false, notFound("Job")
+		}
+		vis, err := c.sees()
+		if err != nil || vis == nil {
+			return j, true, err
+		}
+		runs := j.Runs[:0]
+		for _, r := range j.Runs {
+			if vis[r.ServerID] {
+				runs = append(runs, r)
+			}
+		}
+		all = len(runs) == len(j.Runs)
+		if j.Runs = runs; len(runs) == 0 {
+			return nil, false, notFound("Job")
+		}
+		return j, all, nil
 	}
-	s.route("GET /api/jobs/{id}", func(c *ctx) (any, error) { return getJob(c) })
+	s.route("GET /api/jobs/{id}", func(c *ctx) (any, error) {
+		j, _, err := getJob(c)
+		return j, err
+	})
 
 	s.route("POST /api/jobs/{id}/cancel", func(c *ctx) (any, error) {
-		if id, ok := jobID(c); !ok || !jobs.CancelJob(id) {
+		j, all, err := getJob(c)
+		if err != nil {
+			return nil, err
+		}
+		if !all {
+			return nil, httperr.New(403, "This job also runs on servers you can't see")
+		}
+		if !jobs.CancelJob(j.ID) {
 			return nil, httperr.New(409, "Job is not running")
 		}
 		c.audit("Cancelled job #"+c.param("id"), "")
@@ -1550,9 +1439,12 @@ func (s *Server) jobRoutes() {
 	})
 
 	s.route("POST /api/jobs/{id}/rerun", func(c *ctx) (any, error) {
-		j, err := getJob(c)
+		j, all, err := getJob(c)
 		if err != nil {
 			return nil, err
+		}
+		if !all {
+			return nil, httperr.New(403, "This job also ran on servers you can't see")
 		}
 		servers := []string{}
 		for _, r := range j.Runs {
@@ -1561,7 +1453,7 @@ func (s *Server) jobRoutes() {
 			}
 		}
 		id, err := jobs.StartJob(jobs.Spec{ScriptID: db.Str(j.ScriptID), Name: j.Name, Body: j.Body, Kind: j.Kind, RepoID: db.Str(j.RepoID), Options: j.Options,
-			AsRoot: j.AsRoot != 0, Params: j.Params, Targets: jobs.Targets{Servers: servers, Tags: []string{}}, Actor: "admin"})
+			AsRoot: j.AsRoot != 0, Params: j.Params, Targets: jobs.Targets{Servers: servers, Tags: []string{}}, Actor: c.actor(), TenantID: c.tenant, Member: c.member()})
 		if err != nil {
 			return nil, err
 		}
@@ -1570,7 +1462,11 @@ func (s *Server) jobRoutes() {
 	})
 
 	s.route("GET /api/jobs/{id}/stream", func(c *ctx) (any, error) {
-		job, err := getJob(c)
+		job, _, err := getJob(c)
+		if err != nil {
+			return nil, err
+		}
+		vis, err := c.sees()
 		if err != nil {
 			return nil, err
 		}
@@ -1593,6 +1489,9 @@ func (s *Server) jobRoutes() {
 		msgs, lost := make(chan jobs.Msg, 4096), make(chan struct{})
 		var once sync.Once
 		unsub, live := jobs.Subscribe(job.ID, func(m jobs.Msg) {
+			if srv, ok := m["server"].(string); ok && vis != nil && !vis[srv] {
+				return // a run on a server this user doesn't see
+			}
 			select {
 			case msgs <- m:
 			default:
@@ -1600,7 +1499,7 @@ func (s *Server) jobRoutes() {
 			}
 		})
 		if !live {
-			if j, err := jobs.GetJob(job.ID); err == nil && j != nil {
+			if j, _, err := getJob(c); err == nil && j != nil {
 				job = j
 			}
 			send(J{"type": "snapshot", "job": job})
@@ -1628,22 +1527,22 @@ func (s *Server) jobRoutes() {
 	})
 
 	// ---- schedules ----
-	s.route("GET /api/schedules", func(c *ctx) (any, error) { return schedules(`ORDER BY x.name COLLATE NOCASE`) })
+	s.route("GET /api/schedules", func(c *ctx) (any, error) { return schedules(c.tenant, `ORDER BY lower(x.name)`) })
 	s.route("POST /api/schedules", func(c *ctx) (any, error) {
-		v, err := jobs.ValidateSchedule(scheduleInput(c.body), true)
+		v, err := jobs.ValidateSchedule(c.tenant, scheduleInput(c.body), true)
 		if err != nil {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO schedules (id, name, script_id, cron, targets, params, enabled, once, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, v.Name, v.ScriptID, v.Cron, v.Targets, v.Params, v.Enabled, v.Once, db.Now()); err != nil {
+		if err := exec(`INSERT INTO schedules (id, tenant_id, name, script_id, cron, targets, params, enabled, once, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, c.tenant, v.Name, v.ScriptID, v.Cron, v.Targets, v.Params, v.Enabled, v.Once, db.Now()); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Created schedule "%s" (%s)`, v.Name, *v.Cron), "")
-		return scheduleView(id)
+		return scheduleView(c.tenant, id)
 	})
 	getSchedule := func(c *ctx) (*jobs.Schedule, error) {
-		sc, err := db.Get[jobs.Schedule](`SELECT * FROM schedules WHERE id = ?`, c.param("id"))
+		sc, err := db.Get[jobs.Schedule](`SELECT * FROM schedules WHERE id = ? AND tenant_id = ?`, c.param("id"), c.tenant)
 		if sc == nil && err == nil {
 			err = notFound("Schedule")
 		}
@@ -1654,7 +1553,7 @@ func (s *Server) jobRoutes() {
 		if err != nil {
 			return nil, err
 		}
-		v, err := jobs.ValidateSchedule(scheduleInput(merge(toObj(old), c.body)), true)
+		v, err := jobs.ValidateSchedule(c.tenant, scheduleInput(merge(toObj(old), c.body)), true)
 		if err != nil {
 			return nil, err
 		}
@@ -1663,7 +1562,7 @@ func (s *Server) jobRoutes() {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Updated schedule "%s"`, v.Name), "")
-		return scheduleView(old.ID)
+		return scheduleView(c.tenant, old.ID)
 	})
 	s.route("DELETE /api/schedules/{id}", func(c *ctx) (any, error) {
 		sc, err := getSchedule(c)
@@ -1681,7 +1580,7 @@ func (s *Server) jobRoutes() {
 		if err != nil {
 			return nil, err
 		}
-		id, err := jobs.RunSchedule(sc, "admin")
+		id, err := jobs.RunSchedule(sc, c.actor())
 		if err != nil {
 			return nil, err
 		}
@@ -1699,26 +1598,26 @@ func (s *Server) jobRoutes() {
 	// ---- webhook triggers ----
 	// Each trigger has its own secret URL that starts one saved script on fixed targets, nothing else.
 	// Only the token's hash is stored; the URL is shown once (and can be rotated).
-	triggerView := func(id string) (*triggerOut, error) {
-		list, err := triggers(`WHERE x.id = ?`, id)
+	triggerView := func(c *ctx, id string) (*triggerOut, error) {
+		list, err := triggers(c.tenant, `AND x.id = ?`, id)
 		if len(list) == 0 || err != nil {
 			return nil, cmpErr(err, notFound("Webhook"))
 		}
 		return &list[0], nil
 	}
-	s.route("GET /api/triggers", func(c *ctx) (any, error) { return triggers(`ORDER BY x.name COLLATE NOCASE`) })
+	s.route("GET /api/triggers", func(c *ctx) (any, error) { return triggers(c.tenant, `ORDER BY lower(x.name)`) })
 	s.route("POST /api/triggers", func(c *ctx) (any, error) {
-		v, err := jobs.ValidateSchedule(scheduleInput(c.body), false)
+		v, err := jobs.ValidateSchedule(c.tenant, scheduleInput(c.body), false)
 		if err != nil {
 			return nil, err
 		}
 		id, token := db.NewID(), sec.Token()
-		if err := exec(`INSERT INTO triggers (id, name, script_id, targets, params, token_hash, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, v.Name, v.ScriptID, v.Targets, v.Params, sec.SHA256(token), v.Enabled, db.Now()); err != nil {
+		if err := exec(`INSERT INTO triggers (id, tenant_id, name, script_id, targets, params, token_hash, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, c.tenant, v.Name, v.ScriptID, v.Targets, v.Params, sec.SHA256(token), v.Enabled, db.Now()); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Created webhook "%s"`, v.Name), "")
-		t, err := triggerView(id)
+		t, err := triggerView(c, id)
 		if err != nil {
 			return nil, err
 		}
@@ -1728,11 +1627,11 @@ func (s *Server) jobRoutes() {
 		}{t, token}, nil
 	})
 	s.route("PUT /api/triggers/{id}", func(c *ctx) (any, error) {
-		old, err := getTrigger(c.param("id"))
+		old, err := getTrigger(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
-		v, err := jobs.ValidateSchedule(scheduleInput(merge(toObj(old), c.body)), false)
+		v, err := jobs.ValidateSchedule(c.tenant, scheduleInput(merge(toObj(old), c.body)), false)
 		if err != nil {
 			return nil, err
 		}
@@ -1741,10 +1640,10 @@ func (s *Server) jobRoutes() {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Updated webhook "%s"`, v.Name), "")
-		return triggerView(old.ID)
+		return triggerView(c, old.ID)
 	})
 	s.route("POST /api/triggers/{id}/rotate", func(c *ctx) (any, error) {
-		t, err := getTrigger(c.param("id"))
+		t, err := getTrigger(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
@@ -1756,7 +1655,7 @@ func (s *Server) jobRoutes() {
 		return J{"token": token}, nil
 	})
 	s.route("DELETE /api/triggers/{id}", func(c *ctx) (any, error) {
-		t, err := getTrigger(c.param("id"))
+		t, err := getTrigger(c.tenant, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
@@ -1781,7 +1680,7 @@ func (s *Server) jobRoutes() {
 		if err != nil {
 			return nil, err
 		}
-		db.Event("audit", fmt.Sprintf(`Webhook "%s" started job #%d`, t.Name, id), db.EventOpts{Actor: "webhook", IP: c.ip})
+		db.Event("audit", fmt.Sprintf(`Webhook "%s" started job #%d`, t.Name, id), db.EventOpts{Actor: "webhook", IP: c.ip, TenantID: t.TenantID})
 		return J{"ok": true, "job": id}, nil
 	}, open, raw)
 }
@@ -1793,19 +1692,19 @@ var settingRanges = []struct {
 
 func (s *Server) alertRoutes() {
 	s.route("GET /api/alerts", func(c *ctx) (any, error) {
-		list, err := rules(`ORDER BY r.created_at`)
+		list, err := rules(c.tenant, `ORDER BY r.created_at`)
 		if err != nil {
 			return nil, err
 		}
-		firing, err := alerts.Firing()
+		firing, err := alerts.Firing(c.tenant)
 		if err != nil {
 			return nil, err
 		}
-		history, err := db.Rows(`SELECT * FROM events WHERE kind = 'alert' ORDER BY id DESC LIMIT 100`)
+		history, err := db.Rows(`SELECT id, t, kind, level, server_id, actor, ip, message FROM events WHERE tenant_id = ? AND kind = 'alert' ORDER BY id DESC LIMIT 100`, c.tenant)
 		if err != nil {
 			return nil, err
 		}
-		custom, err := db.Select[probe.Custom](`SELECT * FROM custom_metrics ORDER BY name COLLATE NOCASE`)
+		custom, err := db.Select[probe.Custom](`SELECT * FROM custom_metrics WHERE tenant_id = ? ORDER BY lower(name)`, c.tenant)
 		return J{"metrics": alerts.Metrics, "rules": list, "firing": firing, "history": history, "custom": custom}, err
 	})
 
@@ -1822,28 +1721,28 @@ func (s *Server) alertRoutes() {
 		return "for all servers"
 	}
 	s.route("POST /api/custom-metrics", func(c *ctx) (any, error) {
-		v, err := alerts.ValidateCustom(c.body)
+		v, err := alerts.ValidateCustom(c.tenant, c.body)
 		if err != nil {
 			return nil, err
 		}
-		v.ID, v.CreatedAt = db.NewID(), db.Now()
-		if err := exec(`INSERT INTO custom_metrics (id, name, unit, command, server_id, tag, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			v.ID, v.Name, v.Unit, v.Command, v.ServerID, v.Tag, v.CreatedAt); err != nil {
+		v.ID, v.CreatedAt, v.TenantID = db.NewID(), db.Now(), c.tenant
+		if err := exec(`INSERT INTO custom_metrics (id, tenant_id, name, unit, command, server_id, tag, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			v.ID, c.tenant, v.Name, v.Unit, v.Command, v.ServerID, v.Tag, v.CreatedAt); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf("Added custom metric %q %s, runs as root: %s", v.Name, scopeText(v), v.Command), db.Str(v.ServerID))
 		return v, nil
 	})
 	s.route("PUT /api/custom-metrics/{id}", func(c *ctx) (any, error) {
-		old, err := db.Get[probe.Custom](`SELECT * FROM custom_metrics WHERE id = ?`, c.param("id"))
+		old, err := db.Get[probe.Custom](`SELECT * FROM custom_metrics WHERE id = ? AND tenant_id = ?`, c.param("id"), c.tenant)
 		if old == nil || err != nil {
 			return nil, cmpErr(err, notFound("Custom metric"))
 		}
-		v, err := alerts.ValidateCustom(merge(toObj(old), c.body))
+		v, err := alerts.ValidateCustom(c.tenant, merge(toObj(old), c.body))
 		if err != nil {
 			return nil, err
 		}
-		v.ID, v.CreatedAt = old.ID, old.CreatedAt
+		v.ID, v.CreatedAt, v.TenantID = old.ID, old.CreatedAt, c.tenant
 		if err := exec(`UPDATE custom_metrics SET name = ?, unit = ?, command = ?, server_id = ?, tag = ? WHERE id = ?`,
 			v.Name, v.Unit, v.Command, v.ServerID, v.Tag, v.ID); err != nil {
 			return nil, err
@@ -1856,11 +1755,11 @@ func (s *Server) alertRoutes() {
 		return v, nil
 	})
 	s.route("DELETE /api/custom-metrics/{id}", func(c *ctx) (any, error) {
-		old, err := db.Get[probe.Custom](`SELECT * FROM custom_metrics WHERE id = ?`, c.param("id"))
+		old, err := db.Get[probe.Custom](`SELECT * FROM custom_metrics WHERE id = ? AND tenant_id = ?`, c.param("id"), c.tenant)
 		if old == nil || err != nil {
 			return nil, cmpErr(err, notFound("Custom metric"))
 		}
-		if err := db.Tx(func(tx *sqlx.Tx) error { // its alert rules go with it (ON DELETE CASCADE)
+		if err := db.Tx(func(tx db.Txn) error { // its alert rules go with it (ON DELETE CASCADE)
 			for _, q := range []string{`DELETE FROM custom_values WHERE metric_id = ?`, `DELETE FROM custom_metrics WHERE id = ?`} {
 				if _, err := tx.Exec(q, old.ID); err != nil {
 					return err
@@ -1874,26 +1773,26 @@ func (s *Server) alertRoutes() {
 		return okResp, nil
 	})
 	s.route("POST /api/alerts/rules", func(c *ctx) (any, error) {
-		v, err := alerts.ValidateRule(c.body)
+		v, err := alerts.ValidateRule(c.tenant, c.body)
 		if err != nil {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO alert_rules (id, server_id, tag, metric, threshold, minutes, enabled, created_at, mount, custom_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, db.Now(), v.Mount, v.CustomID); err != nil {
+		if err := exec(`INSERT INTO alert_rules (id, tenant_id, server_id, tag, metric, threshold, minutes, enabled, created_at, mount, custom_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, c.tenant, v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, db.Now(), v.Mount, v.CustomID); err != nil {
 			return nil, err
 		}
 		c.audit("Created alert rule "+v.Metric, "")
-		return ruleView(id)
+		return ruleView(c.tenant, id)
 	})
 	s.route("PUT /api/alerts/rules/{id}", func(c *ctx) (any, error) {
-		old, err := db.Get[alerts.Rule](`SELECT * FROM alert_rules WHERE id = ?`, c.param("id"))
+		old, err := db.Get[alerts.Rule](`SELECT * FROM alert_rules WHERE id = ? AND tenant_id = ?`, c.param("id"), c.tenant)
 		if old == nil || err != nil {
 			return nil, cmpErr(err, notFound("Rule"))
 		}
 		base := toObj(old)
 		base["enabled"] = old.Enabled != 0
-		v, err := alerts.ValidateRule(merge(base, c.body))
+		v, err := alerts.ValidateRule(c.tenant, merge(base, c.body))
 		if err != nil {
 			return nil, err
 		}
@@ -1905,10 +1804,10 @@ func (s *Server) alertRoutes() {
 			return nil, err
 		}
 		c.audit("Updated alert rule "+v.Metric, "")
-		return ruleView(old.ID)
+		return ruleView(c.tenant, old.ID)
 	})
 	s.route("DELETE /api/alerts/rules/{id}", func(c *ctx) (any, error) {
-		if err := exec(`DELETE FROM alert_rules WHERE id = ?`, c.param("id")); err != nil {
+		if err := exec(`DELETE FROM alert_rules WHERE id = ? AND tenant_id = ?`, c.param("id"), c.tenant); err != nil {
 			return nil, err
 		}
 		c.audit("Deleted alert rule", "")
@@ -1920,17 +1819,17 @@ func (s *Server) alertRoutes() {
 		if err := exec(`DELETE FROM mute_windows WHERE kind = 'once' AND end_at < ?`, db.Now()); err != nil { // finished maintenance windows
 			return nil, err
 		}
-		list, err := mutes(`ORDER BY w.kind, w.start_at`)
+		list, err := mutes(c.tenant, `ORDER BY w.kind, w.start_at`)
 		return J{"windows": list, "tz": localTZ()}, err
 	})
 	s.route("POST /api/mutes", func(c *ctx) (any, error) {
-		v, err := alerts.ValidateMute(c.body)
+		v, err := alerts.ValidateMute(c.tenant, c.body)
 		if err != nil {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO mute_windows (id, name, server_id, tag, kind, start_at, end_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, v.Name, v.ServerID, v.Tag, v.Kind, v.StartAt, v.EndAt, db.Now()); err != nil {
+		if err := exec(`INSERT INTO mute_windows (id, tenant_id, name, server_id, tag, kind, start_at, end_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, c.tenant, v.Name, v.ServerID, v.Tag, v.Kind, v.StartAt, v.EndAt, db.Now()); err != nil {
 			return nil, err
 		}
 		name := ""
@@ -1938,14 +1837,14 @@ func (s *Server) alertRoutes() {
 			name = fmt.Sprintf(` "%s"`, v.Name)
 		}
 		c.audit(fmt.Sprintf("Added quiet hours%s (%s)", name, v.Kind), db.Str(v.ServerID))
-		list, err := mutes(`WHERE w.id = ?`, id)
+		list, err := mutes(c.tenant, `AND w.id = ?`, id)
 		if len(list) == 0 || err != nil {
 			return nil, cmpErr(err, notFound("Quiet hours"))
 		}
 		return list[0], nil
 	})
 	s.route("DELETE /api/mutes/{id}", func(c *ctx) (any, error) {
-		if err := exec(`DELETE FROM mute_windows WHERE id = ?`, c.param("id")); err != nil {
+		if err := exec(`DELETE FROM mute_windows WHERE id = ? AND tenant_id = ?`, c.param("id"), c.tenant); err != nil {
 			return nil, err
 		}
 		c.audit("Removed quiet hours", "")
@@ -1953,22 +1852,22 @@ func (s *Server) alertRoutes() {
 	})
 
 	// ---- notifiers ----
-	getNotifier := func(id string) (*alerts.Notifier, error) {
-		n, err := db.Get[alerts.Notifier](`SELECT * FROM notifiers WHERE id = ?`, id)
+	getNotifier := func(c *ctx, id string) (*alerts.Notifier, error) {
+		n, err := db.Get[alerts.Notifier](`SELECT * FROM notifiers WHERE id = ? AND tenant_id = ?`, id, c.tenant)
 		if n == nil && err == nil {
 			err = notFound("Notifier")
 		}
 		return n, err
 	}
-	notifierView := func(id string) (any, error) {
-		n, err := getNotifier(id)
+	notifierView := func(c *ctx, id string) (any, error) {
+		n, err := getNotifier(c, id)
 		if err != nil {
 			return nil, err
 		}
 		return alerts.NotifierView(n)
 	}
 	s.route("GET /api/notifiers", func(c *ctx) (any, error) {
-		list, err := db.Select[alerts.Notifier](`SELECT * FROM notifiers ORDER BY name COLLATE NOCASE`)
+		list, err := db.Select[alerts.Notifier](`SELECT * FROM notifiers WHERE tenant_id = ? ORDER BY lower(name)`, c.tenant)
 		if err != nil {
 			return nil, err
 		}
@@ -1978,7 +1877,7 @@ func (s *Server) alertRoutes() {
 				return nil, err
 			}
 		}
-		return J{"types": alerts.Types, "notifiers": views, "notify_jobs": db.Setting("notify_jobs", "scheduled")}, nil
+		return J{"types": alerts.Types, "notifiers": views, "notify_jobs": db.TenantSetting(c.tenant, "notify_jobs", "scheduled")}, nil
 	})
 	s.route("POST /api/notifiers", func(c *ctx) (any, error) {
 		v, err := alerts.ValidateNotifier(c.body, nil)
@@ -1986,15 +1885,15 @@ func (s *Server) alertRoutes() {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO notifiers (id, name, type, config_enc, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			id, v.Name, v.Type, alerts.EncryptConfig(v.Config), v.Enabled, db.Now()); err != nil {
+		if err := exec(`INSERT INTO notifiers (id, tenant_id, name, type, config_enc, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			id, c.tenant, v.Name, v.Type, alerts.EncryptConfig(v.Config), v.Enabled, db.Now()); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Added notification channel "%s" (%s)`, v.Name, v.Type), "")
-		return notifierView(id)
+		return notifierView(c, id)
 	})
 	s.route("PUT /api/notifiers/{id}", func(c *ctx) (any, error) {
-		old, err := getNotifier(c.param("id"))
+		old, err := getNotifier(c, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
@@ -2007,17 +1906,17 @@ func (s *Server) alertRoutes() {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Updated notification channel "%s"`, v.Name), "")
-		return notifierView(old.ID)
+		return notifierView(c, old.ID)
 	})
 	s.route("DELETE /api/notifiers/{id}", func(c *ctx) (any, error) {
-		if err := exec(`DELETE FROM notifiers WHERE id = ?`, c.param("id")); err != nil {
+		if err := exec(`DELETE FROM notifiers WHERE id = ? AND tenant_id = ?`, c.param("id"), c.tenant); err != nil {
 			return nil, err
 		}
 		c.audit("Deleted notification channel", "")
 		return okResp, nil
 	})
 	s.route("POST /api/notifiers/{id}/test", func(c *ctx) (any, error) {
-		n, err := getNotifier(c.param("id"))
+		n, err := getNotifier(c, c.param("id"))
 		if err != nil {
 			return nil, err
 		}
@@ -2029,8 +1928,8 @@ func (s *Server) alertRoutes() {
 
 	// ---- events & settings ----
 	s.route("GET /api/events", func(c *ctx) (any, error) {
-		var where []string
-		var args []any
+		// Super admins also see instance events: sign-ins, account and instance changes.
+		where, args := []string{"(e.tenant_id = ? OR (? AND e.tenant_id IS NULL))"}, []any{c.tenant, c.super}
 		for _, k := range []string{"kind", "level", "server_id"} {
 			if v := c.query(k); v != "" {
 				where, args = append(where, "e."+k+" = ?"), append(args, v)
@@ -2039,54 +1938,35 @@ func (s *Server) alertRoutes() {
 		if v := c.query("before"); v != "" {
 			var n any // NaN binds as NULL: no rows, like the JS
 			if f := jsNumber(v); !math.IsNaN(f) {
-				n = f
+				n = int64(math.Ceil(f)) // id < 12.5 is id < 13
 			}
 			where, args = append(where, "e.id < ?"), append(args, n)
 		}
 		if v := c.query("q"); v != "" {
-			where, args = append(where, "e.message LIKE ?"), append(args, "%"+v+"%")
+			where, args = append(where, "e.message ILIKE ?"), append(args, "%"+v+"%")
 		}
 		lim := math.Floor(jsNumber(c.query("limit")))
 		if lim == 0 || math.IsNaN(lim) {
 			lim = 100
 		}
-		lim = math.Min(math.Max(lim, 1), 500) // negative LIMIT = unlimited in SQLite
+		lim = math.Min(math.Max(lim, 1), 500)
 		cond := ""
 		if len(where) > 0 {
 			cond = "WHERE " + strings.Join(where, " AND ")
 		}
-		return db.Rows(fmt.Sprintf(`SELECT e.*, s.name AS server_name FROM events e LEFT JOIN servers s ON s.id = e.server_id %s ORDER BY e.id DESC LIMIT %d`, cond, int(lim)), args...)
+		return db.Rows(fmt.Sprintf(`SELECT e.id, e.t, e.kind, e.level, e.server_id, e.actor, e.ip, e.message, s.name AS server_name
+      FROM events e LEFT JOIN servers s ON s.id = e.server_id %s ORDER BY e.id DESC LIMIT %d`, cond, int(lim)), args...)
 	})
 
 	s.route("GET /api/settings", func(c *ctx) (any, error) {
-		out := J{"notify_jobs": db.Setting("notify_jobs", "scheduled"), "secret_from_env": os.Getenv("FLEETDECK_SECRET") != ""}
-		for _, r := range settingRanges {
-			if n := jsNumber(db.Setting(r.key, strconv.Itoa(int(r.value)))); !math.IsNaN(n) && !math.IsInf(n, 0) {
-				out[r.key] = n
-			} else {
-				out[r.key] = nil
-			}
-		}
-		return out, nil
+		return J{"notify_jobs": db.TenantSetting(c.tenant, "notify_jobs", "scheduled")}, nil
 	})
 	s.route("PUT /api/settings", func(c *ctx) (any, error) {
-		for _, r := range settingRanges {
-			if !c.body.has(r.key) {
-				continue
-			}
-			v := math.Floor(c.body.num(r.key) + 0.5) // Math.round
-			if !(v >= r.lo && v <= r.hi) {
-				return nil, httperr.Bad(fmt.Sprintf("%s must be %d-%d", r.key, int(r.lo), int(r.hi)))
-			}
-			if err := db.SetSetting(r.key, int64(v)); err != nil {
-				return nil, err
-			}
-		}
 		if v, ok := c.body["notify_jobs"]; ok {
 			if v != "off" && v != "scheduled" && v != "all" {
 				return nil, httperr.Bad("invalid notify_jobs")
 			}
-			if err := db.SetSetting("notify_jobs", v); err != nil {
+			if err := db.SetTenantSetting(c.tenant, "notify_jobs", v); err != nil {
 				return nil, err
 			}
 		}

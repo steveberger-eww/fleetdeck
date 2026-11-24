@@ -476,6 +476,16 @@ export function Output({ text, name = 'output', short }) {
     <pre class=${`out ${short ? 'short' : ''}`} ref=${ref} tabindex="0" onScroll=${(e) => { const el = e.target; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30; }}>${clean || ' '}</pre></div>`;
 }
 
+// Who is signed in, the current organization and the role there. Loaded once by the shell; switching organizations reloads the page.
+export const meStore = store(null);
+export async function refreshMe() { meStore.set(await api('/api/me')); }
+const LEVEL = { viewer: 1, operator: 2, owner: 3, admin: 4 };
+// can('owner'): the role in this organization is owner or higher. The backend enforces it; this only hides what would fail.
+export const can = (role) => (LEVEL[meStore.get()?.role] || 0) >= LEVEL[role];
+export const isSuper = () => !!meStore.get()?.user?.super_admin;
+export const switchOrg = async (id) => { await api('/api/me/tenant', { method: 'POST', body: { id } }); location.hash = '#/'; location.reload(); };
+export const ROLES =[['admin', 'Admin'], ['owner', 'Owner'], ['operator', 'Operator'], ['viewer', 'Viewer']];
+
 // Servers list and running-job count, shared by the shell, overview and pickers.
 export const serversStore = store(null);
 export const runningStore = store(0);

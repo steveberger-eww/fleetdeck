@@ -87,6 +87,7 @@ var (
 // Repo is a row of the repos table.
 type Repo struct {
 	ID         string  `db:"id"`
+	TenantID   string  `db:"tenant_id" json:"-"`
 	Name       string  `db:"name"`
 	URL        string  `db:"url"`
 	Branch     string  `db:"branch"`
@@ -113,7 +114,7 @@ type RepoInput struct {
 }
 
 // ValidateRepo returns the columns to store (name, url, branch, auth, key_id, username, token_enc).
-func ValidateRepo(b RepoInput, existing *Repo) (*Repo, error) {
+func ValidateRepo(tenant string, b RepoInput, existing *Repo) (*Repo, error) {
 	name := strings.TrimSpace(b.Name)
 	url := strings.TrimSpace(b.URL)
 	branch := strings.TrimSpace(cmp.Or(b.Branch, "main"))
@@ -137,7 +138,7 @@ func ValidateRepo(b RepoInput, existing *Repo) (*Repo, error) {
 		if isHTTPS {
 			return nil, httperr.Bad("SSH key authentication needs an SSH URL (git@host:org/repo.git)")
 		}
-		if ok, err := exists(`SELECT 1 FROM keys WHERE id = ?`, b.KeyID); err != nil {
+		if ok, err := exists(`SELECT 1 FROM keys WHERE id = ? AND tenant_id = ?`, b.KeyID, tenant); err != nil {
 			return nil, err
 		} else if !ok {
 			return nil, httperr.Bad("Pick an SSH key")

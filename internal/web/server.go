@@ -16,7 +16,7 @@ import (
 	"path"
 	"regexp"
 	"runtime/debug"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +50,16 @@ type Server struct {
 	totpMu sync.Mutex // makes checkTOTP's read-compare-write of totp_last atomic
 }
 
+// The roles of an organization, weakest first. Admins see every server; the others only those assigned to them.
+const (
+	roleViewer   = 1 // looks at assigned servers
+	roleOperator = 2 // works on them: jobs, services, terminal
+	roleOwner    = 3 // adds servers, edits and shares the ones they have
+	roleAdmin    = 4 // everything in the organization
+)
+
+var roleLevel = map[string]int{"viewer": roleViewer, "operator": roleOperator, "owner": roleOwner, "admin": roleAdmin}
+
 // New returns the handler. static holds the UI (index.html at its root); trustProxy honours X-Forwarded-*.
 func New(static fs.FS, trustProxy bool) *Server {
 	s := &Server{trustProxy: trustProxy, static: static, mux: http.NewServeMux(), failures: map[string]*failure{}, pendingTOTP: map[string]string{}, oidcPending: map[string]oidcFlow{}}
@@ -69,7 +79,10 @@ func (s *Server) SetupToken() string {
 	return s.setupToken
 }
 
-func needsSetup() bool { return db.Setting("password_hash", "") == "" }
+func needsSetup() bool {
+	n, err := db.Get[bool](`SELECT EXISTS (SELECT 1 FROM users)`)
+	return err == nil && !*n
+}
 
 // ---------- request context ----------
 
@@ -80,7 +93,14 @@ type ctx struct {
 	ip   string
 	sess *session
 	body obj
+
+	user   *user  // signed-in user (nil when not signed in)
+	tenant string // the organization the session works in ("" = none)
+	role   string // the user's role there; super admins are "admin" everywhere
+	super  bool   // super admin, and not signed in with an organization's own single sign-on
 }
+
+func (c *ctx) level() int { return roleLevel[c.role] }
 
 func (c *ctx) param(k string) string { return c.r.PathValue(k) }
 
@@ -93,23 +113,43 @@ func (c *ctx) query(k string) string {
 	return v[len(v)-1]
 }
 
+// actor names the signed-in user in the event log.
+func (c *ctx) actor() string {
+	if c.user == nil {
+		return ""
+	}
+	return c.user.Email
+}
+
 func (c *ctx) audit(message, serverID string) {
-	db.Event("audit", message, db.EventOpts{Actor: "admin", IP: c.ip, ServerID: serverID})
+	db.Event("audit", message, db.EventOpts{Actor: c.actor(), IP: c.ip, ServerID: serverID, TenantID: c.tenant})
 }
 
 type handler func(c *ctx) (any, error)
 
 type flag int
 
+// Without a flag a route needs a signed-in member of an organization; viewers may only read (GET).
 const (
-	open flag = 1 << iota // no session needed
-	raw                   // the body is not read (webhooks post whatever their sender likes)
+	open    flag = 1 << iota // no session needed
+	raw                      // the body is not read (webhooks post whatever their sender likes)
+	account                  // a signed-in user, with or without an organization (their own account)
+	admins                   // the organization's admins
+	supers                   // super admins
 )
+
+// adminOnly are the parts of an organization only its admins see, by path prefix.
+var adminOnly = []string{"/api/variables", "/api/repos", "/api/tools", "/api/schedules", "/api/triggers", "/api/alerts", "/api/custom-metrics",
+	"/api/mutes", "/api/notifiers", "/api/events", "/api/settings", "/api/members", "/api/tenant", "/api/accounts"}
 
 func (s *Server) route(pattern string, h handler, flags ...flag) {
 	var f flag
 	for _, x := range flags {
 		f |= x
+	}
+	_, p, _ := strings.Cut(pattern, " ")
+	if f&(open|account|supers) == 0 && slices.ContainsFunc(adminOnly, func(a string) bool { return strings.HasPrefix(p, a) }) {
+		f |= admins
 	}
 	s.mux.HandleFunc(pattern, func(w0 http.ResponseWriter, r *http.Request) {
 		w := w0.(*resp)
@@ -119,8 +159,13 @@ func (s *Server) route(pattern string, h handler, flags ...flag) {
 			if c.sess, err = getSession(r); err != nil {
 				return nil, err
 			}
-			if f&open == 0 && c.sess == nil {
-				return nil, httperr.New(401, "Not signed in")
+			if c.sess != nil {
+				if err := c.load(); err != nil {
+					return nil, err
+				}
+			}
+			if err := c.allowed(f); err != nil {
+				return nil, err
 			}
 			// Sliding cookie, so "7 idle days" holds; otherwise the browser drops it 7 days after sign-in.
 			if c.sess != nil && db.Now()-c.sess.SeenAt > 3600e3 {
@@ -357,6 +402,9 @@ type session struct {
 	SeenAt    int64   `db:"seen_at"`
 	IP        *string `db:"ip"`
 	UA        *string `db:"ua"`
+	UserID    string  `db:"user_id"`
+	TenantID  *string `db:"tenant_id"`
+	Locked    int     `db:"locked"`
 }
 
 func getSession(r *http.Request) (*session, error) {
@@ -390,11 +438,16 @@ func (s *Server) sessionCookie(r *http.Request, value string, maxAge int64) stri
 	return c
 }
 
-func (c *ctx) createSession() error {
+// createSession signs u in. tenant "" = their last or first organization; locked = signed in with that
+// organization's own single sign-on (the session can't leave it and has no super-admin powers).
+func (c *ctx) createSession(u *user, tenant string, locked bool) error {
 	tok := sec.Token()
 	now := db.Now()
-	if _, err := db.Exec(`INSERT INTO sessions (hash, created_at, seen_at, ip, ua) VALUES (?, ?, ?, ?, ?)`,
-		sec.SHA256(tok), now, now, c.ip, jsSlice(c.r.Header.Get("User-Agent"), 300)); err != nil {
+	if tenant == "" {
+		tenant = defaultTenant(u)
+	}
+	if _, err := db.Exec(`INSERT INTO sessions (hash, created_at, seen_at, ip, ua, user_id, tenant_id, locked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		sec.SHA256(tok), now, now, c.ip, jsSlice(c.r.Header.Get("User-Agent"), 300), u.ID, nullIfEmpty(tenant), b01(locked)); err != nil {
 		return err
 	}
 	c.w.Header().Set("Set-Cookie", c.s.sessionCookie(c.r, tok, sessionMS/1000))
@@ -430,25 +483,30 @@ func (s *Server) recordFailure(ip string) {
 	}
 }
 
-func totpSecret() (string, error) {
-	if e := db.Setting("totp_secret", ""); e != "" {
+func totpSecret(u *user) (string, error) {
+	if e := db.Str(u.TOTPSecret); e != "" {
 		return sec.Decrypt(e)
 	}
 	return "", nil
 }
 
-func (s *Server) checkTOTP(code any) (bool, error) {
+func (s *Server) checkTOTP(u *user, code any) (bool, error) {
 	s.totpMu.Lock()
 	defer s.totpMu.Unlock()
-	secret, err := totpSecret()
+	secret, err := totpSecret(u)
 	if secret == "" || err != nil {
 		return err == nil, err
 	}
 	counter, ok := sec.VerifyTOTP(secret, strings.Join(strings.Fields(orStr(code)), ""), time.Now())
-	if last, err := strconv.ParseInt(db.Setting("totp_last", "-1"), 10, 64); !ok || (err == nil && counter <= last) {
+	last, err := db.Get[int64](`SELECT totp_last FROM users WHERE id = ?`, u.ID)
+	if err != nil || last == nil {
+		return false, err
+	}
+	if !ok || counter <= *last {
 		return false, nil // no replay within the window
 	}
-	return true, db.SetSetting("totp_last", counter)
+	_, err = db.Exec(`UPDATE users SET totp_last = ? WHERE id = ?`, counter, u.ID)
+	return err == nil, err
 }
 
 func orStr(v any) string { // String(v || '')

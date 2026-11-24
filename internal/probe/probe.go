@@ -155,6 +155,7 @@ func parseGPUs(nv, amd []string) []GPU {
 // Custom is a row of custom_metrics: a shell command that prints one number, scoped like alert rules.
 type Custom struct {
 	ID        string  `db:"id" json:"id"`
+	TenantID  string  `db:"tenant_id" json:"-"`
 	Name      string  `db:"name" json:"name"`
 	Unit      string  `db:"unit" json:"unit"`
 	Command   string  `db:"command" json:"command"`
@@ -171,7 +172,7 @@ type CustomValue struct {
 
 // CustomFor lists the custom metrics that apply to a server: its own, its tags' and the fleet-wide ones.
 func CustomFor(s *db.Server) ([]Custom, error) {
-	all, err := db.Select[Custom](`SELECT * FROM custom_metrics WHERE server_id IS NULL OR server_id = ? ORDER BY name COLLATE NOCASE`, s.ID)
+	all, err := db.Select[Custom](`SELECT * FROM custom_metrics WHERE tenant_id = ? AND (server_id IS NULL OR server_id = ?) ORDER BY lower(name)`, s.TenantID, s.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -754,21 +755,21 @@ func collect(s *db.Server) (snap *Snapshot, err error) {
 	if len(snap.Load) > 0 {
 		load1 = &snap.Load[0]
 	}
-	if _, err := db.Exec(`INSERT OR REPLACE INTO metrics (server_id, t, cpu, mem, swap, disk, load1, rx, tx, dr, dw, temp, gpu, gpu_mem)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	if _, err := db.Exec(`INSERT INTO metrics (server_id, t, cpu, mem, swap, disk, load1, rx, tx, dr, dw, temp, gpu, gpu_mem)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
 		s.ID, t, snap.CPU, snap.Mem, snap.Swap, snap.Disk, load1, snap.Rx, snap.Tx, snap.Dr, snap.Dw, snap.Temp, snap.GPU, snap.GPUMem); err != nil {
 		return nil, err
 	}
 	for id, v := range snap.Custom {
 		if v.V != nil {
-			if _, err := db.Exec(`INSERT OR REPLACE INTO custom_values (server_id, metric_id, t, v) VALUES (?, ?, ?, ?)`, s.ID, id, t, v.V); err != nil {
+			if _, err := db.Exec(`INSERT INTO custom_values (server_id, metric_id, t, v) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`, s.ID, id, t, v.V); err != nil {
 				return nil, err
 			}
 		}
 	}
 	for _, c := range snap.Containers {
 		if c.CPU != nil {
-			if _, err := db.Exec(`INSERT OR REPLACE INTO container_metrics (server_id, name, t, cpu, mem) VALUES (?, ?, ?, ?, ?)`,
+			if _, err := db.Exec(`INSERT INTO container_metrics (server_id, name, t, cpu, mem) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
 				s.ID, c.Name, t, c.CPU, c.Mem); err != nil {
 				return nil, err
 			}
@@ -823,7 +824,7 @@ func Series(id, rangeStr string) (*SeriesOf[Point], error) {
 	pts, err := db.Select[Point](`SELECT (t / ?) * ? AS t, AVG(cpu) cpu, AVG(mem) mem, AVG(swap) swap, AVG(disk) disk, AVG(load1) load1,
       AVG(rx) rx, AVG(tx) tx, AVG(dr) dr, AVG(dw) dw, MAX(temp) temp,
       AVG(gpu) gpu, AVG(gpu_mem) gpu_mem
-    FROM metrics WHERE server_id = ? AND t >= ? GROUP BY t / ? ORDER BY 1`, bucket, bucket, id, now-sp, bucket)
+    FROM metrics WHERE server_id = ? AND t >= ? GROUP BY 1 ORDER BY 1`, bucket, bucket, id, now-sp)
 	if err != nil {
 		return nil, err
 	}
@@ -835,7 +836,7 @@ func ContainerSeries(id, name, rangeStr string) (*SeriesOf[ContainerPoint], erro
 	sp, bucket := span(rangeStr)
 	now := db.Now()
 	pts, err := db.Select[ContainerPoint](`SELECT (t / ?) * ? AS t, AVG(cpu) cpu, AVG(mem) mem FROM container_metrics
-    WHERE server_id = ? AND name = ? AND t >= ? GROUP BY t / ? ORDER BY 1`, bucket, bucket, id, name, now-sp, bucket)
+    WHERE server_id = ? AND name = ? AND t >= ? GROUP BY 1 ORDER BY 1`, bucket, bucket, id, name, now-sp)
 	if err != nil {
 		return nil, err
 	}
@@ -852,7 +853,7 @@ func CustomSeries(id, metricID, rangeStr string) (*SeriesOf[CustomPoint], error)
 	sp, bucket := span(rangeStr)
 	now := db.Now()
 	pts, err := db.Select[CustomPoint](`SELECT (t / ?) * ? AS t, AVG(v) v FROM custom_values
-    WHERE server_id = ? AND metric_id = ? AND t >= ? GROUP BY t / ? ORDER BY 1`, bucket, bucket, id, metricID, now-sp, bucket)
+    WHERE server_id = ? AND metric_id = ? AND t >= ? GROUP BY 1 ORDER BY 1`, bucket, bucket, id, metricID, now-sp)
 	if err != nil {
 		return nil, err
 	}
@@ -907,8 +908,8 @@ func Traffic() (map[string]Totals, error) {
 		ServerID string `db:"server_id"`
 		Totals
 	}](`SELECT server_id, COALESCE(SUM(rx * dt), 0) / 1000.0 AS rx, COALESCE(SUM(tx * dt), 0) / 1000.0 AS tx FROM (
-      SELECT server_id, rx, tx, MIN(COALESCE(t - LAG(t) OVER (PARTITION BY server_id ORDER BY t), 60000), 60000) AS dt
-      FROM metrics WHERE t >= ?) GROUP BY server_id`, db.Now()-int64(days*864e5))
+      SELECT server_id, rx, tx, LEAST(COALESCE(t - LAG(t) OVER (PARTITION BY server_id ORDER BY t), 60000), 60000) AS dt
+      FROM metrics WHERE t >= ?) m GROUP BY server_id`, db.Now()-int64(days*864e5))
 	if err != nil {
 		return nil, err
 	}

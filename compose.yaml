@@ -1,0 +1,14 @@
+# Local Postgres for development (OrbStack/Docker): docker compose up -d
+# DATABASE_URL=postgres://fleetdeck:fleetdeck@localhost:5432/fleetdeck?sslmode=disable
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: fleetdeck
+      POSTGRES_PASSWORD: fleetdeck
+      POSTGRES_DB: fleetdeck
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql]
+    restart: unless-stopped
+volumes:
+  pgdata:

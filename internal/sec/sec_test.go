@@ -12,13 +12,14 @@ import (
 
 func TestMain(m *testing.M) {
 	dir, _ := os.MkdirTemp("", "fleetdeck-test-")
-	if err := db.Open(dir); err != nil {
+	if err := db.OpenTest(dir); err != nil {
 		panic(err)
 	}
 	if err := Init(); err != nil {
 		panic(err)
 	}
 	code := m.Run()
+	db.DropTest()
 	os.RemoveAll(dir)
 	os.Exit(code)
 }

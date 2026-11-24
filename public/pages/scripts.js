@@ -1,6 +1,6 @@
 import {
   html, useState, useEffect, api, go, useStore, useLoad, useDirty, serversStore, toast, confirmBox,
-  Btn, Th, useSort, Empty, Field, ParamInput, Modal, Footer, Loading, ErrorNote, Copy, ago, when,
+  Btn, Th, useSort, Empty, Field, ParamInput, Modal, Footer, Loading, ErrorNote, Copy, ago, when, can, isSuper,
 } from '../ui.js';
 import { openRun, TargetPicker, confirmRun, resolveTargets } from './jobs.js';
 
@@ -27,20 +27,25 @@ export function ScriptsPage() {
     toast('Script deleted');
     scripts.reload(true);
   };
+  const copy = async (s) => { const c = await api(`/api/scripts/${s.id}/copy`, { method: 'POST' }); toast(`Copied as "${c.name}"`, 'ok'); scripts.reload(true); setEdit(c); };
+  const admin = can('admin');
+  // Shared-library scripts (built-ins included) are read-only for organizations; super admins edit them.
+  const editable = (s) => admin && (!s.shared || isSuper());
   return html`<div class="page">
     <div class="page-h"><div><h1>Scripts</h1><p class="sub">Shell scripts and Ansible playbooks you can run on any server.</p></div>
-      <div class="right"><${Btn} kind="primary" icon="plus" onClick=${() => setEdit({})}>New script</${Btn}></div></div>
+      ${admin && html`<div class="right"><${Btn} kind="primary" icon="plus" onClick=${() => setEdit({})}>New script</${Btn}></div>`}</div>
     <section class="panel">
       ${scripts.loading ? html`<${Loading} />` : scripts.error ? html`<${ErrorNote} error=${scripts.error} retry=${scripts.reload} />` : html`<div class="table-wrap"><table class="t">
         <thead><tr><${Th} sort=${sort} k="name">Script</${Th}><${Th} sort=${sort} k="params" get=${(s) => s.params.length} desc>Parameters</${Th}><${Th} sort=${sort} k="as_root" get=${(s) => (s.as_root ? 'root' : 'user')}>Runs as</${Th}><th class="act"></th></tr></thead>
         <tbody>${sort.rows.map((s) => html`<tr>
-          <td><div class="row nw"><b>${s.name}</b>${s.builtin && html`<span class="tag">built-in</span>`}${s.kind === 'ansible' && html`<span class="tag">ansible</span>`}</div><div class="small muted">${s.kind === 'ansible' ? html`<span class="mono">${s.playbook}</span> ` : ''}${s.description}</div></td>
+          <td><div class="row nw"><b>${s.name}</b>${s.builtin ? html`<span class="tag">built-in</span>` : s.shared && html`<span class="tag" title="From the shared library of this Fleetdeck">shared</span>`}${s.kind === 'ansible' && html`<span class="tag">ansible</span>`}</div><div class="small muted">${s.kind === 'ansible' ? html`<span class="mono">${s.playbook}</span> ` : ''}${s.description}</div></td>
           <td class="mono small ink2">${[...s.params.map((p) => p.name), ...s.vars].map((n) => (s.kind === 'ansible' ? n : `$${n}`)).join(' ') || '–'}</td>
           <td class="ink2">${s.kind === 'ansible' ? (s.as_root ? 'become root' : 'SSH user') : s.as_root ? 'root' : 'SSH user'}</td>
           <td class="act"><div class="row nw">
-            <${Btn} size="sm" kind="ghost" icon="play" onClick=${() => openRun({ scriptId: s.id })}>Run</${Btn}>
-            <${Btn} size="sm" kind="ghost" icon="edit" title="Edit" onClick=${() => setEdit(s)} />
-            ${!s.builtin && html`<${Btn} size="sm" kind="ghost" icon="trash" title="Delete" onClick=${() => del(s)} />`}
+            ${can('operator') && html`<${Btn} size="sm" kind="ghost" icon="play" onClick=${() => openRun({ scriptId: s.id })}>Run</${Btn}>`}
+            ${admin && s.shared && html`<${Btn} size="sm" kind="ghost" icon="copy" title="Make an editable copy for this organization" onClick=${() => copy(s)}>Copy</${Btn}>`}
+            ${editable(s) && html`<${Btn} size="sm" kind="ghost" icon="edit" title="Edit" onClick=${() => setEdit(s)} />`}
+            ${editable(s) && !s.builtin && html`<${Btn} size="sm" kind="ghost" icon="trash" title="Delete" onClick=${() => del(s)} />`}
           </div></td></tr>`)}</tbody></table></div>`}
     </section>
     ${edit && html`<${ScriptDialog} script=${edit} onClose=${() => setEdit(null)} onSaved=${() => { setEdit(null); scripts.reload(true); }} />`}
@@ -103,6 +108,7 @@ function ScriptDialog({ script, onClose, onSaved }) {
       </div>`)}
       <div><${Btn} size="sm" icon="plus" onClick=${() => setV({ ...v, params: [...v.params, { name: '', label: '', default: '', required: false }] })}>Add parameter</${Btn}></div>
     </div>
+    ${!script.id && isSuper() && html`<label class="check"><input type="checkbox" checked=${!!v.shared} onChange=${set('shared')} />Add to the shared library (all organizations, read-only for them)</label>`}
     <div class="field"><span>Shared variables</span>
       ${shared.data?.length ? html`<div class="row">${shared.data.map((x) => html`<button type="button" class="pill mono" aria-pressed=${v.vars.includes(x.name)} title=${x.description}
         onClick=${() => setV({ ...v, vars: v.vars.includes(x.name) ? v.vars.filter((n) => n !== x.name) : [...v.vars, x.name] })}>${x.name}</button>`)}</div>`

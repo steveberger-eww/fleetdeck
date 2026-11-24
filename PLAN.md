@@ -22,13 +22,13 @@
 | Web terminal | – | – | ✅ | – | ✅ **xterm.js over SSH, resizable** |
 | Auth | ✅ users, OAuth | ✅ users, TOTP | PAM | basic auth | ✅ **login page, scrypt, TOTP 2FA, sessions, setup token** |
 | Audit log | – | ✅ events | journal | console | ✅ **every action with actor + IP** |
-| Multi-user / RBAC | ✅ | ✅ | PAM | – | ❌ skipped: personal dashboard (single owner) |
+| Multi-user / RBAC | ✅ | ✅ | PAM | – | ✅ **added later: organizations (tenants), roles admin/owner/operator/viewer, per-server assignment, invites, per-organization SSO, super admins** |
 | Ansible / Terraform / git repos | – | ✅ | – | – | ✅ **added later: Git repos (HTTPS, SSH key, token), Ansible playbooks with dry run, per-host results, schedules**. Terraform still skipped. |
 | Storage/LVM/network/firewall config, VMs | – | – | ✅ | – | ❌ stays in Cockpit (deep link + one-click install) |
 
 ## 2. Architecture
 
-- **Backend:** Go (originally Node 22; ported to Go as a single static binary). SQLite via a pure-Go driver stores everything (no DB server). Uses **x/crypto/ssh** for SSH: one pooled connection per server; keys stay in memory, so nothing decrypted touches disk; PTYs can be resized; host-key callback for pinning. Uses **coder/websocket** for the terminal websocket.
+- **Backend:** Go (originally Node 22; ported to Go as a single static binary). PostgreSQL (pgx) stores everything; tables carry a tenant_id for multi-tenancy. Uses **x/crypto/ssh** for SSH: one pooled connection per server; keys stay in memory, so nothing decrypted touches disk; PTYs can be resized; host-key callback for pinning. Uses **coder/websocket** for the terminal websocket.
 - **Frontend:** **Preact + htm**, no build step, vendored in `public/` and embedded in the binary. **xterm.js** for the terminal. Hand-written SVG charts. The TOTP QR code is rendered server-side as SVG (**rsc.io/qr**).
 - **Probe:** one script piped over stdin, run with `sudo -n` when available, so it works with any remote login shell.
 - **Files:**

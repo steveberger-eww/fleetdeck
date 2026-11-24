@@ -60,7 +60,7 @@ type Result struct {
 }
 
 // Notify is called when a pinned host key changes. main wires it to alerts.Notify (avoids an import cycle).
-var Notify = func(title, message, level string) {}
+var Notify = func(tenant, title, message, level string) {}
 
 const (
 	idleTimeout      = 5 * time.Minute
@@ -143,9 +143,10 @@ func verifyHost(id string, key ssh.PublicKey) bool {
 	raw := key.Type() + " " + base64.StdEncoding.EncodeToString(key.Marshal())
 	row, err := db.Get[struct {
 		Name       string  `db:"name"`
+		TenantID   string  `db:"tenant_id"`
 		HostKey    *string `db:"host_key"`
 		HostKeyRaw *string `db:"host_key_raw"`
-	}](`SELECT name, host_key, host_key_raw FROM servers WHERE id = ?`, id)
+	}](`SELECT name, tenant_id, host_key, host_key_raw FROM servers WHERE id = ?`, id)
 	if err != nil || row == nil {
 		return false
 	}
@@ -177,7 +178,7 @@ func verifyHost(id string, key ssh.PublicKey) bool {
 		db.Event("security", fmt.Sprintf("Host key CHANGED for %s: pinned %s, offered %s. Connection refused.", row.Name, *row.HostKey, fp),
 			db.EventOpts{Level: "error", ServerID: id})
 		goSafe(func() {
-			Notify(fmt.Sprintf("🔴 %s: host key changed", row.Name),
+			Notify(row.TenantID, fmt.Sprintf("🔴 %s: host key changed", row.Name),
 				fmt.Sprintf("Pinned %s, offered %s. Fleetdeck refuses to connect until you trust the new key in the server settings.", *row.HostKey, fp), "error")
 		})
 	}

@@ -17,13 +17,14 @@ import (
 
 func TestMain(m *testing.M) {
 	dir, _ := os.MkdirTemp("", "fleetdeck-test-")
-	if err := db.Open(dir); err != nil {
+	if err := db.OpenTest(dir); err != nil {
 		panic(err)
 	}
 	if err := sec.Init(); err != nil {
 		panic(err)
 	}
 	code := m.Run()
+	db.DropTest()
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
@@ -81,7 +82,7 @@ func TestTagScopedRules(t *testing.T) {
 	exec(t, `UPDATE servers SET tags = 'prod' WHERE id = 's1'`) // tag removed -> alert dropped
 	Evaluate(srv(t, "s1"), snap, nil)
 	eq(t, firing(), []string{})
-	if _, err := ValidateRule(map[string]any{"metric": "cpu", "tag": "web", "server_id": "s1"}); err == nil {
+	if _, err := ValidateRule("default", map[string]any{"metric": "cpu", "tag": "web", "server_id": "s1"}); err == nil {
 		t.Fatal("server and tag together must be rejected")
 	}
 }
@@ -123,20 +124,20 @@ func TestContainerAndNetworkAlerts(t *testing.T) {
 }
 
 func TestQuietHours(t *testing.T) {
-	night, err := ValidateMute(map[string]any{"kind": "daily", "start": "22:00", "end": "06:30"})
+	night, err := ValidateMute("default", map[string]any{"kind": "daily", "start": "22:00", "end": "06:30"})
 	must(t, err)
 	eq(t, []int64{night.StartAt, night.EndAt}, []int64{1320, 390})
 	at := func(h, m int) time.Time { return time.Date(2026, 1, 1, h, m, 0, 0, time.Local) }
 	eq(t, InWindow(night, at(23, 0)), true)
 	eq(t, InWindow(night, at(6, 29)), true)
 	eq(t, InWindow(night, at(6, 30)), false)
-	day, err := ValidateMute(map[string]any{"kind": "daily", "start": "09:00", "end": "17:00"})
+	day, err := ValidateMute("default", map[string]any{"kind": "daily", "start": "09:00", "end": "17:00"})
 	must(t, err)
 	eq(t, InWindow(day, at(18, 0)), false)
 	now := float64(db.Now())
 	for _, b := range []map[string]any{{"start": "25:00", "end": "01:00"}, {"start": "10:00", "end": "10:00"}, {"kind": "once", "start": 1.0, "end": 2.0},
 		{"kind": "once", "start": now + 1e6, "end": now}} {
-		if _, err := ValidateMute(b); err == nil {
+		if _, err := ValidateMute("default", b); err == nil {
 			t.Fatalf("accepted %v", b)
 		}
 	}
@@ -226,13 +227,13 @@ func TestMountRules(t *testing.T) {
 	must(t, err)
 	eq(t, *n, 0)
 
-	r, err := ValidateRule(map[string]any{"metric": "disk", "threshold": 80.0, "mount": " /data "})
+	r, err := ValidateRule("default", map[string]any{"metric": "disk", "threshold": 80.0, "mount": " /data "})
 	must(t, err)
 	eq(t, *r.Mount, "/data")
-	r, err = ValidateRule(map[string]any{"metric": "cpu", "threshold": 80.0, "mount": "/data"})
+	r, err = ValidateRule("default", map[string]any{"metric": "cpu", "threshold": 80.0, "mount": "/data"})
 	must(t, err)
 	eq(t, r.Mount, (*string)(nil)) // ignored for other metrics
-	if _, err := ValidateRule(map[string]any{"metric": "disk", "threshold": 80.0, "mount": "data"}); err == nil {
+	if _, err := ValidateRule("default", map[string]any{"metric": "disk", "threshold": 80.0, "mount": "data"}); err == nil {
 		t.Fatal("relative mount accepted")
 	}
 }
@@ -251,10 +252,10 @@ func TestGPUAlert(t *testing.T) {
 func TestCustomAlert(t *testing.T) {
 	exec(t, `INSERT INTO servers (id, name, host, tags, created_at) VALUES ('c1', 'nas', 'h', 'backup', 0)`)
 	exec(t, `INSERT INTO custom_metrics (id, name, unit, command, tag, created_at) VALUES ('cb', 'Hours since backup', 'h', 'x', 'backup', 0)`)
-	if _, err := ValidateRule(map[string]any{"metric": "custom", "threshold": 26.0}); err == nil {
+	if _, err := ValidateRule("default", map[string]any{"metric": "custom", "threshold": 26.0}); err == nil {
 		t.Fatal("custom rule without a metric accepted")
 	}
-	r, err := ValidateRule(map[string]any{"metric": "custom", "threshold": 26.0, "custom_id": "cb", "tag": "backup"})
+	r, err := ValidateRule("default", map[string]any{"metric": "custom", "threshold": 26.0, "custom_id": "cb", "tag": "backup"})
 	must(t, err)
 	eq(t, *r.CustomID, "cb")
 	exec(t, `INSERT INTO alert_rules (id, metric, threshold, tag, custom_id, created_at) VALUES ('rc', 'custom', 26, 'backup', 'cb', 0)`)
@@ -274,10 +275,10 @@ func TestCustomAlert(t *testing.T) {
 	must(t, err)
 	eq(t, *n, 0)
 
-	c, err := ValidateCustom(map[string]any{"name": " Backups ", "unit": "files", "command": " ls /var/backups | wc -l ", "tag": "Backup"})
+	c, err := ValidateCustom("default", map[string]any{"name": " Backups ", "unit": "files", "command": " ls /var/backups | wc -l ", "tag": "Backup"})
 	must(t, err)
 	eq(t, []any{c.Name, c.Unit, c.Command, *c.Tag, c.ServerID}, []any{"Backups", "files", "ls /var/backups | wc -l", "backup", (*string)(nil)})
-	if _, err := ValidateCustom(map[string]any{"name": "x"}); err == nil {
+	if _, err := ValidateCustom("default", map[string]any{"name": "x"}); err == nil {
 		t.Fatal("empty command accepted")
 	}
 	eq(t, []string{UnitSuffix("%"), UnitSuffix("°C"), UnitSuffix("GB"), UnitSuffix("")}, []string{"%", "°C", " GB", ""})

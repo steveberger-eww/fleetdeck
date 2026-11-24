@@ -12,6 +12,7 @@ import (
 	"github.com/coder/websocket"
 
 	"fleetdeck/internal/db"
+	"fleetdeck/internal/httperr"
 	"fleetdeck/internal/ssh"
 )
 
@@ -37,13 +38,19 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request) {
 		deny(403)
 		return
 	}
-	if sess, err := getSession(r); sess == nil || err != nil {
+	c := &ctx{s: s, r: r, ip: s.clientIP(r)}
+	var err error
+	if c.sess, err = getSession(r); c.sess == nil || err != nil {
 		deny(401)
 		return
 	}
-	srv, err := db.GetServer(m[1])
-	if srv == nil || err != nil {
-		deny(404)
+	if err := c.load(); err != nil || c.user == nil || c.tenant == "" {
+		deny(401)
+		return
+	}
+	srv, err := c.server(m[1], roleOperator)
+	if err != nil {
+		deny(httperr.Status(err))
 		return
 	}
 	// The Origin check above is ours (proxy-aware), so the library's own is skipped.
@@ -52,7 +59,7 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(1 << 20)
-	db.Event("audit", "Opened terminal on "+srv.Name, db.EventOpts{Actor: "admin", IP: s.clientIP(r), ServerID: srv.ID})
+	db.Event("audit", "Opened terminal on "+srv.Name, db.EventOpts{Actor: c.actor(), IP: c.ip, ServerID: srv.ID})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
