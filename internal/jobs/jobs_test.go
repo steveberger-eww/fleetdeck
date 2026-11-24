@@ -3,6 +3,7 @@ package jobs
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -145,4 +146,35 @@ func TestRunAt(t *testing.T) {
 	if _, err := ValidateSchedule(in, true); err == nil {
 		t.Fatal("current minute must be rejected")
 	}
+}
+
+func eq(t *testing.T, got, want any) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestTypedParams(t *testing.T) {
+	sc := &Script{Params: Params{{Name: "ENV", Label: "Env", Type: "choice", Options: []string{"dev", "prod"}, Default: "dev"},
+		{Name: "DRY", Label: "Dry", Type: "checkbox", Default: "true"}, {Name: "WHO", Label: "Who", Required: true}}}
+	v, err := sc.Resolve(Values{"WHO": "me", "DRY": "false", "OTHER": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, v, Values{"ENV": "dev", "DRY": "false", "WHO": "me"}) // defaults filled, undeclared dropped
+	for _, bad := range []Values{{"WHO": "me", "ENV": "qa"}, {"WHO": "me", "DRY": "1"}, {"WHO": " "}} {
+		if _, err := sc.Resolve(bad); err == nil {
+			t.Fatalf("accepted %v", bad)
+		}
+	}
+
+	if _, err := db.Exec(`INSERT INTO scripts (id, name, body, params, created_at) VALUES ('typed', 't', '', ?, 0)`, sc.Params); err != nil {
+		t.Fatal(err)
+	}
+	vars, err := ansibleVars("typed", map[string]string{"DRY": "true", "ENV": "prod", "REGION": "eu"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, vars, map[string]any{"DRY": true, "ENV": "prod", "REGION": "eu"})
 }

@@ -1,6 +1,6 @@
 import {
   html, useState, useEffect, useMemo, api, go, store, useStore, useLoad, useQuery, serversStore, toast, confirmBox,
-  Btn, Th, useSort, Lamp, JobChip, Empty, Field, Modal, Loading, ErrorNote, Output, ago, dur, when, plural,
+  Btn, Th, useSort, Lamp, JobChip, Empty, Field, ParamInput, Modal, Loading, ErrorNote, Output, ago, dur, when, plural,
 } from '../ui.js';
 
 // ---------- the one guard for destructive runs ----------
@@ -99,8 +99,8 @@ function RunDialog({ targets: initTargets, scriptId: initScript, onClose }) {
       <${Field} label="Script" hint=${script?.description}>
         <select value=${scriptId} onChange=${(e) => setScriptId(e.target.value)}>${(scripts.data || []).map((s) => html`<option value=${s.id}>${s.name}</option>`)}</select>
       </${Field}>
-      ${script?.params.map((p) => html`<${Field} label=${p.label} hint=${script.kind === 'ansible' ? html`Extra variable <span class="mono">{{ ${p.name} }}</span>` : html`Available as <span class="mono">$${p.name}</span>`}>
-        <input class="mono" value=${params[p.name] ?? ''} required=${p.required} onInput=${(e) => setParams({ ...params, [p.name]: e.target.value })} /></${Field}>`)}
+      ${script?.params.map((p) => html`<${ParamInput} p=${p} value=${params[p.name] ?? ''} onChange=${(x) => setParams({ ...params, [p.name]: x })}
+        hint=${script.kind === 'ansible' ? html`Extra variable <span class="mono">{{ ${p.name} }}</span>` : html`Available as <span class="mono">$${p.name}</span>`} />`)}
       ${script?.kind === 'ansible' ? html`<p class="small ink2">Runs <span class="mono">ansible-playbook ${script.playbook}</span> from the latest commit of its repository.</p>
         <label class="check"><input type="checkbox" checked=${check} onChange=${(e) => setCheck(e.target.checked)} />Dry run: show what would change (--check --diff)</label>`
       : script && html`<details><summary class="small ink2">Show script</summary><pre class="out short">${script.body}</pre></details>`}`)

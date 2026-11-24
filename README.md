@@ -22,7 +22,7 @@ Fleetdeck combines the core ideas of three projects in a single binary:
 | Inspired by | In Fleetdeck |
 |---|---|
 | **Beszel** | Per-minute metrics (CPU, memory, swap, disk, disk I/O, network, load, temperature) with 30 days of history. Per-interface traffic, Docker containers with health and history, S.M.A.R.T. disk health. Alert rules for all servers, a tag or one server (disk and inode rules can watch one mount), sent via ntfy, Pushover, Discord, Slack, Telegram, Gotify or a webhook. Quiet hours and maintenance windows. |
-| **Semaphore** | Script library with parameters and encrypted shared variables. Run on servers, tags or everything. Jobs stream live, keep their output and can be cancelled or re-run (all hosts or failed only). Cron schedules, webhook URLs, an encrypted SSH key store, and **Git repositories with Ansible playbooks** (dry runs, per-host results). |
+| **Semaphore** | Script library with parameters (text, checkbox, choice) and encrypted shared variables. Run on servers, tags or everything. Jobs stream live, keep their output and can be cancelled or re-run (all hosts or failed only). Cron schedules, webhook URLs, an encrypted SSH key store, and **Git repositories with Ansible playbooks** (dry runs, per-host results). |
 | **Cockpit** | Per-server pages: package updates, services running replaced code, automatic updates, systemd services and timers, journal, processes, containers, a network tab (open ports checked against the real firewall, incl. Docker ports that bypass ufw, one-click [ufw-docker](https://github.com/chaifeng/ufw-docker)), a web terminal and system info. Every authorized SSH key across the fleet, with one-click removal. |
 
 ## Getting started
