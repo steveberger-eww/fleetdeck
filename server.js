@@ -161,8 +161,9 @@ function checkTotp(code) {
 
 // ---------- routing ----------
 const routes = [];
-const route = (method, pattern, handler, { open = false } = {}) =>
-  routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), handler, open });
+// open: no session needed. raw: the body is not read (webhooks post whatever their sender likes).
+const route = (method, pattern, handler, { open = false, raw = false } = {}) =>
+  routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), handler, open, raw });
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -322,6 +323,7 @@ route('DELETE', '/api/servers/:id', (ctx) => {
   ssh.drop(s.id);
   D.tx(() => {
     D.run('DELETE FROM metrics WHERE server_id = ?', s.id);
+    D.run('DELETE FROM container_metrics WHERE server_id = ?', s.id);
     D.run('DELETE FROM servers WHERE id = ?', s.id);
   });
   probe.errors.delete(s.id);
@@ -369,6 +371,8 @@ route('POST', '/api/servers/:id/services', async (ctx) => {
   return { ok: true, output: out };
 });
 
+route('GET', '/api/servers/:id/timers', (ctx) => admin.timers(getServer(ctx.params.id)));
+route('GET', '/api/servers/:id/restarts', (ctx) => admin.staleServices(getServer(ctx.params.id)));
 route('GET', '/api/servers/:id/logs', (ctx) => admin.logs(getServer(ctx.params.id), ctx.query));
 route('GET', '/api/servers/:id/packages', (ctx) => admin.packages(getServer(ctx.params.id), { refresh: ctx.query.refresh === '1' }));
 route('GET', '/api/servers/:id/processes', (ctx) => admin.processes(getServer(ctx.params.id)));
@@ -379,11 +383,39 @@ route('POST', '/api/servers/:id/processes/kill', async (ctx) => {
   return { ok: true };
 });
 route('GET', '/api/servers/:id/containers', (ctx) => admin.containers(getServer(ctx.params.id)));
+route('GET', '/api/servers/:id/containers/metrics', (ctx) => probe.containerSeries(getServer(ctx.params.id).id, String(ctx.query.name || ''), ctx.query.range));
 route('GET', '/api/servers/:id/containers/logs', (ctx) => admin.containerLogs(getServer(ctx.params.id), String(ctx.query.id), ctx.query.lines).then((text) => ({ text })));
 route('POST', '/api/servers/:id/containers', async (ctx) => {
   const s = getServer(ctx.params.id);
   const out = await admin.containerAction(s, String(ctx.body.id), String(ctx.body.action));
   audit(ctx, `docker ${ctx.body.action} ${String(ctx.body.id).slice(0, 12)} on ${s.name}`, s.id);
+  return { ok: true, output: out };
+});
+
+// ---- authorized_keys across the fleet ----
+const blobOf = (pub) => String(pub || '').trim().split(/\s+/)[1] || '';
+route('GET', '/api/accounts', async () => {
+  const list = D.all('SELECT * FROM servers WHERE paused = 0 ORDER BY name COLLATE NOCASE');
+  const out = [];
+  // ponytail: 8 servers at a time, on demand; cache it if the fleet gets large.
+  for (let i = 0; i < list.length; i += 8) {
+    out.push(...await Promise.all(list.slice(i, i + 8).map((s) => admin.accounts(s)
+      .then((users) => ({ server_id: s.id, server_name: s.name, login_user: s.user, users }), (e) => ({ server_id: s.id, server_name: s.name, error: e.message })))));
+  }
+  const keys = D.all('SELECT id, name, public_key FROM keys').map((k) => ({ id: k.id, name: k.name, fp: ssh.fingerprint(Buffer.from(blobOf(k.public_key), 'base64')) }));
+  // Which key Fleetdeck logs in with per server, so the UI can mark it and not offer to remove it.
+  const own = Object.fromEntries(list.filter((s) => s.key_id).map((s) => [s.id, keys.find((k) => k.id === s.key_id)?.fp]));
+  return { servers: out, keys, own };
+});
+route('POST', '/api/servers/:id/authorized-keys/revoke', async (ctx) => {
+  const s = getServer(ctx.params.id);
+  const user = String(ctx.body.user || '');
+  const blob = String(ctx.body.blob || '');
+  const own = s.key_id && blobOf(D.get('SELECT public_key FROM keys WHERE id = ?', s.key_id)?.public_key);
+  if (own && own === blob && user === s.user) throw bad(`Fleetdeck logs in to ${s.name} with this key. Removing it would lock Fleetdeck out. Assign another key first.`, 409);
+  const out = await admin.revokeKey(s, user, blob);
+  const fp = ssh.fingerprint(Buffer.from(blob, 'base64'));
+  D.event('security', `Removed SSH key ${fp} from ${user}@${s.name}`, { level: 'warn', actor: 'admin', ip: ctx.ip, serverId: s.id });
   return { ok: true, output: out };
 });
 
@@ -434,16 +466,16 @@ route('GET', '/api/scripts', () => D.all('SELECT * FROM scripts ORDER BY builtin
 route('POST', '/api/scripts', (ctx) => {
   const v = jobs.validateScript(ctx.body);
   const id = jobs.newId();
-  D.run('INSERT INTO scripts (id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)',
-    id, v.name, v.description, v.body, v.as_root, JSON.stringify(v.params), now(), v.kind, v.repo_id, v.playbook);
+  D.run('INSERT INTO scripts (id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)',
+    id, v.name, v.description, v.body, v.as_root, JSON.stringify(v.params), now(), v.kind, v.repo_id, v.playbook, JSON.stringify(v.vars));
   audit(ctx, `Created script "${v.name}"`);
   return jobs.scriptRow(D.get('SELECT * FROM scripts WHERE id = ?', id));
 });
 route('PUT', '/api/scripts/:id', (ctx) => {
   if (!D.get('SELECT 1 FROM scripts WHERE id = ?', ctx.params.id)) throw bad('Script not found', 404);
   const v = jobs.validateScript(ctx.body);
-  D.run('UPDATE scripts SET name = ?, description = ?, body = ?, as_root = ?, params = ?, kind = ?, repo_id = ?, playbook = ? WHERE id = ?',
-    v.name, v.description, v.body, v.as_root, JSON.stringify(v.params), v.kind, v.repo_id, v.playbook, ctx.params.id);
+  D.run('UPDATE scripts SET name = ?, description = ?, body = ?, as_root = ?, params = ?, kind = ?, repo_id = ?, playbook = ?, vars = ? WHERE id = ?',
+    v.name, v.description, v.body, v.as_root, JSON.stringify(v.params), v.kind, v.repo_id, v.playbook, JSON.stringify(v.vars), ctx.params.id);
   audit(ctx, `Edited script "${v.name}"`);
   return jobs.scriptRow(D.get('SELECT * FROM scripts WHERE id = ?', ctx.params.id));
 });
@@ -453,6 +485,36 @@ route('DELETE', '/api/scripts/:id', (ctx) => {
   if (s.builtin) throw bad('Built-in scripts can\'t be deleted (the server pages use them). Edit it instead.', 409);
   D.run('DELETE FROM scripts WHERE id = ?', s.id);
   audit(ctx, `Deleted script "${s.name}"`);
+  return { ok: true };
+});
+
+// ---- shared variables ----
+const varUsers = (name) => D.all('SELECT id, name FROM scripts WHERE EXISTS (SELECT 1 FROM json_each(scripts.vars) WHERE value = ?) ORDER BY name', name).map((x) => ({ ...x }));
+// Secret values never leave the server; plain ones are shown so they can be edited.
+const variableView = (v) => ({ id: v.id, name: v.name, secret: !!v.secret, description: v.description, created_at: v.created_at,
+  value: v.secret ? null : sec.decrypt(v.value_enc), used_by: varUsers(v.name) });
+const getVariable = (id) => D.get('SELECT * FROM variables WHERE id = ?', id) || Promise.reject(bad('Variable not found', 404));
+route('GET', '/api/variables', () => D.all('SELECT * FROM variables ORDER BY name').map(variableView));
+route('POST', '/api/variables', (ctx) => {
+  const v = jobs.validateVariable(ctx.body);
+  const id = jobs.newId();
+  D.run('INSERT INTO variables (id, name, value_enc, secret, description, created_at) VALUES (?, ?, ?, ?, ?, ?)', id, v.name, v.value_enc, v.secret, v.description, now());
+  audit(ctx, `Created ${v.secret ? 'secret ' : ''}variable ${v.name}`);
+  return variableView(D.get('SELECT * FROM variables WHERE id = ?', id));
+});
+route('PUT', '/api/variables/:id', async (ctx) => {
+  const old = await getVariable(ctx.params.id);
+  const v = jobs.validateVariable(ctx.body, old);
+  D.run('UPDATE variables SET value_enc = ?, secret = ?, description = ? WHERE id = ?', v.value_enc, v.secret, v.description, old.id);
+  audit(ctx, `Updated variable ${v.name}`);
+  return variableView(D.get('SELECT * FROM variables WHERE id = ?', old.id));
+});
+route('DELETE', '/api/variables/:id', async (ctx) => {
+  const v = await getVariable(ctx.params.id);
+  const used = varUsers(v.name);
+  if (used.length) throw bad(`Used by scripts: ${used.map((u) => u.name).join(', ')}`, 409);
+  D.run('DELETE FROM variables WHERE id = ?', v.id);
+  audit(ctx, `Deleted variable ${v.name}`);
   return { ok: true };
 });
 
@@ -600,6 +662,55 @@ route('POST', '/api/schedules/:id/run', (ctx) => {
 });
 route('POST', '/api/cron/preview', (ctx) => ({ next: jobs.nextRuns(ctx.body.cron, 5) }));
 
+// ---- webhook triggers ----
+// Each trigger has its own secret URL that starts one saved script on fixed targets, nothing else.
+// Only the token's hash is stored; the URL is shown once (and can be rotated).
+const triggerView = (t) => ({ id: t.id, name: t.name, script_id: t.script_id, targets: JSON.parse(t.targets), params: JSON.parse(t.params),
+  enabled: !!t.enabled, last_run: t.last_run, last_job: t.last_job, created_at: t.created_at,
+  script_name: D.get('SELECT name FROM scripts WHERE id = ?', t.script_id)?.name });
+const getTrigger = (id) => D.get('SELECT * FROM triggers WHERE id = ?', id) || Promise.reject(bad('Webhook not found', 404));
+route('GET', '/api/triggers', () => D.all('SELECT * FROM triggers ORDER BY name COLLATE NOCASE').map(triggerView));
+route('POST', '/api/triggers', (ctx) => {
+  const v = jobs.validateSchedule(ctx.body, { cron: false });
+  const id = jobs.newId();
+  const token = sec.token();
+  D.run('INSERT INTO triggers (id, name, script_id, targets, params, token_hash, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    id, v.name, v.script_id, JSON.stringify(v.targets), JSON.stringify(v.params), sec.sha256(token), v.enabled, now());
+  audit(ctx, `Created webhook "${v.name}"`);
+  return { ...triggerView(D.get('SELECT * FROM triggers WHERE id = ?', id)), token };
+});
+route('PUT', '/api/triggers/:id', async (ctx) => {
+  const old = await getTrigger(ctx.params.id);
+  const v = jobs.validateSchedule({ ...triggerView(old), ...ctx.body }, { cron: false });
+  D.run('UPDATE triggers SET name = ?, script_id = ?, targets = ?, params = ?, enabled = ? WHERE id = ?',
+    v.name, v.script_id, JSON.stringify(v.targets), JSON.stringify(v.params), v.enabled, old.id);
+  audit(ctx, `Updated webhook "${v.name}"`);
+  return triggerView(D.get('SELECT * FROM triggers WHERE id = ?', old.id));
+});
+route('POST', '/api/triggers/:id/rotate', async (ctx) => {
+  const t = await getTrigger(ctx.params.id);
+  const token = sec.token();
+  D.run('UPDATE triggers SET token_hash = ? WHERE id = ?', sec.sha256(token), t.id);
+  audit(ctx, `Generated a new URL for webhook "${t.name}"; the old one stopped working`);
+  return { token };
+});
+route('DELETE', '/api/triggers/:id', async (ctx) => {
+  const t = await getTrigger(ctx.params.id);
+  D.run('DELETE FROM triggers WHERE id = ?', t.id);
+  audit(ctx, `Deleted webhook "${t.name}"`);
+  return { ok: true };
+});
+// Called by CI, Git hosts, etc. The URL token is the only credential; the request body is ignored.
+route('POST', '/api/hooks/:token', (ctx) => {
+  const t = D.get('SELECT * FROM triggers WHERE token_hash = ? AND enabled = 1', sec.sha256(ctx.params.token));
+  if (!t) throw bad('Not found', 404);
+  // No pile-ups: a burst of pushes runs once, like schedules.
+  if (t.last_job && jobs.isRunning(t.last_job)) return json(ctx.res, 409, { error: 'Previous run is still going', job: t.last_job });
+  const id = jobs.runTrigger(t);
+  D.event('audit', `Webhook "${t.name}" started job #${id}`, { actor: 'webhook', ip: ctx.ip });
+  return { ok: true, job: id };
+}, { open: true, raw: true });
+
 // ---- alerts & notifiers ----
 route('GET', '/api/alerts', () => ({
   metrics: alerts.METRICS,
@@ -626,6 +737,25 @@ route('PUT', '/api/alerts/rules/:id', (ctx) => {
 route('DELETE', '/api/alerts/rules/:id', (ctx) => {
   D.run('DELETE FROM alert_rules WHERE id = ?', ctx.params.id);
   audit(ctx, 'Deleted alert rule');
+  return { ok: true };
+});
+
+// ---- quiet hours ----
+const muteView = (w) => ({ ...w, active: alerts.inWindow(w), server_name: w.server_id ? D.get('SELECT name FROM servers WHERE id = ?', w.server_id)?.name : null });
+route('GET', '/api/mutes', () => {
+  D.run("DELETE FROM mute_windows WHERE kind = 'once' AND end_at < ?", now()); // finished maintenance windows
+  return { windows: D.all('SELECT * FROM mute_windows ORDER BY kind, start_at').map(muteView), tz: Intl.DateTimeFormat().resolvedOptions().timeZone };
+});
+route('POST', '/api/mutes', (ctx) => {
+  const v = alerts.validateMute(ctx.body);
+  const id = jobs.newId();
+  D.run('INSERT INTO mute_windows (id, name, server_id, tag, kind, start_at, end_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', id, v.name, v.server_id, v.tag, v.kind, v.start_at, v.end_at, now());
+  audit(ctx, `Added quiet hours${v.name ? ` "${v.name}"` : ''} (${v.kind})`, v.server_id);
+  return muteView(D.get('SELECT * FROM mute_windows WHERE id = ?', id));
+});
+route('DELETE', '/api/mutes/:id', (ctx) => {
+  D.run('DELETE FROM mute_windows WHERE id = ?', ctx.params.id);
+  audit(ctx, 'Removed quiet hours');
   return { ok: true };
 });
 
@@ -738,7 +868,8 @@ async function handle(req, res) {
   }
   const mutating = req.method !== 'GET' && req.method !== 'HEAD';
   if (mutating && !sameOrigin(req, false)) return json(res, 403, { error: 'Cross-origin request blocked' });
-  if (mutating && req.headers['content-length'] !== '0' && req.headers['content-length'] !== undefined && !(req.headers['content-type'] || '').startsWith('application/json')) {
+  const hook = url.pathname.startsWith('/api/hooks/');
+  if (mutating && !hook && req.headers['content-length'] !== '0' && req.headers['content-length'] !== undefined && !(req.headers['content-type'] || '').startsWith('application/json')) {
     return json(res, 415, { error: 'JSON only' });
   }
   for (const r of routes) {
@@ -749,7 +880,8 @@ async function handle(req, res) {
     if (!r.open && !ctx.session) return json(res, 401, { error: 'Not signed in' });
     // Sliding cookie, so "7 idle days" holds; otherwise the browser drops it 7 days after sign-in.
     if (ctx.session && now() - ctx.session.seen_at > 3600e3) res.setHeader('Set-Cookie', sessionCookie(req, cookies(req).fd_session, SESSION_MS / 1000));
-    ctx.body = mutating ? await readBody(req) : {};
+    if (r.raw) req.resume(); // drain and ignore
+    ctx.body = mutating && !r.raw ? await readBody(req) : {};
     const out = await r.handler(ctx);
     if (out !== undefined && !res.headersSent) json(res, 200, out);
     return;

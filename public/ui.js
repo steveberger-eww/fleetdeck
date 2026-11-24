@@ -130,6 +130,7 @@ const ICONS = {
   jobs: 'M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01', scripts: 'M8 7l-5 5 5 5M16 7l5 5-5 5',
   clock: 'M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18zM12 7v5l3 2', bell: 'M6 16v-5a6 6 0 1 1 12 0v5l2 2H4zM10 21h4',
   key: 'M8 15a4 4 0 1 1 3.5-6M11.5 9 21 9M17 9v4M20 9v3', audit: 'M6 3h9l4 4v14H6zM9 11h7M9 15h7M9 19h4', gear: 'M4 7h9M17 7h3M4 17h3M11 17h9M15 5v4M9 15v4',
+  vars: 'M8 4H7a2 2 0 0 0-2 2v4l-2 2 2 2v4a2 2 0 0 0 2 2h1M16 4h1a2 2 0 0 1 2 2v4l2 2-2 2v4a2 2 0 0 1-2 2h-1',
   stop: 'M7 7h10v10H7z', git: 'M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9', trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3', edit: 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4',
 };
 export const Icon = ({ name, size = 16 }) => html`<svg width=${size} height=${size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=${ICONS[name]} /></svg>`;
@@ -151,6 +152,35 @@ export function Btn({ onClick, kind = '', size = '', icon, children, title, disa
   const cls = ['btn', kind, size, icon && !children ? 'icon' : '', extra].filter(Boolean).join(' ');
   return html`<button type=${type} class=${cls} onClick=${click} disabled=${disabled || busy} title=${title} aria-label=${!children ? title : undefined} ...${rest}>
     ${busy ? html`<span class="spin" />` : icon && html`<${Icon} name=${icon} size=${size === 'sm' ? 14 : 16} />`}${children}</button>`;
+}
+
+// ---------- sortable tables ----------
+// const sort = useSort(rows, 'cpu', -1); then <${Th} sort=${sort} k="cpu" desc>CPU</${Th}> and render sort.rows.
+// `k` is a field name; pass get=${(row) => value} for computed columns. Nulls always sort last.
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+const blank = (v) => v == null || v === '' || Number.isNaN(v);
+export function compare(a, b) {
+  if (blank(a)) return blank(b) ? 0 : 1;
+  if (blank(b)) return -1;
+  return typeof a === 'number' && typeof b === 'number' ? a - b : collator.compare(String(a), String(b));
+}
+export function useSort(rows, key = null, dir = 1) {
+  const [s, setS] = useState({ key, dir, get: null });
+  const sorted = useMemo(() => {
+    if (!s.key || !rows) return rows || [];
+    const get = s.get || ((r) => r[s.key]);
+    return rows.slice().sort((a, b) => {
+      const va = get(a), vb = get(b);
+      return blank(va) || blank(vb) ? compare(va, vb) : s.dir * compare(va, vb); // blanks last either way
+    });
+  }, [rows, s]);
+  const toggle = (k, get, desc) => setS((o) => ({ key: k, get, dir: o.key === k ? -o.dir : desc ? -1 : 1 }));
+  return { rows: sorted, key: s.key, dir: s.dir, toggle };
+}
+export function Th({ sort, k, get, desc, class: cls = '', children }) {
+  const on = sort.key === k;
+  return html`<th class=${`sortable ${cls}`} aria-sort=${on ? (sort.dir > 0 ? 'ascending' : 'descending') : 'none'}>
+    <button type="button" onClick=${() => sort.toggle(k, get, desc)}>${children}<span class="arrow" aria-hidden="true">${on ? (sort.dir > 0 ? '▲' : '▼') : '↕'}</span></button></th>`;
 }
 
 export const Lamp = ({ status }) => html`<span class=${`lamp ${status}`} aria-hidden="true" />`;

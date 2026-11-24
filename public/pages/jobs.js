@@ -1,6 +1,6 @@
 import {
   html, useState, useEffect, useMemo, api, go, store, useStore, useLoad, serversStore, toast, confirmBox,
-  Btn, Lamp, JobChip, Empty, Field, Modal, Loading, ErrorNote, Output, ago, dur, when,
+  Btn, Th, useSort, Lamp, JobChip, Empty, Field, Modal, Loading, ErrorNote, Output, ago, dur, when,
 } from '../ui.js';
 
 // ---------- target picker (servers, tags, or all) ----------
@@ -94,7 +94,8 @@ function RunDialog({ targets: initTargets, scriptId: initScript, onClose }) {
 export function JobsTable({ serverId, limit = 30 }) {
   const [extra, setExtra] = useState([]);
   const jobs = useLoad(() => api(`/api/jobs?limit=${limit}${serverId ? `&server=${serverId}` : ''}`), [serverId], { poll: 5000 });
-  const rows = [...(jobs.data || []), ...extra.filter((e) => !(jobs.data || []).some((j) => j.id === e.id))];
+  const rows = useMemo(() => [...(jobs.data || []), ...extra.filter((e) => !(jobs.data || []).some((j) => j.id === e.id))], [jobs.data, extra]);
+  const sort = useSort(rows);
   const more = async () => {
     const last = rows[rows.length - 1];
     setExtra([...extra, ...await api(`/api/jobs?limit=${limit}&before=${last.id}${serverId ? `&server=${serverId}` : ''}`)]);
@@ -103,8 +104,8 @@ export function JobsTable({ serverId, limit = 30 }) {
   if (jobs.error) return html`<${ErrorNote} error=${jobs.error} retry=${jobs.reload} />`;
   if (!rows.length) return html`<${Empty} title="No jobs yet" action=${html`<${Btn} icon="play" onClick=${() => openRun(serverId ? { targets: { servers: [serverId] } } : {})}>Run a script</${Btn}>`}>Every script you run is kept here with its full output.</${Empty}>`;
   return html`<div class="table-wrap"><table class="t">
-    <thead><tr><th>Job</th><th>Status</th><th>Servers</th><th>Started by</th><th>Started</th><th class="num">Took</th></tr></thead>
-    <tbody>${rows.map((j) => {
+    <thead><tr><${Th} sort=${sort} k="name">Job</${Th}><${Th} sort=${sort} k="status">Status</${Th}><${Th} sort=${sort} k="servers" get=${(j) => j.runs.length} desc>Servers</${Th}><${Th} sort=${sort} k="actor">Started by</${Th}><${Th} sort=${sort} k="created_at" desc>Started</${Th}><${Th} sort=${sort} k="took" get=${(j) => j.finished_at && j.finished_at - j.created_at} class="num" desc>Took</${Th}></tr></thead>
+    <tbody>${sort.rows.map((j) => {
       j = { ...j, runs: j.runs.filter((r) => r.server_id !== '__ansible__') };
       const failed = j.runs.filter((r) => ['failed', 'interrupted'].includes(r.status)).length;
       return html`<tr class="click" onClick=${() => go(`/jobs/${j.id}`)}>

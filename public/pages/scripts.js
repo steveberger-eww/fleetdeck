@@ -1,12 +1,13 @@
 import {
   html, useState, useEffect, api, go, useStore, useLoad, serversStore, toast, confirmBox,
-  Btn, Empty, Field, Modal, Loading, ErrorNote, ago, when,
+  Btn, Th, useSort, Empty, Field, Modal, Loading, ErrorNote, Copy, ago, when,
 } from '../ui.js';
 import { openRun, TargetPicker } from './jobs.js';
 
 // ---------- scripts ----------
 export function ScriptsPage() {
   const scripts = useLoad(() => api('/api/scripts'));
+  const sort = useSort(scripts.data);
   const [edit, setEdit] = useState(null);
   const del = async (s) => {
     if (!await confirmBox({ title: `Delete "${s.name}"?`, body: 'Schedules that use it are deleted too. Past jobs keep their output.', confirm: 'Delete script', danger: true })) return;
@@ -19,10 +20,10 @@ export function ScriptsPage() {
       <div class="right"><${Btn} kind="primary" icon="plus" onClick=${() => setEdit({})}>New script</${Btn}></div></div>
     <section class="panel">
       ${scripts.loading ? html`<${Loading} />` : scripts.error ? html`<${ErrorNote} error=${scripts.error} retry=${scripts.reload} />` : html`<div class="table-wrap"><table class="t">
-        <thead><tr><th>Script</th><th>Parameters</th><th>Runs as</th><th class="act"></th></tr></thead>
-        <tbody>${scripts.data.map((s) => html`<tr>
+        <thead><tr><${Th} sort=${sort} k="name">Script</${Th}><${Th} sort=${sort} k="params" get=${(s) => s.params.length} desc>Parameters</${Th}><${Th} sort=${sort} k="as_root" get=${(s) => (s.as_root ? 'root' : 'user')}>Runs as</${Th}><th class="act"></th></tr></thead>
+        <tbody>${sort.rows.map((s) => html`<tr>
           <td><div class="row nw"><b>${s.name}</b>${s.builtin && html`<span class="tag">built-in</span>`}${s.kind === 'ansible' && html`<span class="tag">ansible</span>`}</div><div class="small muted">${s.kind === 'ansible' ? html`<span class="mono">${s.playbook}</span> ` : ''}${s.description}</div></td>
-          <td class="mono small ink2">${s.params.map((p) => (s.kind === 'ansible' ? p.name : `$${p.name}`)).join(' ') || '–'}</td>
+          <td class="mono small ink2">${[...s.params.map((p) => p.name), ...s.vars].map((n) => (s.kind === 'ansible' ? n : `$${n}`)).join(' ') || '–'}</td>
           <td class="ink2">${s.kind === 'ansible' ? (s.as_root ? 'become root' : 'SSH user') : s.as_root ? 'root' : 'SSH user'}</td>
           <td class="act"><div class="row nw">
             <${Btn} size="sm" icon="play" onClick=${() => openRun({ scriptId: s.id })}>Run</${Btn}>
@@ -35,8 +36,9 @@ export function ScriptsPage() {
 }
 
 function ScriptDialog({ script, onClose, onSaved }) {
-  const [v, setV] = useState({ name: '', description: '', body: '#!/bin/sh\nset -e\n\n', as_root: true, params: [], kind: 'shell', repo_id: '', playbook: '', ...script });
+  const [v, setV] = useState({ name: '', description: '', body: '#!/bin/sh\nset -e\n\n', as_root: true, params: [], vars: [], kind: 'shell', repo_id: '', playbook: '', ...script });
   const repos = useLoad(() => api('/api/repos'));
+  const shared = useLoad(() => api('/api/variables'));
   const files = useLoad(() => (v.kind === 'ansible' && v.repo_id ? api(`/api/repos/${v.repo_id}/files`) : Promise.resolve([])), [v.kind, v.repo_id]);
   const ansible = v.kind === 'ansible';
   const [err, setErr] = useState('');
@@ -82,6 +84,12 @@ function ScriptDialog({ script, onClose, onSaved }) {
       </div>`)}
       <div><${Btn} size="sm" icon="plus" onClick=${() => setV({ ...v, params: [...v.params, { name: '', label: '', default: '', required: false }] })}>Add parameter</${Btn}></div>
     </div>
+    <div class="field"><span>Shared variables</span>
+      ${shared.data?.length ? html`<div class="row">${shared.data.map((x) => html`<button type="button" class="tag mono" aria-pressed=${v.vars.includes(x.name)} title=${x.description}
+        onClick=${() => setV({ ...v, vars: v.vars.includes(x.name) ? v.vars.filter((n) => n !== x.name) : [...v.vars, x.name] })}>${x.name}</button>`)}</div>`
+        : html`<span class="small muted">None yet. Add tokens and passwords under <a href="#/variables" onClick=${onClose}>Variables</a>.</span>`}
+      <span class="hint">Ticked variables are passed ${ansible ? 'as extra vars' : 'as environment variables'}. Secret values are masked in the output.</span>
+    </div>
     ${err && html`<p class="err">${err}</p>`}
   </${Modal}>`;
 }
@@ -96,6 +104,7 @@ function targetText(t, servers) {
 export function SchedulesPage() {
   const list = useLoad(() => api('/api/schedules'), [], { poll: 30_000 });
   const servers = useStore(serversStore) || [];
+  const sort = useSort(list.data);
   const [edit, setEdit] = useState(null);
   const toggle = async (s) => { await api(`/api/schedules/${s.id}`, { method: 'PUT', body: { enabled: !s.enabled } }); list.reload(true); };
   const runNow = async (s) => { const { id } = await api(`/api/schedules/${s.id}/run`, { method: 'POST' }); go(`/jobs/${id}`); };
@@ -111,8 +120,8 @@ export function SchedulesPage() {
       ${list.loading ? html`<${Loading} />` : !list.data?.length
         ? html`<${Empty} title="No schedules yet" action=${html`<${Btn} icon="plus" onClick=${() => setEdit({ name: 'Nightly updates', script_id: 'update', cron: '0 4 * * *', targets: { all: true } })}>Schedule nightly updates</${Btn}>`}>For example: install updates every night at 04:00 on all servers.</${Empty}>`
         : html`<div class="table-wrap"><table class="t">
-        <thead><tr><th>On</th><th>Schedule</th><th>When</th><th>Targets</th><th>Next run</th><th>Last run</th><th class="act"></th></tr></thead>
-        <tbody>${list.data.map((s) => html`<tr>
+        <thead><tr><${Th} sort=${sort} k="enabled" desc>On</${Th}><${Th} sort=${sort} k="name">Schedule</${Th}><${Th} sort=${sort} k="cron">When</${Th}><${Th} sort=${sort} k="targets" get=${(s) => targetText(s.targets, servers)}>Targets</${Th}><${Th} sort=${sort} k="next" get=${(s) => (s.enabled ? s.next : null)}>Next run</${Th}><${Th} sort=${sort} k="last_run" desc>Last run</${Th}><th class="act"></th></tr></thead>
+        <tbody>${sort.rows.map((s) => html`<tr>
           <td><input type="checkbox" checked=${s.enabled} onChange=${() => toggle(s)} aria-label=${`Enable ${s.name}`} /></td>
           <td><b>${s.name}</b><div class="small muted">${s.script_name}</div></td>
           <td class="mono">${s.cron}</td>
@@ -125,19 +134,63 @@ export function SchedulesPage() {
             <${Btn} size="sm" kind="ghost" icon="trash" title="Delete" onClick=${() => del(s)} />
           </div></td></tr>`)}</tbody></table></div>`}
     </section>
+    <${WebhooksPanel} servers=${servers} />
     ${edit && html`<${ScheduleDialog} schedule=${edit} onClose=${() => setEdit(null)} onSaved=${() => { setEdit(null); list.reload(true); }} />`}
   </div>`;
 }
 
+// ---------- webhooks ----------
+const hookUrl = (token) => `${location.origin}/api/hooks/${token}`;
+
+function WebhooksPanel({ servers }) {
+  const list = useLoad(() => api('/api/triggers'), [], { poll: 30_000 });
+  const [edit, setEdit] = useState(null);
+  const [shown, setShown] = useState(null); // { name, token } right after create/rotate
+  const toggle = async (t) => { await api(`/api/triggers/${t.id}`, { method: 'PUT', body: { enabled: !t.enabled } }); list.reload(true); };
+  const rotate = async (t) => {
+    if (!await confirmBox({ title: `New URL for "${t.name}"?`, body: 'The current URL stops working immediately. Update it wherever it is used.', confirm: 'Generate new URL', danger: true })) return;
+    setShown({ name: t.name, token: (await api(`/api/triggers/${t.id}/rotate`, { method: 'POST' })).token });
+  };
+  const del = async (t) => {
+    if (!await confirmBox({ title: `Delete webhook "${t.name}"?`, body: 'Its URL stops working.', confirm: 'Delete webhook', danger: true })) return;
+    await api(`/api/triggers/${t.id}`, { method: 'DELETE' });
+    list.reload(true);
+  };
+  return html`<section class="panel">
+    <div class="panel-h"><h2>Webhooks</h2><span class="small muted">Start a script from CI, a Git push or anything that can send a POST request.</span>
+      <${Btn} size="sm" icon="plus" class="right" onClick=${() => setEdit({ name: '', script_id: 'update', targets: { servers: [], tags: [] } })}>New webhook</${Btn}></div>
+    ${list.loading ? html`<${Loading} />` : !list.data?.length ? html`<${Empty} title="No webhooks">Each webhook gets a secret URL that runs one script on fixed servers. It can't do anything else.</${Empty}>`
+      : html`<div class="table-wrap"><table class="t"><thead><tr><th>On</th><th>Webhook</th><th>Targets</th><th>Last run</th><th class="act"></th></tr></thead>
+      <tbody>${list.data.map((t) => html`<tr>
+        <td><input type="checkbox" checked=${t.enabled} onChange=${() => toggle(t)} aria-label=${`Enable ${t.name}`} /></td>
+        <td><b>${t.name}</b><div class="small muted">${t.script_name}</div></td>
+        <td class="ink2 trunc" style=${{ maxWidth: '220px' }}>${targetText(t.targets, servers)}</td>
+        <td class="nowrap">${t.last_job ? html`<a href=${`#/jobs/${t.last_job}`}>${ago(t.last_run)}</a>` : html`<span class="muted">never</span>`}</td>
+        <td class="act"><div class="row nw">
+          <${Btn} size="sm" onClick=${() => rotate(t)}>New URL</${Btn}>
+          <${Btn} size="sm" kind="ghost" icon="edit" title="Edit" onClick=${() => setEdit(t)} />
+          <${Btn} size="sm" kind="ghost" icon="trash" title="Delete" onClick=${() => del(t)} />
+        </div></td></tr>`)}</tbody></table></div>`}
+    ${edit && html`<${ScheduleDialog} webhook schedule=${edit} onClose=${() => setEdit(null)}
+      onSaved=${(r) => { setEdit(null); list.reload(true); if (r?.token) setShown({ name: r.name, token: r.token }); }} />`}
+    ${shown && html`<${Modal} title=${`URL for "${shown.name}"`} onClose=${() => setShown(null)} footer=${html`<button class="btn primary" onClick=${() => setShown(null)}>Done</button>`}>
+      <p class="ink2">Copy it now: it is shown only once. Anyone with this URL can start the job, so keep it secret like a password.</p>
+      <${Copy} text=${hookUrl(shown.token)} label="Copy URL" />
+      <p class="small ink2">Example: <span class="mono">curl -X POST ${hookUrl('…')}</span>. The request body is ignored. A call while the previous run is still going gets HTTP 409 and starts nothing.</p>
+    </${Modal}>`}
+  </section>`;
+}
+
 const PRESETS = [['Every hour', '0 * * * *'], ['Daily at 04:00', '0 4 * * *'], ['Sundays at 03:00', '0 3 * * 0'], ['Weekdays at 09:00', '0 9 * * 1-5'], ['1st of the month', '0 5 1 * *']];
 
-function ScheduleDialog({ schedule, onClose, onSaved }) {
+function ScheduleDialog({ schedule, onClose, onSaved, webhook }) {
   const scripts = useLoad(() => api('/api/scripts'));
   const [v, setV] = useState({ name: '', script_id: 'update', cron: '0 4 * * *', targets: { all: true }, params: {}, enabled: true, ...schedule });
   const [preview, setPreview] = useState({ next: [], error: '' });
   const [err, setErr] = useState('');
   const script = scripts.data?.find((s) => s.id === v.script_id);
   useEffect(() => {
+    if (webhook) return;
     const t = setTimeout(() => api('/api/cron/preview', { method: 'POST', body: { cron: v.cron } })
       .then((r) => setPreview({ next: r.next, error: '' }), (e) => setPreview({ next: [], error: e.message })), 250);
     return () => clearTimeout(t);
@@ -145,23 +198,24 @@ function ScheduleDialog({ schedule, onClose, onSaved }) {
   const save = async () => {
     setErr('');
     try {
-      await api(schedule.id ? `/api/schedules/${schedule.id}` : '/api/schedules', { method: schedule.id ? 'PUT' : 'POST', body: v });
-      toast('Schedule saved', 'ok');
-      onSaved();
+      const base = webhook ? '/api/triggers' : '/api/schedules';
+      const r = await api(schedule.id ? `${base}/${schedule.id}` : base, { method: schedule.id ? 'PUT' : 'POST', body: v });
+      toast(webhook ? 'Webhook saved' : 'Schedule saved', 'ok');
+      onSaved(r);
     } catch (e) { setErr(e.message); }
   };
-  return html`<${Modal} wide title=${schedule.id ? `Edit ${schedule.name}` : 'New schedule'} onClose=${onClose}
-    footer=${html`<button class="btn" onClick=${onClose}>Cancel</button><${Btn} kind="primary" onClick=${save}>Save schedule</${Btn}>`}>
+  return html`<${Modal} wide title=${schedule.id ? `Edit ${schedule.name}` : webhook ? 'New webhook' : 'New schedule'} onClose=${onClose}
+    footer=${html`<button class="btn" onClick=${onClose}>Cancel</button><${Btn} kind="primary" onClick=${save}>${webhook ? 'Save webhook' : 'Save schedule'}</${Btn}>`}>
     <div class="cols">
       <${Field} label="Name"><input value=${v.name} onInput=${(e) => setV({ ...v, name: e.target.value })} autofocus /></${Field}>
       <${Field} label="Script">${scripts.loading ? html`<${Loading} />` : html`<select value=${v.script_id} onChange=${(e) => setV({ ...v, script_id: e.target.value, params: {} })}>${scripts.data.map((s) => html`<option value=${s.id}>${s.name}</option>`)}</select>`}</${Field}>
     </div>
     ${script?.params.map((p) => html`<${Field} label=${p.label}><input class="mono" value=${v.params[p.name] ?? p.default} onInput=${(e) => setV({ ...v, params: { ...v.params, [p.name]: e.target.value } })} /></${Field}>`)}
-    <${Field} label="When" hint="Cron format: minute hour day-of-month month day-of-week">
+    ${!webhook && html`<${Field} label="When" hint="Cron format: minute hour day-of-month month day-of-week">
       <input class="mono" value=${v.cron} onInput=${(e) => setV({ ...v, cron: e.target.value })} />
     </${Field}>
     <div class="row">${PRESETS.map(([l, c]) => html`<button type="button" class="tag" aria-pressed=${v.cron === c} onClick=${() => setV({ ...v, cron: c })}>${l}</button>`)}</div>
-    ${preview.error ? html`<p class="err">${preview.error}</p>` : html`<p class="small ink2">Next runs: ${preview.next.map(when).join('; ') || '–'}</p>`}
+    ${preview.error ? html`<p class="err">${preview.error}</p>` : html`<p class="small ink2">Next runs: ${preview.next.map(when).join('; ') || '–'}</p>`}`}
     <${TargetPicker} value=${v.targets} onChange=${(targets) => setV({ ...v, targets })} />
     <label class="check"><input type="checkbox" checked=${v.enabled} onChange=${(e) => setV({ ...v, enabled: e.target.checked })} />Enabled</label>
     ${err && html`<p class="err">${err}</p>`}

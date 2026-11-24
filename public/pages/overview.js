@@ -15,6 +15,8 @@ export function Flags({ s }) {
   if (n?.updates) out.push(html`<span class="chip warn">${n.updates} update${n.updates > 1 ? 's' : ''}</span>`);
   if (n?.reboot) out.push(html`<span class="chip warn">Reboot needed</span>`);
   if (n?.failed) out.push(html`<span class="chip bad">${n.failed} failed unit${n.failed > 1 ? 's' : ''}</span>`);
+  if (n?.unhealthy) out.push(html`<span class="chip bad">${n.unhealthy} unhealthy container${n.unhealthy > 1 ? 's' : ''}</span>`);
+  if (n?.smart?.disks?.some((d) => d.problem)) out.push(html`<span class="chip bad">Disk health</span>`);
   if (!out.length && s.status === 'up') out.push(html`<span class="chip ok">Healthy</span>`);
   return out;
 }

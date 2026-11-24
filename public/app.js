@@ -8,7 +8,7 @@ import { ServerPage } from './pages/server.js';
 import { JobsPage, JobPage, RunHost, openRun } from './pages/jobs.js';
 import { ScriptsPage, SchedulesPage } from './pages/scripts.js';
 import { AlertsPage } from './pages/alerts.js';
-import { KeysPage } from './pages/keys.js';
+import { KeysPage, VariablesPage } from './pages/keys.js';
 import { ReposPage } from './pages/repos.js';
 import { SettingsPage, AuditPage } from './pages/settings.js';
 
@@ -63,7 +63,7 @@ function Setup({ onDone }) {
 // ---------- command palette (⌘K) ----------
 const PAGES = [
   ['Fleet overview', '/', 'overview'], ['Jobs', '/jobs', 'jobs'], ['Scripts', '/scripts', 'scripts'], ['Schedules', '/schedules', 'clock'],
-  ['Alerts', '/alerts', 'bell'], ['Repositories', '/repos', 'git'], ['SSH keys', '/keys', 'key'], ['Audit log', '/audit', 'audit'], ['Settings', '/settings', 'gear'],
+  ['Alerts', '/alerts', 'bell'], ['Repositories', '/repos', 'git'], ['SSH keys', '/keys', 'key'], ['Variables', '/variables', 'vars'], ['Audit log', '/audit', 'audit'], ['Settings', '/settings', 'gear'],
 ];
 
 function Palette({ onClose }) {
@@ -97,7 +97,7 @@ function Palette({ onClose }) {
 }
 
 // ---------- shell ----------
-const NAV = [['Overview', '/', 'overview'], ['Jobs', '/jobs', 'jobs'], ['Scripts', '/scripts', 'scripts'], ['Schedules', '/schedules', 'clock'], ['Repositories', '/repos', 'git'], ['Alerts', '/alerts', 'bell'], ['SSH keys', '/keys', 'key'], ['Audit log', '/audit', 'audit'], ['Settings', '/settings', 'gear']];
+const NAV = [['Overview', '/', 'overview'], ['Jobs', '/jobs', 'jobs'], ['Scripts', '/scripts', 'scripts'], ['Schedules', '/schedules', 'clock'], ['Repositories', '/repos', 'git'], ['Alerts', '/alerts', 'bell'], ['SSH keys', '/keys', 'key'], ['Variables', '/variables', 'vars'], ['Audit log', '/audit', 'audit'], ['Settings', '/settings', 'gear']];
 
 function ThemeButton() {
   const [t, setT] = useState(getTheme());
@@ -133,6 +133,7 @@ function Shell() {
   else if (section === 'schedules') page = html`<${SchedulesPage} />`;
   else if (section === 'alerts') page = html`<${AlertsPage} />`;
   else if (section === 'keys') page = html`<${KeysPage} />`;
+  else if (section === 'variables') page = html`<${VariablesPage} />`;
   else if (section === 'repos') page = html`<${ReposPage} />`;
   else if (section === 'audit') page = html`<${AuditPage} />`;
   else if (section === 'settings') page = html`<${SettingsPage} />`;

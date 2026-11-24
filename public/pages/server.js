@@ -1,10 +1,11 @@
 import {
   html, useState, useEffect, useRef, useMemo, api, go, useStore, useLoad, serversStore, refreshServers, toast, confirmBox,
-  Btn, Lamp, StatusChip, Gauge, LineChart, Empty, Field, Modal, Loading, ErrorNote, Output, Icon, Copy,
+  Btn, Th, useSort, Lamp, StatusChip, Gauge, LineChart, Empty, Field, Modal, Loading, ErrorNote, Output, Icon, Copy,
   bytes, rate, pct, ago, dur, uptime, when, logTime, level,
 } from '../ui.js';
 import { Flags, ServerForm, serverBody } from './overview.js';
 import { JobsTable, openRun } from './jobs.js';
+import { muteFor } from './alerts.js';
 
 const TABS = [['overview', 'Overview'], ['updates', 'Updates'], ['services', 'Services'], ['logs', 'Logs'], ['processes', 'Processes'], ['containers', 'Containers'], ['terminal', 'Terminal'], ['jobs', 'Jobs'], ['settings', 'Settings']];
 
@@ -63,7 +64,7 @@ export function ServerPage({ id, tab }) {
     ${s.ssh?.sudoRejected && html`<div class="alert-bar warn"><span class="grow"><b>The server rejected the stored sudo password.</b> Fleetdeck stopped using it so the account doesn't get locked. Update it to resume admin actions.</span><a class="btn sm" href=${`#/servers/${s.id}/settings`}>Update password</a></div>`}
     ${s.status === 'down' && !s.ssh?.hostKeyMismatch && html`<div class="alert-bar"><span class="grow"><b>Unreachable for ${dur(Date.now() - s.error.since)}.</b> ${s.error.message}</span><a class="btn sm" href=${`#/servers/${s.id}/settings`}>Connection settings</a></div>`}
     ${(s.firing || []).map((a) => html`<div class="alert-bar"><span class="grow"><b>Alert firing ${ago(a.since)}:</b> ${a.message}</span><a class="btn sm" href="#/alerts">Alert rules</a></div>`)}
-    ${n && (n.updates || n.reboot || n.failed) ? html`<div class="row"><${Flags} s=${{ ...s, alerts: 0, status: '' }} />
+    ${n && (n.updates || n.reboot || n.failed || n.unhealthy || n.smart?.disks?.some((d) => d.problem)) ? html`<div class="row"><${Flags} s=${{ ...s, alerts: 0, status: '' }} />
       ${n.updates > 0 && html`<${Btn} size="sm" onClick=${() => startJob(s, 'update')}>Install ${n.updates} update${n.updates > 1 ? 's' : ''}</${Btn}>`}</div>` : ''}
 
     <nav class="tabs" aria-label="Server sections">${TABS.map(([k, label]) => html`<a href=${`#/servers/${s.id}${k === 'overview' ? '' : `/${k}`}`} aria-current=${tab === k ? 'page' : undefined}>${label}</a>`)}</nav>
@@ -108,13 +109,38 @@ function OverviewTab({ s }) {
           <dt>Addresses</dt><dd class="mono">${n.ips.join(', ') || '–'}</dd>
           <dt>Booted</dt><dd>${when(n.t - n.uptime * 1000)}</dd>
           <dt>Processes</dt><dd>${n.procs}</dd>
-          <dt>Packages</dt><dd>${n.pkg || 'unknown'}${n.updates != null ? `, ${n.updates} pending` : ''}</dd>
+          <dt>Packages</dt><dd>${n.pkg || 'unknown'}${n.updates != null ? `, ${n.updates} pending` : ''}${n.autoUpdates != null ? `, automatic updates ${n.autoUpdates ? 'on' : 'off'}` : ''}</dd>
           ${n.docker && html`<dt>Docker</dt><dd>${n.docker.running} of ${n.docker.total} containers running</dd>`}
           <dt>Checks run as</dt><dd>${n.probeUser}${n.probeUser !== 'root' ? ' (no passwordless sudo)' : ''}</dd>
         </dl></div></section>
     </div>`}
+    ${n?.ifaces?.length > 0 && html`<section class="panel"><div class="panel-h"><h2>Network interfaces</h2><span class="small muted">Live rates from the last check. The chart above leaves out virtual interfaces (Docker, VPN) to avoid counting traffic twice.</span></div>
+      <div class="table-wrap"><table class="t"><thead><tr><th>Interface</th><th class="num">In</th><th class="num">Out</th><th class="num">Received since boot</th><th class="num">Sent since boot</th></tr></thead>
+      <tbody>${n.ifaces.map((i) => html`<tr><td class="mono">${i.name}</td><td class="num">${rate(i.rx)}</td><td class="num">${rate(i.tx)}</td>
+        <td class="num ink2">${bytes(i.rxTotal)}</td><td class="num ink2">${bytes(i.txTotal)}</td></tr>`)}</tbody></table></div></section>`}
+    ${n && html`<${DiskHealth} s=${s} />`}
     ${s.notes && html`<section class="panel"><div class="panel-h"><h2>Notes</h2></div><div class="panel-b" style=${{ whiteSpace: 'pre-wrap' }}>${s.notes}</div></section>`}
   </div>`;
+}
+
+// S.M.A.R.T. from the probe (every 30 min). Virtual machines have no SMART, so stay quiet there.
+function DiskHealth({ s }) {
+  const sm = s.snapshot.smart;
+  if (!sm || (s.snapshot.virt && !sm.disks.length)) return null;
+  if (sm.status === 'none') return html`<div class="alert-bar info"><span class="grow">Install smartmontools to watch the health of this server's disks (S.M.A.R.T.).</span><${Btn} size="sm" onClick=${() => startJob(s, 'smartmontools')}>Install smartmontools</${Btn}></div>`;
+  if (sm.status === 'noroot') return null; // smartctl needs root; the System panel already says sudo is missing
+  if (!sm.disks.length) return null;
+  const n = (v) => (v == null ? '–' : v);
+  return html`<section class="panel"><div class="panel-h"><h2>Disk health</h2><span class="small muted">S.M.A.R.T., checked every 30 minutes. Sleeping disks are skipped.</span></div>
+    <div class="table-wrap"><table class="t"><thead><tr><th>Health</th><th>Disk</th><th class="num">Temp</th><th class="num">Powered on</th><th class="num" title="Reallocated sectors">Realloc.</th><th class="num" title="Pending + uncorrectable sectors">Bad sectors</th><th class="num" title="NVMe: percentage of rated endurance used">Wear</th></tr></thead>
+    <tbody>${sm.disks.map((d) => html`<tr>
+      <td><span class=${`chip ${!d.passed ? 'bad' : d.problem ? 'warn' : 'ok'}`}>${!d.passed ? 'Failing' : d.problem ? 'Warning' : 'OK'}</span></td>
+      <td><span class="mono">${d.dev}</span><div class="small muted">${d.model}${d.serial ? ` · ${d.serial}` : ''}</div></td>
+      <td class="num">${d.temp == null ? '–' : `${d.temp} °C`}</td>
+      <td class="num ink2">${d.hours == null ? '–' : dur(d.hours * 3600e3)}</td>
+      <td class="num">${n(d.realloc)}</td>
+      <td class=${`num ${d.pending > 0 || d.uncorrectable > 0 ? 'err' : ''}`}>${d.pending == null && d.uncorrectable == null ? (d.mediaErrors == null ? '–' : `${d.mediaErrors} media err.`) : (d.pending || 0) + (d.uncorrectable || 0)}</td>
+      <td class="num">${d.wear == null ? '–' : `${d.wear}%`}</td></tr>`)}</tbody></table></div></section>`;
 }
 
 // ---------- updates ----------
@@ -123,8 +149,18 @@ function UpdatesTab({ s }) {
   const p = useLoad(() => api(`/api/servers/${s.id}/packages${refresh ? '?refresh=1' : ''}`), [s.id, refresh]);
   const [sel, setSel] = useState(() => new Set());
   const list = p.data?.packages || [];
+  const sort = useSort(list, 'name');
   const toggle = (name) => setSel((x) => { const n = new Set(x); n.has(name) ? n.delete(name) : n.add(name); return n; });
-  return html`<section class="panel">
+  const auto = s.snapshot?.autoUpdates;
+  const toggleAuto = async () => {
+    if (auto && !await confirmBox({ title: `Turn off automatic updates on ${s.name}?`, body: 'Security fixes then only arrive when you install updates yourself or on a schedule.', confirm: 'Turn off', danger: true })) return;
+    await startJob(s, auto ? 'unattended-off' : 'unattended');
+  };
+  return html`<div class="stack"><${RestartsPanel} s=${s} />
+    ${auto != null && html`<div class="row"><span class=${`chip ${auto ? 'ok' : 'warn'}`}>Automatic updates ${auto ? 'on' : 'off'}</span>
+      <span class="small muted">${auto ? (s.snapshot.pkg === 'apt' ? 'unattended-upgrades' : 'dnf-automatic') + ' installs updates by itself.' : 'Updates are only installed when you or a schedule run them.'}</span>
+      <${Btn} size="sm" kind="ghost" onClick=${toggleAuto}>${auto ? 'Turn off' : 'Turn on (security updates)'}</${Btn}></div>`}
+    <section class="panel">
     <div class="panel-h"><h2>Available updates</h2>${p.data && html`<span class="small muted">${p.data.manager || 'unknown package manager'}</span>`}
       <div class="row right">
         <${Btn} size="sm" icon="refresh" onClick=${() => setRefresh((r) => r + 1)} disabled=${p.loading}>Refresh package lists</${Btn}>
@@ -133,9 +169,26 @@ function UpdatesTab({ s }) {
       </div></div>
     ${p.loading ? html`<${Loading} />` : p.error ? html`<div class="panel-b"><${ErrorNote} error=${p.error} retry=${p.reload} /></div>`
       : !list.length ? html`<${Empty} title="Everything is up to date">Fleetdeck checks the package cache every minute. Refresh the package lists to look for new releases now.</${Empty}>`
-      : html`<div class="table-wrap"><table class="t"><thead><tr><th><input type="checkbox" aria-label="Select all" checked=${sel.size === list.length} onChange=${() => setSel(sel.size === list.length ? new Set() : new Set(list.map((x) => x.name)))} /></th><th>Package</th><th>Installed</th><th>Available</th><th>Source</th></tr></thead>
-        <tbody>${list.map((x) => html`<tr><td><input type="checkbox" checked=${sel.has(x.name)} onChange=${() => toggle(x.name)} aria-label=${`Select ${x.name}`} /></td>
+      : html`<div class="table-wrap"><table class="t"><thead><tr><th><input type="checkbox" aria-label="Select all" checked=${sel.size === list.length} onChange=${() => setSel(sel.size === list.length ? new Set() : new Set(list.map((x) => x.name)))} /></th><${Th} sort=${sort} k="name">Package</${Th}><${Th} sort=${sort} k="from">Installed</${Th}><${Th} sort=${sort} k="version">Available</${Th}><${Th} sort=${sort} k="source">Source</${Th}></tr></thead>
+        <tbody>${sort.rows.map((x) => html`<tr><td><input type="checkbox" checked=${sel.has(x.name)} onChange=${() => toggle(x.name)} aria-label=${`Select ${x.name}`} /></td>
           <td class="mono">${x.name} ${x.security && html`<span class="chip warn">security</span>`}</td><td class="mono ink2">${x.from || '–'}</td><td class="mono">${x.version}</td><td class="ink2">${x.source}</td></tr>`)}</tbody></table></div>`}
+  </section></div>`;
+}
+
+// Services whose binaries or libraries were replaced by an update but are still running the old code.
+function RestartsPanel({ s }) {
+  const r = useLoad(() => api(`/api/servers/${s.id}/restarts`), [s.id]);
+  if (r.loading || !r.data?.length) return r.error ? html`<${ErrorNote} error=${`Couldn't check for services to restart: ${r.error}`} retry=${r.reload} />` : null;
+  const safe = r.data.filter((x) => !x.careful).map((x) => x.unit);
+  const one = async (x) => {
+    if (x.careful && !await confirmBox({ title: `Restart ${x.unit}?`, body: 'Restarting it can end logins, desktop sessions or networking on this server.', confirm: 'Restart', danger: true })) return;
+    await startJob(s, 'restart-services', { SERVICES: x.unit });
+  };
+  return html`<section class="panel">
+    <div class="panel-h"><h2>Services to restart</h2><span class="small muted">Still running code that an update replaced. Restart them to finish the update without a reboot.</span>
+      ${safe.length > 0 && html`<${Btn} size="sm" kind="primary" class="right" onClick=${() => startJob(s, 'restart-services', { SERVICES: safe.join(' ') })}>Restart ${safe.length === r.data.length ? 'all' : `${safe.length} safe`}</${Btn}>`}</div>
+    <div class="panel-b row">${r.data.map((x) => html`<span class="row nw"><span class=${`chip ${x.careful ? 'warn' : ''}`} title=${x.careful ? 'Can interrupt sessions or networking: restart on its own' : ''}>${x.unit.replace(/\.service$/, '')}</span>
+      <${Btn} size="sm" kind="ghost" icon="refresh" title=${`Restart ${x.unit}`} onClick=${() => one(x)} /></span>`)}</div>
   </section>`;
 }
 
@@ -151,6 +204,7 @@ function ServicesTab({ s }) {
     if (filter === 'inactive' && u.active !== 'inactive') return false;
     return !q || `${u.unit} ${u.description}`.toLowerCase().includes(q.toLowerCase());
   }), [svc.data, q, filter]);
+  const sort = useSort(list, 'unit');
   const act = async (u, action) => {
     if (['stop', 'disable'].includes(action) && !await confirmBox({ title: `${action[0].toUpperCase() + action.slice(1)} ${u.unit}?`, confirm: action[0].toUpperCase() + action.slice(1), danger: true })) return;
     await api(`/api/servers/${s.id}/services`, { method: 'POST', body: { unit: u.unit, action } });
@@ -161,14 +215,15 @@ function ServicesTab({ s }) {
   const counts = { failed: (svc.data || []).filter((u) => u.active === 'failed').length };
   return html`<section class="panel">
     <div class="panel-h">
-      <div class="seg" role="group" aria-label="Filter">${[['running', 'Running'], ['failed', `Failed${counts.failed ? ` (${counts.failed})` : ''}`], ['inactive', 'Stopped'], ['all', 'All']].map(([k, l]) => html`<button aria-pressed=${filter === k} onClick=${() => setFilter(k)}>${l}</button>`)}</div>
+      <div class="seg" role="group" aria-label="Filter">${[['running', 'Running'], ['failed', `Failed${counts.failed ? ` (${counts.failed})` : ''}`], ['inactive', 'Stopped'], ['all', 'All'], ['timers', 'Timers']].map(([k, l]) => html`<button aria-pressed=${filter === k} onClick=${() => setFilter(k)}>${l}</button>`)}</div>
       <input type="search" placeholder="Filter services" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter services" />
       <${Btn} size="sm" kind="ghost" icon="refresh" class="right" onClick=${() => svc.reload()}>Refresh</${Btn}>
     </div>
-    ${svc.loading && !svc.data ? html`<${Loading} />` : svc.error ? html`<div class="panel-b"><${ErrorNote} error=${svc.error} retry=${svc.reload} /></div>`
+    ${filter === 'timers' ? html`<${TimersTable} s=${s} q=${q} />`
+      : svc.loading && !svc.data ? html`<${Loading} />` : svc.error ? html`<div class="panel-b"><${ErrorNote} error=${svc.error} retry=${svc.reload} /></div>`
       : !list.length ? html`<${Empty} title="No services match" />`
-      : html`<div class="table-wrap"><table class="t"><thead><tr><th>State</th><th>Service</th><th>Description</th><th>Start at boot</th><th class="act"></th></tr></thead>
-      <tbody>${list.map((u) => html`<tr class="click" onClick=${() => showStatus(u)}>
+      : html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="active">State</${Th}><${Th} sort=${sort} k="unit">Service</${Th}><${Th} sort=${sort} k="description">Description</${Th}><${Th} sort=${sort} k="enabled">Start at boot</${Th}><th class="act"></th></tr></thead>
+      <tbody>${sort.rows.map((u) => html`<tr class="click" onClick=${() => showStatus(u)}>
         <td><span class=${`chip ${u.active === 'active' ? 'ok' : u.active === 'failed' ? 'bad' : ''}`}>${u.active === 'active' ? u.sub : u.active}</span></td>
         <td class="mono">${u.unit.replace(/\.service$/, '')}</td><td class="ink2 trunc" style=${{ maxWidth: '320px' }}>${u.description}</td>
         <td class="ink2">${u.enabled}</td>
@@ -182,6 +237,38 @@ function ServicesTab({ s }) {
       <div class="row"><a class="btn sm" href=${`#/servers/${s.id}/logs`} onClick=${() => sessionStorage.setItem('fd-log-unit', status.unit)}>Open logs</a></div>
       <${Output} text=${status.text} /></${Modal}>`}
   </section>`;
+}
+
+// systemd timers: the cron jobs of modern distros.
+function TimersTable({ s, q }) {
+  const t = useLoad(() => api(`/api/servers/${s.id}/timers`), [s.id]);
+  const list = useMemo(() => (t.data || []).filter((x) => !q || `${x.unit} ${x.description}`.toLowerCase().includes(q.toLowerCase())), [t.data, q]);
+  const sort = useSort(list, 'next');
+  const svc = (unit, action) => api(`/api/servers/${s.id}/services`, { method: 'POST', body: { unit, action } });
+  const runNow = async (x) => { await svc(x.activates, 'start'); toast(`${x.activates} started`, 'ok'); t.reload(true); };
+  const toggle = async (x) => {
+    const on = x.enabled !== 'enabled';
+    if (!on && !await confirmBox({ title: `Disable ${x.unit}?`, body: `${x.activates} stops running on its schedule.`, confirm: 'Disable', danger: true })) return;
+    for (const a of on ? ['enable', 'start'] : ['stop', 'disable']) await svc(x.unit, a);
+    toast(`${x.unit} ${on ? 'enabled' : 'disabled'}`, 'ok');
+    t.reload(true);
+  };
+  const time = (ms, text) => (ms ? html`<span title=${when(ms)}>${ago(ms)}</span>` : html`<span class="muted" title=${text}>${text && text !== 'n/a' ? text : '–'}</span>`);
+  if (t.loading && !t.data) return html`<${Loading} />`;
+  if (t.error) return html`<div class="panel-b"><${ErrorNote} error=${t.error} retry=${t.reload} /></div>`;
+  if (!list.length) return html`<${Empty} title="No timers match" />`;
+  return html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="unit">Timer</${Th}><${Th} sort=${sort} k="next">Next run</${Th}><${Th} sort=${sort} k="last" desc>Last run</${Th}><${Th} sort=${sort} k="result">Last result</${Th}><${Th} sort=${sort} k="enabled">Start at boot</${Th}><th class="act"></th></tr></thead>
+    <tbody>${sort.rows.map((x) => html`<tr>
+      <td><span class="mono">${x.unit.replace(/\.timer$/, '')}</span><div class="small muted trunc" style=${{ maxWidth: '320px' }}>${x.description}</div></td>
+      <td class="nowrap">${x.active === 'active' ? time(x.next, x.nextText) : html`<span class="muted">inactive</span>`}</td>
+      <td class="nowrap ink2">${time(x.last, x.lastText)}</td>
+      <td>${x.running ? html`<span class="chip info">running</span>` : x.result && x.last ? html`<span class=${`chip ${x.result === 'success' ? 'ok' : 'bad'}`}>${x.result}</span>` : ''}</td>
+      <td class="ink2">${x.enabled}</td>
+      <td class="act"><div class="row nw">
+        <${Btn} size="sm" icon="play" disabled=${!x.activates || x.running} onClick=${() => runNow(x)}>Run now</${Btn}>
+        ${['enabled', 'disabled'].includes(x.enabled) && html`<${Btn} size="sm" kind="ghost" onClick=${() => toggle(x)}>${x.enabled === 'enabled' ? 'Disable' : 'Enable'}</${Btn}>`}
+        ${x.activates && html`<a class="btn sm ghost" href=${`#/servers/${s.id}/logs`} onClick=${() => sessionStorage.setItem('fd-log-unit', x.activates)}>Logs</a>`}
+      </div></td></tr>`)}</tbody></table></div>`;
 }
 
 // ---------- logs ----------
@@ -222,9 +309,10 @@ function LogsTab({ s }) {
 // ---------- processes ----------
 function ProcessesTab({ s }) {
   const ps = useLoad(() => api(`/api/servers/${s.id}/processes`), [s.id], { poll: 10_000 });
-  const [sort, setSort] = useState('cpu');
   const [q, setQ] = useState('');
-  const list = useMemo(() => (ps.data || []).filter((p) => !q || `${p.args} ${p.user} ${p.pid}`.toLowerCase().includes(q.toLowerCase())).sort((a, b) => b[sort] - a[sort]).slice(0, 80), [ps.data, sort, q]);
+  const filtered = useMemo(() => (ps.data || []).filter((p) => !q || `${p.args} ${p.user} ${p.pid}`.toLowerCase().includes(q.toLowerCase())), [ps.data, q]);
+  const sort = useSort(filtered, 'cpu', -1);
+  const list = sort.rows.slice(0, 80);
   const kill = async (p, signal) => {
     if (!await confirmBox({ title: `Send ${signal} to ${p.comm} (${p.pid})?`, body: p.args, confirm: signal === 'KILL' ? 'Force kill' : 'Terminate', danger: true })) return;
     await api(`/api/servers/${s.id}/processes/kill`, { method: 'POST', body: { pid: p.pid, signal } });
@@ -233,12 +321,11 @@ function ProcessesTab({ s }) {
   };
   return html`<section class="panel">
     <div class="panel-h">
-      <div class="seg" role="group" aria-label="Sort by"><button aria-pressed=${sort === 'cpu'} onClick=${() => setSort('cpu')}>Top CPU</button><button aria-pressed=${sort === 'mem'} onClick=${() => setSort('mem')}>Top memory</button></div>
       <input type="search" placeholder="Filter processes" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter processes" />
       <span class="small muted right">Updates every 10 seconds</span>
     </div>
     ${ps.loading && !ps.data ? html`<${Loading} />` : ps.error ? html`<div class="panel-b"><${ErrorNote} error=${ps.error} retry=${ps.reload} /></div>`
-      : html`<div class="table-wrap"><table class="t"><thead><tr><th class="num">PID</th><th>User</th><th class="num">CPU</th><th class="num">Memory</th><th class="num">RSS</th><th>Running</th><th>Command</th><th class="act"></th></tr></thead>
+      : html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="pid" class="num">PID</${Th}><${Th} sort=${sort} k="user">User</${Th}><${Th} sort=${sort} k="cpu" class="num" desc>CPU</${Th}><${Th} sort=${sort} k="mem" class="num" desc>Memory</${Th}><${Th} sort=${sort} k="rss" class="num" desc>RSS</${Th}><${Th} sort=${sort} k="elapsed" desc>Running</${Th}><${Th} sort=${sort} k="args">Command</${Th}><th class="act"></th></tr></thead>
       <tbody>${list.map((p) => html`<tr><td class="num mono">${p.pid}</td><td class="ink2">${p.user}</td><td class="num">${p.cpu.toFixed(1)}%</td><td class="num">${p.mem.toFixed(1)}%</td>
         <td class="num ink2">${bytes(p.rss)}</td><td class="ink2 nowrap">${dur(p.elapsed * 1000)}</td><td class="mono trunc" style=${{ maxWidth: '420px' }} title=${p.args}>${p.args}</td>
         <td class="act"><div class="row nw"><${Btn} size="sm" kind="ghost" onClick=${() => kill(p, 'TERM')}>Stop</${Btn}><${Btn} size="sm" kind="danger" onClick=${() => kill(p, 'KILL')}>Kill</${Btn}></div></td></tr>`)}</tbody></table></div>`}
@@ -249,6 +336,8 @@ function ProcessesTab({ s }) {
 function ContainersTab({ s }) {
   const c = useLoad(() => api(`/api/servers/${s.id}/containers`), [s.id], { poll: 15_000 });
   const [logs, setLogs] = useState(null);
+  const [hist, setHist] = useState(null);
+  const sort = useSort(c.data?.containers, 'name');
   const act = async (x, action) => {
     if (['stop', 'rm'].includes(action) && !await confirmBox({ title: `${action === 'rm' ? 'Remove' : 'Stop'} ${x.name}?`, body: action === 'rm' ? 'The container is deleted. Its volumes are kept.' : null, confirm: action === 'rm' ? 'Remove' : 'Stop', danger: true })) return;
     await api(`/api/servers/${s.id}/containers`, { method: 'POST', body: { id: x.id, action } });
@@ -263,18 +352,33 @@ function ContainersTab({ s }) {
     <div class="panel-h"><h2>Containers</h2><span class="small muted">${c.data.containers.filter((x) => x.state === 'running').length} of ${c.data.containers.length} running</span>
       <${Btn} size="sm" kind="ghost" class="right" onClick=${() => startJob(s, 'docker-prune')}>Clean up unused data</${Btn}></div>
     ${!c.data.containers.length ? html`<${Empty} title="No containers" />` : html`<div class="table-wrap"><table class="t">
-      <thead><tr><th>State</th><th>Name</th><th>Image</th><th>Status</th><th class="num">CPU</th><th>Memory</th><th>Ports</th><th class="act"></th></tr></thead>
-      <tbody>${c.data.containers.map((x) => html`<tr>
-        <td><span class=${`chip ${x.state === 'running' ? 'ok' : ['exited', 'dead'].includes(x.state) ? '' : 'warn'}`}>${x.state}</span></td>
+      <thead><tr><${Th} sort=${sort} k="state">State</${Th}><${Th} sort=${sort} k="name">Name</${Th}><${Th} sort=${sort} k="image">Image</${Th}><${Th} sort=${sort} k="status">Status</${Th}><${Th} sort=${sort} k="cpu" get=${(x) => parseFloat(x.cpu)} class="num" desc>CPU</${Th}><${Th} sort=${sort} k="mem" get=${(x) => parseFloat(x.memPct)} desc>Memory</${Th}><${Th} sort=${sort} k="ports">Ports</${Th}><th class="act"></th></tr></thead>
+      <tbody>${sort.rows.map((x) => html`<tr>
+        <td><div class="row nw"><span class=${`chip ${x.state === 'running' ? 'ok' : ['exited', 'dead'].includes(x.state) ? '' : 'warn'}`}>${x.state}</span>
+          ${/\(unhealthy\)/.test(x.status) ? html`<span class="chip bad">unhealthy</span>` : /\(healthy\)/.test(x.status) ? html`<span class="chip ok">healthy</span>` : ''}</div></td>
         <td class="mono">${x.name}</td><td class="mono ink2 trunc" style=${{ maxWidth: '220px' }} title=${x.image}>${x.image}</td><td class="ink2 nowrap">${x.status}</td>
         <td class="num">${x.cpu}</td><td class="ink2 nowrap">${x.mem}</td><td class="mono small ink2 trunc" style=${{ maxWidth: '200px' }} title=${x.ports}>${x.ports}</td>
         <td class="act"><div class="row nw">
+          <${Btn} size="sm" kind="ghost" onClick=${() => setHist(x.name)}>History</${Btn}>
           <${Btn} size="sm" kind="ghost" onClick=${() => showLogs(x)}>Logs</${Btn}>
           ${x.state === 'running' ? html`<${Btn} size="sm" onClick=${() => act(x, 'restart')}>Restart</${Btn}><${Btn} size="sm" kind="danger" onClick=${() => act(x, 'stop')}>Stop</${Btn}>`
             : html`<${Btn} size="sm" onClick=${() => act(x, 'start')}>Start</${Btn}><${Btn} size="sm" kind="danger" onClick=${() => act(x, 'rm')}>Remove</${Btn}>`}
         </div></td></tr>`)}</tbody></table></div>`}
     ${logs && html`<${Modal} wide title=${`Logs: ${logs.name}`} onClose=${() => setLogs(null)}><${Output} text=${logs.text} /></${Modal}>`}
+    ${hist && html`<${Modal} wide title=${`History: ${hist}`} onClose=${() => setHist(null)}><${ContainerHistory} s=${s} name=${hist} /></${Modal}>`}
   </section>`;
+}
+
+// Recorded every minute by the probe, kept as long as server metrics.
+function ContainerHistory({ s, name }) {
+  const [range, setRange] = useState('6h');
+  const m = useLoad(() => api(`/api/servers/${s.id}/containers/metrics?name=${encodeURIComponent(name)}&range=${range}`), [s.id, name, range]);
+  return html`<div class="stack">
+    <div class="seg" role="group" aria-label="Time range">${RANGES.map((r) => html`<button aria-pressed=${r === range} onClick=${() => setRange(r)}>${r}</button>`)}</div>
+    ${m.error && html`<${ErrorNote} error=${m.error} retry=${m.reload} />`}
+    <${LineChart} title="CPU" data=${m.data} fmt=${(v) => `${v.toFixed(v < 10 ? 1 : 0)}%`} series=${[{ key: 'cpu', label: 'CPU (100% = one core)', color: 'var(--s1)' }]} />
+    <${LineChart} title="Memory" data=${m.data} fmt=${(v) => bytes(v)} series=${[{ key: 'mem', label: 'Memory', color: 'var(--s1)' }]} />
+  </div>`;
 }
 
 // ---------- terminal ----------
@@ -374,6 +478,9 @@ function SettingsTab({ s }) {
       <section class="panel"><div class="panel-h"><h2>Monitoring</h2></div><div class="panel-b stack">
         <p class="ink2 small">${s.paused ? 'Paused: no checks, no alerts. Jobs and the terminal still work.' : 'Checked every minute. Pause during maintenance to silence alerts.'}</p>
         <div><${Btn} onClick=${pause}>${s.paused ? 'Resume monitoring' : 'Pause monitoring'}</${Btn}></div>
+        <p class="ink2 small">Planned work? Keep monitoring but hold back notifications for a while. Anything still firing afterwards is sent then.</p>
+        <div class="row">${[1, 4].map((h) => html`<${Btn} size="sm" onClick=${async () => { await muteFor(s.id, h, `Maintenance on ${s.name}`); toast(`Notifications for ${s.name} muted for ${h} h`, 'ok'); }}>Mute for ${h} h</${Btn}>`)}
+          <a class="btn sm ghost" href="#/alerts">Quiet hours</a></div>
       </div></section>
       <section class="panel"><div class="panel-h"><h2>Remove server</h2></div><div class="panel-b stack">
         <p class="ink2 small">Deletes its history from Fleetdeck. The server itself is not touched.</p>

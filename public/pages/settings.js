@@ -1,4 +1,4 @@
-import { html, useState, useEffect, api, go, useLoad, toast, confirmBox, Btn, Empty, Field, Loading, ErrorNote, ago, when } from '../ui.js';
+import { html, useState, useEffect, useMemo, api, go, useLoad, toast, confirmBox, Btn, Th, useSort, Empty, Field, Loading, ErrorNote, ago, when } from '../ui.js';
 import { getTheme, setTheme } from '../theme.js';
 
 export function SettingsPage() {
@@ -123,7 +123,8 @@ export function AuditPage() {
   useEffect(() => setOlder([]), [kind, query]);
   const qs = new URLSearchParams(Object.entries({ kind, q: query, limit: '100' }).filter(([, x]) => x)).toString();
   const ev = useLoad(() => api(`/api/events?${qs}`), [qs], { poll: 15_000 });
-  const rows = [...(ev.data || []), ...older];
+  const rows = useMemo(() => [...(ev.data || []), ...older], [ev.data, older]);
+  const sort = useSort(rows);
   const more = async () => setOlder([...older, ...await api(`/api/events?${qs}&before=${rows[rows.length - 1].id}`)]);
   const lvl = { error: 'bad', warn: 'warn', success: 'ok' };
   return html`<div class="page">
@@ -135,8 +136,8 @@ export function AuditPage() {
       </div>
       ${ev.loading && !ev.data ? html`<${Loading} />` : ev.error ? html`<div class="panel-b"><${ErrorNote} error=${ev.error} retry=${ev.reload} /></div>`
         : !rows.length ? html`<${Empty} title="No events match" />`
-        : html`<div class="table-wrap"><table class="t"><thead><tr><th>Time</th><th>Type</th><th>Event</th><th>Server</th><th>From</th></tr></thead>
-          <tbody>${rows.map((e) => html`<tr>
+        : html`<div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="t" desc>Time</${Th}><${Th} sort=${sort} k="kind">Type</${Th}><${Th} sort=${sort} k="message">Event</${Th}><${Th} sort=${sort} k="server_name">Server</${Th}><${Th} sort=${sort} k="ip">From</${Th}></tr></thead>
+          <tbody>${sort.rows.map((e) => html`<tr>
             <td class="nowrap ink2" title=${when(e.t)}>${ago(e.t)}</td>
             <td><span class=${`chip ${lvl[e.level] || ''}`}>${KINDS.find(([k]) => k === e.kind)?.[1] || e.kind}</span></td>
             <td>${e.message}</td>
