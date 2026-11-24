@@ -1016,6 +1016,7 @@ func (s *Server) serverRoutes() {
 	onServer("GET /api/servers/{id}/packages", func(c *ctx, srv *db.Server) (any, error) {
 		return admin.Packages(c.r.Context(), srv, c.query("refresh") == "1")
 	})
+	onServer("GET /api/servers/{id}/packages/history", func(c *ctx, srv *db.Server) (any, error) { return admin.UpdateHistory(c.r.Context(), srv) })
 	onServer("GET /api/servers/{id}/processes", func(c *ctx, srv *db.Server) (any, error) { return admin.Processes(c.r.Context(), srv) })
 	onServer("POST /api/servers/{id}/processes/kill", func(c *ctx, srv *db.Server) (any, error) {
 		signal := c.body.strOr("signal", "TERM")

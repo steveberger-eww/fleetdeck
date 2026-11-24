@@ -1,0 +1,15 @@
+Transaction ID : 3
+Begin time     : 2024-10-01 10:00:00
+Begin rpmdb    : abc
+End time       : 2024-10-01 10:00:05
+End rpmdb      : def
+User           : 0 root
+Status         : Ok
+Releasever     : 41
+Description    : dnf5 upgrade
+Comment        : 
+Command line   : dnf5 upgrade
+Packages altered:
+  Action  Package                       Reason     Repository
+  Upgrade curl-0:8.9.1-2.fc41.x86_64    User       updates
+  Replaced curl-0:8.9.1-1.fc41.x86_64   User       @System

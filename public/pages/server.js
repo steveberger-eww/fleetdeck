@@ -177,6 +177,7 @@ function DiskHealth({ s }) {
 // ---------- updates ----------
 function UpdatesTab({ s }) {
   const [refresh, setRefresh] = useState(0);
+  const [view, setView] = useState('available');
   const p = useLoad(() => api(`/api/servers/${s.id}/packages${refresh ? '?refresh=1' : ''}`), [s.id, refresh]);
   const [sel, setSel] = useState(() => new Set());
   const list = p.data?.packages || [];
@@ -193,17 +194,18 @@ function UpdatesTab({ s }) {
   };
   return html`<div class="stack"><${RestartsPanel} s=${s} />
     <section class="panel">
-    <div class="panel-h"><h2>Available updates</h2>${p.data && html`<span class="small muted">${p.data.manager || 'unknown package manager'}</span>`}
-      <div class="row right">
+    <div class="panel-h"><h2 class="sr">Updates</h2><div class="seg" role="group" aria-label="Updates view">${[['available', 'Available updates'], ['history', 'History']].map(([k, l]) => html`<button aria-pressed=${view === k} onClick=${() => setView(k)}>${l}</button>`)}</div>
+      ${p.data && html`<span class="small muted">${p.data.manager || 'unknown package manager'}</span>`}
+      ${view === 'available' && html`<div class="row right">
         <${Btn} size="sm" icon="refresh" onClick=${() => setRefresh((r) => r + 1)} disabled=${p.loading}>Refresh package lists</${Btn}>
         ${sel.size > 0 && html`<${Btn} size="sm" onClick=${() => startJob(s, 'upgrade-packages', { PACKAGES: [...sel].join(' ') })}>Upgrade ${sel.size} selected</${Btn}>`}
         ${list.length > 0 && html`<${Btn} size="sm" icon="clock" onClick=${() => setLater(true)}>Later…</${Btn}><${Btn} size="sm" kind="primary" onClick=${() => startJob(s, 'update')}>Upgrade all ${list.length}</${Btn}>`}
-      </div></div>
+      </div>`}</div>
     ${later && html`<${ScheduleRun} s=${s} scriptId="update" onClose=${() => setLater(false)} />`}
     ${auto != null && html`<div class="panel-b row b-bottom">
       <label class="check"><input type="checkbox" class="switch" role="switch" checked=${auto} onChange=${(e) => toggleAuto(e).catch((x) => toast(x.message, 'bad'))} />Automatic security updates</label>
       <span class="small muted">${auto ? `${s.snapshot.pkg === 'apt' ? 'unattended-upgrades' : 'dnf-automatic'} installs updates by itself${autoNext ? `, next run ${when(autoNext)}` : ''}.` : 'Updates are only installed when you or a schedule run them.'}</span></div>`}
-    ${p.loading ? html`<${Loading} />` : p.error ? html`<div class="panel-b"><${ErrorNote} error=${p.error} retry=${p.reload} /></div>`
+    ${view === 'history' ? html`<${UpdateHistory} s=${s} />` : p.loading ? html`<${Loading} />` : p.error ? html`<div class="panel-b"><${ErrorNote} error=${p.error} retry=${p.reload} /></div>`
       : !list.length ? html`<${Empty} title="Everything is up to date">Fleetdeck checks the package cache every minute. Refresh the package lists to look for new releases now.</${Empty}>`
       : html`<div class="table-wrap"><table class="t"><thead><tr><th class="shrink"><input type="checkbox" aria-label="Select all" checked=${sel.size === list.length} onChange=${() => setSel(sel.size === list.length ? new Set() : new Set(list.map((x) => x.name)))} /></th>
         <${Th} sort=${sort} k="security" get=${(x) => (x.security ? 0 : 1)} class="shrink"><span class="sr">Security</span></${Th}><${Th} sort=${sort} k="name">Package</${Th}><${Th} sort=${sort} k="from" class="hide-sm">Installed</${Th}><${Th} sort=${sort} k="version">Available</${Th}><${Th} sort=${sort} k="source" class="hide-sm">Source</${Th}></tr></thead>
@@ -211,6 +213,20 @@ function UpdatesTab({ s }) {
           <td>${x.security && html`<span class="chip warn">security</span>`}</td>
           <td class="mono">${x.name}</td><td class="mono ink2 hide-sm">${x.from || '–'}</td><td class="mono">${x.version}</td><td class="ink2 hide-sm">${x.source}</td></tr>`)}</tbody></table></div>`}
   </section></div>`;
+}
+
+const ACTION_WORDS = { install: 'installed', upgrade: 'upgraded', remove: 'removed', downgrade: 'downgraded', reinstall: 'reinstalled' };
+const changeSummary = (pkgs) => Object.entries(Object.groupBy(pkgs, (x) => x.action)).map(([a, l]) => `${l.length} ${ACTION_WORDS[a] || a}`).join(', ') || 'No package changes';
+
+function UpdateHistory({ s }) {
+  const h = useLoad(() => api(`/api/servers/${s.id}/packages/history`), [s.id]);
+  if (h.loading) return html`<${Loading} />`;
+  if (h.error) return html`<div class="panel-b"><${ErrorNote} error=${h.error} retry=${h.reload} /></div>`;
+  if (!h.data.length) return html`<${Empty} title="No update history">Fleetdeck reads the apt history log or dnf history. Neither has entries on this server.</${Empty}>`;
+  return html`<div class="table-wrap"><table class="t"><thead><tr><th>When</th><th class="hide-sm">Source</th><th>Changes</th></tr></thead>
+    <tbody>${h.data.map((x) => html`<tr><td class="nowrap ink2 shrink" title="Server's local time">${x.when}</td>
+      <td class="ink2 hide-sm">${x.source === 'unattended-upgrades' ? html`<span class="chip">automatic</span>` : html`<span class="mono small">${x.source || '–'}</span>`}</td>
+      <td>${x.packages.length ? html`<details><summary>${changeSummary(x.packages)}</summary><ul class="pkgs">${x.packages.map((c) => html`<li><span class="ink2">${c.action}</span> <span class="mono">${c.name}</span> <span class="mono muted">${c.version}</span></li>`)}</ul></details>` : changeSummary(x.packages)}</td></tr>`)}</tbody></table></div>`;
 }
 
 // The systemd timers that install updates for unattended-upgrades / dnf-automatic.
