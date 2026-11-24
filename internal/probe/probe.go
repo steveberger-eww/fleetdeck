@@ -720,6 +720,50 @@ func Sparks() (map[string][][3]any, error) {
 	return out, nil
 }
 
+// Totals is bytes in and out over the last Days days (30, or the metric retention if shorter).
+type Totals struct {
+	Rx   float64 `db:"rx" json:"rx"`
+	Tx   float64 `db:"tx" json:"tx"`
+	Days float64 `db:"-" json:"days"`
+}
+
+var traffic struct {
+	sync.Mutex
+	at  time.Time
+	out map[string]Totals
+}
+
+// Traffic adds up each server's stored per-second rates times the time since the previous sample, capped
+// at a minute: gaps while the probe was down count as zero, extra "Check now" probes don't double count.
+// ponytail: cached for 10 minutes (a 30-day total barely moves); a rolling window, not a billing month.
+func Traffic() (map[string]Totals, error) {
+	traffic.Lock()
+	defer traffic.Unlock()
+	if traffic.out != nil && time.Since(traffic.at) < 10*time.Minute {
+		return traffic.out, nil
+	}
+	days := min(30, num(db.Setting("retention_metrics_days", "30")))
+	if math.IsNaN(days) || days <= 0 {
+		days = 30
+	}
+	rows, err := db.Select[struct {
+		ServerID string `db:"server_id"`
+		Totals
+	}](`SELECT server_id, COALESCE(SUM(rx * dt), 0) / 1000.0 AS rx, COALESCE(SUM(tx * dt), 0) / 1000.0 AS tx FROM (
+      SELECT server_id, rx, tx, MIN(COALESCE(t - LAG(t) OVER (PARTITION BY server_id ORDER BY t), 60000), 60000) AS dt
+      FROM metrics WHERE t >= ?) GROUP BY server_id`, db.Now()-int64(days*864e5))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]Totals{}
+	for _, r := range rows {
+		r.Days = days
+		out[r.ServerID] = r.Totals
+	}
+	traffic.at, traffic.out = time.Now(), out
+	return out, nil
+}
+
 func pollAll() {
 	list, err := db.Select[db.Server](`SELECT * FROM servers WHERE paused = 0`)
 	if err != nil {

@@ -1,7 +1,7 @@
 import {
   html, useState, useEffect, useRef, useMemo, api, go, store, useStore, useLoad, useQuery, useHold, serversStore, refreshServers, toast, confirmBox,
   Btn, Th, useSort, StatusChip, LineChart, Empty, Modal, Footer, Field, Loading, ErrorNote, Output, Icon, Copy, Menu, CellBar,
-  bytes, rate, pct, ago, dur, uptime, when, logTime, level, eol,
+  bytes, rate, pct, ago, dur, uptime, when, logTime, level, eol, traffic,
 } from '../ui.js';
 import { ServerForm, serverBody, PRIV_TEXT } from './overview.js';
 import { JobsTable, openRun, confirmRun } from './jobs.js';
@@ -118,7 +118,7 @@ function OverviewTab({ s }) {
     <div class="charts">
       <${LineChart} sync=${sync} title="CPU" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'cpu', label: 'CPU', color: 'var(--s1)' }]} current=${n && `${pct(n.cpu)} of ${n.cores} cores`} />
       <${LineChart} sync=${sync} title="Memory" data=${m.data} yMax=${1} fmt=${P} series=${[{ key: 'mem', label: 'Memory', color: 'var(--s1)' }, { key: 'swap', label: 'Swap', color: 'var(--s2)' }]} current=${n && `${bytes(n.memUsed)} of ${bytes(n.memTotal)}`} />
-      <${LineChart} sync=${sync} title="Network" data=${m.data} fmt=${(v) => rate(v)} series=${[{ key: 'rx', label: 'In', color: 'var(--s1)' }, { key: 'tx', label: 'Out', color: 'var(--s2)' }]} />
+      <${LineChart} sync=${sync} title="Network" data=${m.data} fmt=${(v) => rate(v)} series=${[{ key: 'rx', label: 'In', color: 'var(--s1)' }, { key: 'tx', label: 'Out', color: 'var(--s2)' }]} current=${traffic(s.traffic)} />
       <${LineChart} sync=${sync} title="Disk I/O" data=${m.data} fmt=${(v) => rate(v)} series=${[{ key: 'dr', label: 'Read', color: 'var(--s1)' }, { key: 'dw', label: 'Write', color: 'var(--s2)' }]} />
       <${LineChart} sync=${sync} title="Load (1 min)" data=${m.data} fmt=${(v) => v.toFixed(v < 10 ? 1 : 0)} series=${[{ key: 'load1', label: 'Load', color: 'var(--s1)' }]} current=${n && `${n.load.map((l) => l.toFixed(2)).join(', ')}`} />
       ${hasTemp && html`<${LineChart} sync=${sync} title="Temperature" data=${m.data} fmt=${(v) => `${Math.round(v)}°`} series=${[{ key: 'temp', label: 'Temperature', color: 'var(--s1)' }]} current=${n?.temp != null && `${Math.round(n.temp)} °C`} />`}

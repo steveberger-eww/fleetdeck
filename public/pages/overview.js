@@ -1,6 +1,6 @@
 import {
   html, useState, useMemo, api, go, useStore, useLoad, useQuery, setQuery, useDirty, serversStore, runningStore, refreshServers,
-  Btn, Lamp, Gauge, Spark, Empty, Field, Modal, Footer, Copy, Loading, JobChip, Icon, bytes, rate, ago, uptime, plural, eol,
+  Btn, Lamp, Gauge, Spark, Empty, Field, Modal, Footer, Copy, Loading, JobChip, Icon, bytes, rate, traffic, ago, uptime, plural, eol,
   flagList, byAttention, compare,
 } from '../ui.js';
 import { openRun, confirmRun } from './jobs.js';
@@ -30,7 +30,7 @@ function Unit({ s, selected, onSelect }) {
     <div class="gauge-col"><${Gauge} label="CPU" value=${n?.cpu} /><${Spark} points=${s.spark} idx=${1} /></div>
     <div><${Gauge} label="Memory" value=${n?.mem} sub=${n ? `${bytes(n.memUsed)} of ${bytes(n.memTotal)}` : ''} /></div>
     <div class="hide-md"><${Gauge} label="Disk" value=${root?.pct} sub=${root ? `${bytes(root.used)} of ${bytes(root.size)}` : ''} /></div>
-    <div class="hide-md small ink2"><div>In ${rate(n?.rx)}</div><div>Out ${rate(n?.tx)}</div></div>
+    <div class="hide-md small ink2" title=${traffic(s.traffic) || null}><div>In ${rate(n?.rx)}</div><div>Out ${rate(n?.tx)}</div>${s.traffic && html`<div class="muted nowrap">${bytes(s.traffic.rx + s.traffic.tx)} / ${s.traffic.days} d</div>`}</div>
     <div class="flags"><${Flags} s=${s} max=${MAX_FLAGS} /></div>
   </div>`;
 }

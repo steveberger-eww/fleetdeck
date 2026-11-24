@@ -263,6 +263,7 @@ type serverOut struct {
 	Alerts          int               `json:"alerts"`
 	Firing          []firing          `json:"firing"`
 	Spark           any               `json:"spark,omitempty"`
+	Traffic         *probe.Totals     `json:"traffic,omitempty"`
 }
 
 func serverView(s *db.Server, spark any) (*serverOut, error) {
@@ -747,6 +748,10 @@ func (s *Server) serverRoutes() {
 		if err != nil {
 			return nil, err
 		}
+		tr, err := probe.Traffic()
+		if err != nil {
+			return nil, err
+		}
 		list, err := db.Select[db.Server](`SELECT * FROM servers ORDER BY name COLLATE NOCASE`)
 		if err != nil {
 			return nil, err
@@ -759,6 +764,9 @@ func (s *Server) serverRoutes() {
 			}
 			if out[i], err = serverView(&list[i], spark); err != nil {
 				return nil, err
+			}
+			if t, ok := tr[list[i].ID]; ok {
+				out[i].Traffic = &t
 			}
 		}
 		return out, nil

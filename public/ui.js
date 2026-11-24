@@ -104,6 +104,7 @@ export function bytes(n, d = 1) {
   return `${n.toFixed(n >= 100 ? 0 : d)} ${u[i]}`;
 }
 export const rate = (n) => (n == null ? '–' : `${bytes(n)}/s`);
+export const traffic = (t) => t && `↓ ${bytes(t.rx)} ↑ ${bytes(t.tx)}, last ${t.days} days`;
 export function ago(t) {
   if (!t) return 'never';
   const s = Math.round((Date.now() - t) / 1000);
