@@ -651,7 +651,7 @@ type PlaybookOpts struct {
 	RepoID, Playbook string
 	Servers          []db.Server
 	Become           bool
-	Vars             map[string]string
+	Vars             map[string]any // extra vars; checkbox parameters are real booleans
 	Check            bool
 	OnData           func(string)
 }
@@ -776,7 +776,7 @@ func RunPlaybook(ctx context.Context, o PlaybookOpts) (*PlaybookResult, error) {
 	inv, _ := json.Marshal(map[string]any{"all": map[string]any{"hosts": hosts, "children": groups, "vars": map[string]bool{"ansible_become": o.Become}}})
 	vars := o.Vars
 	if vars == nil {
-		vars = map[string]string{}
+		vars = map[string]any{}
 	}
 	varsJSON, _ := json.Marshal(vars)
 	for name, data := range map[string][]byte{"known_hosts": []byte(strings.Join(known, "\n") + "\n"), "inventory.yml": inv, "vars.json": varsJSON} {

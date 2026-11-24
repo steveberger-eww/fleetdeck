@@ -161,7 +161,12 @@ func scriptInput(b obj) jobs.ScriptInput {
 		if v := p["default"]; v != nil {
 			def = jsString(v)
 		}
-		in.Params = append(in.Params, jobs.Param{Name: obj(p).str("name"), Label: obj(p).str("label"), Default: def, Required: truthy(p["required"])})
+		q := jobs.Param{Name: obj(p).str("name"), Label: obj(p).str("label"), Default: def, Required: truthy(p["required"]), Type: obj(p).str("type")}
+		opts, _ := p["options"].([]any)
+		for _, o := range opts {
+			q.Options = append(q.Options, jsString(o))
+		}
+		in.Params = append(in.Params, q)
 	}
 	vs, _ := b["vars"].([]any)
 	for _, v := range vs {
@@ -1471,17 +1476,15 @@ func (s *Server) jobRoutes() {
 			if sc == nil || err != nil {
 				return nil, cmpErr(err, notFound("Script"))
 			}
-			params := jobs.Values{}
-			given := b.obj("params")
-			for _, p := range sc.Params {
-				v := p.Default
-				if x := given[p.Name]; x != nil {
-					v = jsString(x)
+			given := jobs.Values{}
+			for k, x := range b.obj("params") {
+				if x != nil {
+					given[k] = jsString(x)
 				}
-				if p.Required && strings.TrimSpace(v) == "" {
-					return nil, httperr.Bad(fmt.Sprintf(`"%s" is required`, p.Label))
-				}
-				params[p.Name] = v
+			}
+			params, err := sc.Resolve(given)
+			if err != nil {
+				return nil, err
 			}
 			spec = jobs.SpecFromScript(sc, params, b.obj("options").truthy("check"))
 		} else {

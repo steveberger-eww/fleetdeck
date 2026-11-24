@@ -1,6 +1,6 @@
 import {
   html, useState, useEffect, useRef, useMemo, api, go, store, useStore, useLoad, useQuery, useHold, serversStore, refreshServers, toast, confirmBox,
-  Btn, Th, useSort, StatusChip, LineChart, Empty, Modal, Footer, Field, Loading, ErrorNote, Output, Icon, Copy, Menu, CellBar,
+  Btn, Th, useSort, StatusChip, LineChart, Empty, Modal, Footer, Field, ParamInput, Loading, ErrorNote, Output, Icon, Copy, Menu, CellBar,
   bytes, rate, pct, ago, dur, uptime, when, logTime, level, eol, traffic,
 } from '../ui.js';
 import { ServerForm, serverBody, PRIV_TEXT } from './overview.js';
@@ -261,7 +261,7 @@ function ScheduleRun({ s, scriptId = 'update', onClose }) {
   return html`<${Modal} title=${`Run later on ${s.name}`} onClose=${onClose}
     footer=${html`<${Footer} onClose=${onClose} onSave=${save} label="Schedule" disabled=${!runAt || !script} />`}>
     <${Field} label="Script">${scripts.loading ? html`<${Loading} />` : html`<select value=${v.script_id} onChange=${(e) => setV({ ...v, script_id: e.target.value, params: {} })}>${scripts.data.map((x) => html`<option value=${x.id}>${x.name}</option>`)}</select>`}</${Field}>
-    ${script?.params.map((p) => html`<${Field} label=${p.label}><input class="mono" value=${v.params[p.name] ?? p.default} onInput=${(e) => setV({ ...v, params: { ...v.params, [p.name]: e.target.value } })} /></${Field}>`)}
+    ${script?.params.map((p) => html`<${ParamInput} p=${p} value=${v.params[p.name] ?? p.default} onChange=${(x) => setV({ ...v, params: { ...v.params, [p.name]: x } })} />`)}
     <div class="seg" role="group" aria-label="When">${[['at', 'At a time'], ['in', 'In some hours']].map(([k, l]) => html`<button type="button" aria-pressed=${v.mode === k} onClick=${() => setV({ ...v, mode: k })}>${l}</button>`)}</div>
     ${v.mode === 'at'
       ? html`<${Field} label="Time (24-hour)" hint="Today, or tomorrow if that time has passed"><input class="mono" inputmode="numeric" placeholder="22:00" value=${v.time} onInput=${(e) => setV({ ...v, time: e.target.value })} autofocus /></${Field}>`

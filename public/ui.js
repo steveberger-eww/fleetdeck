@@ -202,7 +202,7 @@ const ICONS = {
   stop: 'M7 7h10v10H7z', git: 'M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9', trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3', edit: 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4',
   more: 'M5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
   power: 'M12 3v8M6.3 6.3a8 8 0 1 0 11.4 0', mute: 'M6 16v-5a6 6 0 0 1 9.5-4.9M18 11v5l2 2H8M10 21h4M3 3l18 18',
-  full: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', warn: 'M12 3 2 20h20zM12 10v4M12 17h.01', download: 'M12 4v11M7 10l5 5 5-5M5 20h14', chev: 'M6 9l6 6 6-6',
+  full: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', warn: 'M12 3 2 20h20zM12 10v4M12 17h.01', download: 'M12 4v11M7 10l5 5 5-5M5 20h14', chev: 'M6 9l6 6 6-6', up: 'M6 15l6-6 6 6',
 };
 export const Icon = ({ name, size = 16 }) => html`<svg width=${size} height=${size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=${ICONS[name]} /></svg>`;
 
@@ -438,6 +438,12 @@ export const Footer = ({ onClose, onSave, label, disabled }) => html`<button cla
 
 export const Empty = ({ title, children, action }) => html`<div class="empty"><h3>${title}</h3>${children && html`<p>${children}</p>`}${action}</div>`;
 export const Field = ({ label, hint, children }) => html`<label class="field"><span>${label}</span>${children}${hint && html`<span class="hint">${hint}</span>`}</label>`;
+// A script parameter's input by type. Values are strings; a checkbox is 'true' or 'false'.
+export const ParamInput = ({ p, value, onChange, hint }) => (p.type === 'checkbox'
+  ? html`<div class="field"><label class="check"><input type="checkbox" checked=${value === 'true'} onChange=${(e) => onChange(String(e.target.checked))} />${p.label}</label>${hint && html`<span class="hint">${hint}</span>`}</div>`
+  : html`<${Field} label=${p.label} hint=${hint}>${p.type === 'choice'
+    ? html`<select value=${value} onChange=${(e) => onChange(e.target.value)}>${p.options.map((o) => html`<option value=${o}>${o}</option>`)}</select>`
+    : html`<input class="mono" value=${value} required=${p.required} onInput=${(e) => onChange(e.target.value)} />`}</${Field}>`);
 export const Loading = () => html`<div class="stack" style=${{ padding: '16px' }}><div class="skel" style=${{ width: '60%' }} /><div class="skel" /><div class="skel" style=${{ width: '80%' }} /></div>`;
 export const ErrorNote = ({ error, retry }) => html`<div class="alert-bar"><span class="grow">${error}</span>${retry && html`<button class="btn sm" onClick=${() => retry()}>Try again</button>`}</div>`;
 

@@ -141,6 +141,17 @@ func TestAPISmoke(t *testing.T) {
 	if code != 200 || m["once"] != true {
 		t.Fatalf("one-off merge: %d %v", code, m)
 	}
+	code, typed, _ := call("POST", "/api/scripts", `{"name":"Typed","body":"echo","params":[{"name":"ENV","type":"choice","options":["dev"," prod ","dev"]},{"name":"DRY","type":"checkbox","default":"yes"}]}`)
+	expect(code, 200, typed, "create typed script")
+	if p := typed["params"].([]any); p[0].(map[string]any)["default"] != "dev" || len(p[0].(map[string]any)["options"].([]any)) != 2 || p[1].(map[string]any)["default"] != "false" {
+		t.Fatalf("typed params: %v", p)
+	}
+	code, m, _ = call("POST", "/api/jobs", `{"script_id":"`+typed["id"].(string)+`","params":{"ENV":"staging"},"targets":{"all":true}}`)
+	if code != 400 || m["error"] != `"ENV" must be one of: dev, prod` {
+		t.Fatalf("bad choice: %d %v", code, m)
+	}
+	code, m, _ = call("POST", "/api/schedules", `{"name":"x","script_id":"`+typed["id"].(string)+`","cron":"0 3 * * *","params":{"DRY":"maybe"},"targets":{"all":true}}`)
+	expect(code, 400, m, "bad checkbox on a schedule")
 	code, rule, _ := call("POST", "/api/alerts/rules", `{"metric":"cpu","threshold":"85","minutes":5,"server_id":"`+server["id"].(string)+`"}`)
 	expect(code, 200, rule, "create rule")
 	if rule["server_name"] != "web1" || rule["enabled"] != true || rule["threshold"] != 85.0 {

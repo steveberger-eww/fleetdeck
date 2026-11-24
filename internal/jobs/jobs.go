@@ -63,10 +63,40 @@ func jsonValue(v any) (driver.Value, error) {
 
 // Param is a script parameter definition.
 type Param struct {
-	Name     string `json:"name"`
-	Label    string `json:"label"`
-	Default  string `json:"default"`
-	Required bool   `json:"required"`
+	Name     string   `json:"name"`
+	Label    string   `json:"label"`
+	Default  string   `json:"default"`
+	Required bool     `json:"required"`
+	Type     string   `json:"type,omitempty"`    // "" (text) | checkbox | choice
+	Options  []string `json:"options,omitempty"` // choice only
+}
+
+// Resolve checks values for a script's parameters, filling in defaults for missing ones. Only declared
+// parameters are returned. A checkbox is "true" or "false"; a choice must be one of its options.
+func (sc *Script) Resolve(given Values) (Values, error) {
+	out := Values{}
+	for _, p := range sc.Params {
+		v, ok := given[p.Name]
+		if !ok {
+			v = p.Default
+		}
+		switch p.Type {
+		case "checkbox":
+			if v != "true" && v != "false" {
+				return nil, httperr.Bad(fmt.Sprintf(`"%s" must be true or false`, p.Label))
+			}
+		case "choice":
+			if !slices.Contains(p.Options, v) {
+				return nil, httperr.Bad(fmt.Sprintf(`"%s" must be one of: %s`, p.Label, strings.Join(p.Options, ", ")))
+			}
+		default:
+			if p.Required && strings.TrimSpace(v) == "" {
+				return nil, httperr.Bad(fmt.Sprintf(`"%s" is required`, p.Label))
+			}
+		}
+		out[p.Name] = v
+	}
+	return out, nil
 }
 
 // Params is the scripts.params column.
@@ -253,7 +283,31 @@ func ValidateScript(b ScriptInput) (*ScriptFields, error) {
 		if !identRE.MatchString(n) {
 			return nil, httperr.Bad(fmt.Sprintf("invalid parameter name \"%s\" (use letters, digits, underscore)", n))
 		}
-		out.Params = append(out.Params, Param{Name: n, Label: truncate(cmp.Or(p.Label, n), 100), Default: truncate(p.Default, 10_000), Required: p.Required})
+		q := Param{Name: n, Label: truncate(cmp.Or(p.Label, n), 100), Default: truncate(p.Default, 10_000), Required: p.Required}
+		switch p.Type {
+		case "", "text":
+		case "checkbox":
+			q.Type, q.Required = p.Type, false
+			if q.Default != "true" {
+				q.Default = "false"
+			}
+		case "choice":
+			q.Type = p.Type
+			for _, o := range p.Options {
+				if o = truncate(strings.TrimSpace(o), 100); o != "" && !slices.Contains(q.Options, o) {
+					q.Options = append(q.Options, o)
+				}
+			}
+			if len(q.Options) == 0 || len(q.Options) > 50 {
+				return nil, httperr.Bad(fmt.Sprintf(`"%s" needs 1-50 choices`, q.Label))
+			}
+			if !slices.Contains(q.Options, q.Default) {
+				q.Default = q.Options[0]
+			}
+		default:
+			return nil, httperr.Bad("unknown parameter type " + p.Type)
+		}
+		out.Params = append(out.Params, q)
 	}
 	return out, nil
 }
@@ -541,6 +595,28 @@ func StartJob(sp Spec) (int64, error) {
 	if sp.Kind == "ansible" {
 		return startAnsibleJob(sp, servers, merged, mask)
 	}
+	return startShellJob(sp, servers, merged, mask)
+}
+
+// ansibleVars types checkbox parameters as booleans; everything else stays a string.
+func ansibleVars(scriptID string, vars map[string]string) (map[string]any, error) {
+	out := map[string]any{}
+	for k, v := range vars {
+		out[k] = v
+	}
+	sc, err := GetScript(scriptID) // also for re-runs, which only have the stored string values
+	if sc == nil || err != nil {
+		return out, err
+	}
+	for _, p := range sc.Params {
+		if v, ok := vars[p.Name]; ok && p.Type == "checkbox" {
+			out[p.Name] = v == "true"
+		}
+	}
+	return out, nil
+}
+
+func startShellJob(sp Spec, servers []db.Server, merged Values, mask func(string) string) (int64, error) {
 	var prelude strings.Builder
 	for _, k := range slices.Sorted(maps.Keys(merged)) {
 		if !envName.MatchString(k) {
@@ -679,7 +755,11 @@ func finishJob(jobID int64, j *liveJob, name, actor string) {
 	}
 }
 
-func startAnsibleJob(sp Spec, servers []db.Server, vars map[string]string, mask func(string) string) (int64, error) {
+func startAnsibleJob(sp Spec, servers []db.Server, plain map[string]string, mask func(string) string) (int64, error) {
+	vars, err := ansibleVars(sp.ScriptID, plain)
+	if err != nil {
+		return 0, err
+	}
 	jobID, err := insertJob(sp, servers, true)
 	if err != nil {
 		return 0, err
@@ -1156,12 +1236,18 @@ func ValidateSchedule(b ScheduleInput, withCron bool) (*ScheduleFields, error) {
 	if name == "" || jsLen(name) > 100 {
 		return nil, httperr.Bad("name required")
 	}
-	if ok, err := exists(`SELECT 1 FROM scripts WHERE id = ?`, b.ScriptID); err != nil || !ok {
+	sc, err := GetScript(b.ScriptID)
+	if sc == nil || err != nil {
 		return nil, cmp.Or(err, httperr.Bad("unknown script"))
 	}
-	out := &ScheduleFields{Name: name, ScriptID: b.ScriptID, Params: b.Params, Enabled: 1}
-	if out.Params == nil {
-		out.Params = Values{}
+	out := &ScheduleFields{Name: name, ScriptID: b.ScriptID, Params: Values{}, Enabled: 1}
+	for k, v := range b.Params { // empty means "use the default", now and when the script's default changes
+		if v != "" && slices.ContainsFunc(sc.Params, func(p Param) bool { return p.Name == k }) {
+			out.Params[k] = v
+		}
+	}
+	if _, err := sc.Resolve(out.Params); err != nil {
+		return nil, err
 	}
 	if b.RunAt != nil && withCron {
 		// Cron in the Fleetdeck host's time zone, so the browser's zone doesn't matter.
@@ -1237,11 +1323,16 @@ func runSaved(table, id, name, scriptID string, params Values, targets Targets, 
 	if script == nil {
 		return 0, errors.New("unknown script")
 	}
-	merged := Values{}
-	for _, p := range script.Params {
-		merged[p.Name] = p.Default
+	given := Values{}
+	for k, v := range params {
+		if v != "" { // saved before empty values were dropped: fall back to the default
+			given[k] = v
+		}
 	}
-	maps.Copy(merged, params)
+	merged, err := script.Resolve(given)
+	if err != nil {
+		return 0, err
+	}
 	sp := SpecFromScript(script, merged, false)
 	sp.Name, sp.Targets, sp.Actor = script.Name+" · "+name, targets, actor
 	jobID, err := StartJob(sp)

@@ -1,6 +1,6 @@
 import {
   html, useState, useEffect, api, go, useStore, useLoad, useDirty, serversStore, toast, confirmBox,
-  Btn, Th, useSort, Empty, Field, Modal, Footer, Loading, ErrorNote, Copy, ago, when,
+  Btn, Th, useSort, Empty, Field, ParamInput, Modal, Footer, Loading, ErrorNote, Copy, ago, when,
 } from '../ui.js';
 import { openRun, TargetPicker, confirmRun, resolveTargets } from './jobs.js';
 
@@ -57,6 +57,8 @@ function ScriptDialog({ script, onClose, onSaved }) {
   const [err, setErr] = useState('');
   const set = (k) => (e) => setV({ ...v, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
   const setParam = (i, k, val) => setV({ ...v, params: v.params.map((p, j) => (j === i ? { ...p, [k]: val } : p)) });
+  const moveParam = (i, d) => { const ps = [...v.params]; [ps[i], ps[i + d]] = [ps[i + d], ps[i]]; setV({ ...v, params: ps }); };
+  const setType = (i, type) => setV({ ...v, params: v.params.map((p, j) => (j === i ? { ...p, type, default: type === 'checkbox' ? 'false' : '' } : p)) });
   const save = async () => {
     setErr('');
     try {
@@ -88,12 +90,16 @@ function ScriptDialog({ script, onClose, onSaved }) {
       <textarea class="tall" spellcheck="false" value=${v.body} onInput=${set('body')} onKeyDown=${tabIndent((body) => setV({ ...v, body }))} onKeyUp=${escapeTab} /></${Field}>
     <label class="check"><input type="checkbox" checked=${v.as_root} onChange=${set('as_root')} />Run as root (via sudo when the SSH user isn't root)</label>`}
     <div class="field"><span>${ansible ? 'Extra variables' : 'Parameters'}</span>
-      ${v.params.map((p, i) => html`<div class="row nw">
-        <input class="mono" placeholder=${ansible ? 'name' : 'NAME'} value=${p.name} onInput=${(e) => setParam(i, 'name', ansible ? e.target.value : e.target.value.toUpperCase())} aria-label="Variable name" />
-        <input placeholder="Label" value=${p.label} onInput=${(e) => setParam(i, 'label', e.target.value)} class="grow" aria-label="Label" />
-        <input placeholder="Default" value=${p.default} onInput=${(e) => setParam(i, 'default', e.target.value)} class="grow" aria-label="Default value" />
-        <label class="check small nowrap"><input type="checkbox" checked=${p.required} onChange=${(e) => setParam(i, 'required', e.target.checked)} />Required</label>
-        <${Btn} size="sm" kind="ghost" icon="x" title="Remove parameter" onClick=${() => setV({ ...v, params: v.params.filter((_, j) => j !== i) })} />
+      ${v.params.map((p, i) => html`<div class="param-row">
+        <div class="row nw">
+          <input class="mono" placeholder=${ansible ? 'name' : 'NAME'} value=${p.name} onInput=${(e) => setParam(i, 'name', ansible ? e.target.value : e.target.value.toUpperCase())} aria-label="Variable name" />
+          <input placeholder="Label" value=${p.label} onInput=${(e) => setParam(i, 'label', e.target.value)} class="grow" aria-label="Label" />
+          <select value=${p.type || 'text'} onChange=${(e) => setType(i, e.target.value)} aria-label="Type"><option value="text">Text</option><option value="checkbox">Checkbox</option><option value="choice">Choice</option></select>
+          <${Btn} size="sm" kind="ghost" icon="up" title="Move up" disabled=${i === 0} onClick=${() => moveParam(i, -1)} />
+          <${Btn} size="sm" kind="ghost" icon="chev" title="Move down" disabled=${i === v.params.length - 1} onClick=${() => moveParam(i, 1)} />
+          <${Btn} size="sm" kind="ghost" icon="x" title="Remove parameter" onClick=${() => setV({ ...v, params: v.params.filter((_, j) => j !== i) })} />
+        </div>
+        <div class="row nw"><${ParamDefault} p=${p} set=${(k, x) => setParam(i, k, x)} /></div>
       </div>`)}
       <div><${Btn} size="sm" icon="plus" onClick=${() => setV({ ...v, params: [...v.params, { name: '', label: '', default: '', required: false }] })}>Add parameter</${Btn}></div>
     </div>
@@ -199,6 +205,18 @@ function WebhooksPanel({ servers }) {
   </section>`;
 }
 
+// The default (and choices) of one parameter in the script editor.
+function ParamDefault({ p, set }) {
+  if (p.type === 'checkbox') return html`<label class="check small nowrap"><input type="checkbox" checked=${p.default === 'true'} onChange=${(e) => set('default', String(e.target.checked))} />On by default</label>`;
+  if (p.type === 'choice') {
+    const opts = (p.options || []).map((o) => o.trim()).filter(Boolean);
+    return html`<input placeholder="Choices, comma-separated" value=${(p.options || []).join(',')} onInput=${(e) => set('options', e.target.value.split(','))} class="grow" aria-label="Choices" />
+      <select value=${p.default} onChange=${(e) => set('default', e.target.value)} aria-label="Default choice">${opts.map((o) => html`<option value=${o}>${o}</option>`)}</select>`;
+  }
+  return html`<input placeholder="Default" value=${p.default} onInput=${(e) => set('default', e.target.value)} class="grow" aria-label="Default value" />
+    <label class="check small nowrap"><input type="checkbox" checked=${p.required} onChange=${(e) => set('required', e.target.checked)} />Required</label>`;
+}
+
 const PRESETS = [['Every hour', '0 * * * *'], ['Daily at 04:00', '0 4 * * *'], ['Sundays at 03:00', '0 3 * * 0'], ['Weekdays at 09:00', '0 9 * * 1-5'], ['1st of the month', '0 5 1 * *']];
 const cronLabel = (c) => PRESETS.find(([, x]) => x === c.trim())?.[0];
 
@@ -230,7 +248,7 @@ function ScheduleDialog({ schedule, onClose, onSaved, webhook }) {
       <${Field} label="Name"><input value=${v.name} onInput=${(e) => setV({ ...v, name: e.target.value })} autofocus /></${Field}>
       <${Field} label="Script">${scripts.loading ? html`<${Loading} />` : html`<select value=${v.script_id} onChange=${(e) => setV({ ...v, script_id: e.target.value, params: {} })}>${scripts.data.map((s) => html`<option value=${s.id}>${s.name}</option>`)}</select>`}</${Field}>
     </div>
-    ${script?.params.map((p) => html`<${Field} label=${p.label}><input class="mono" value=${v.params[p.name] ?? p.default} onInput=${(e) => setV({ ...v, params: { ...v.params, [p.name]: e.target.value } })} /></${Field}>`)}
+    ${script?.params.map((p) => html`<${ParamInput} p=${p} value=${v.params[p.name] ?? p.default} onChange=${(x) => setV({ ...v, params: { ...v.params, [p.name]: x } })} />`)}
     ${!webhook && html`<${Field} label="When" hint="Cron format: minute hour day-of-month month day-of-week">
       <input class="mono" value=${v.cron} onInput=${(e) => setV({ ...v, cron: e.target.value })} />
     </${Field}>

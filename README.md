@@ -11,7 +11,7 @@ Monitoring, one-click maintenance and day-to-day administration in one place, al
 ![SQLite](https://img.shields.io/badge/SQLite-embedded-003B57?logo=sqlite&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
 
-[Features](#features) · [Getting started](#getting-started) · [Adding a server](#adding-a-server) · [Ansible](#ansible-playbooks-from-git) · [Security](#security-model) · [How it works](#how-it-works)
+[Features](#features) · [Getting started](#getting-started) · [Adding a server](#adding-a-server) · [Monitoring](#monitoring-and-alerts) · [Ansible](#ansible-playbooks-from-git) · [Security](#security-model) · [How it works](#how-it-works)
 
 </div>
 
@@ -21,9 +21,9 @@ Fleetdeck combines the core ideas of three projects in a single binary:
 
 | Inspired by | In Fleetdeck |
 |---|---|
-| **Beszel** | Per-minute metrics (CPU, memory, swap, disk, disk I/O, network, load, temperature) with 30 days of history. Per-interface traffic, Docker containers with health and history, S.M.A.R.T. disk health. Alert rules for all servers, a tag or one server (disk and inode rules can watch one mount), sent via ntfy, Pushover, Discord, Slack, Telegram, Gotify or a webhook. Quiet hours and maintenance windows. |
-| **Semaphore** | Script library with parameters and encrypted shared variables. Run on servers, tags or everything. Jobs stream live, keep their output and can be cancelled or re-run (all hosts or failed only). Cron schedules, webhook URLs, an encrypted SSH key store, and **Git repositories with Ansible playbooks** (dry runs, per-host results). |
-| **Cockpit** | Per-server pages: package updates, services running replaced code, automatic updates, systemd services and timers, journal, processes, containers, a network tab (open ports checked against the real firewall, incl. Docker ports that bypass ufw, one-click [ufw-docker](https://github.com/chaifeng/ufw-docker)), a web terminal and system info. Every authorized SSH key across the fleet, with one-click removal. |
+| **Beszel** | Per-minute metrics (CPU, memory, swap, disk and inodes per mount, disk I/O, network, load, temperature) with 30 days of history. Per-interface traffic and 30-day traffic totals, Docker containers with health and history, S.M.A.R.T. disk health. Alert rules for all servers, a tag or one server (disk and inode rules can watch one mount), sent via ntfy, Pushover, Discord, Slack, Telegram, Gotify or a webhook. Quiet hours and maintenance windows. |
+| **Semaphore** | Script library with parameters (text, checkbox, choice) and encrypted shared variables. Run on servers, tags or everything. Jobs stream live, keep their output and can be cancelled or re-run (all hosts or failed only). Cron schedules, webhook URLs, an encrypted SSH key store, and **Git repositories with Ansible playbooks** (dry runs, per-host results). |
+| **Cockpit** | Per-server pages: package updates with install history, an OS end-of-life warning, services running replaced code, automatic updates, systemd services and timers, journal, processes, containers, a network tab (open ports checked against the real firewall, incl. Docker ports that bypass ufw, one-click [ufw-docker](https://github.com/chaifeng/ufw-docker)), a web terminal and system info. Every authorized SSH key across the fleet, with one-click removal. |
 
 ## Getting started
 
@@ -77,6 +77,18 @@ Single sign-on (authentik, Keycloak, any OpenID Connect provider) is set up in t
   or enter the sudo password in the server's Settings. It's stored encrypted, sent only over the SSH session's stdin (never on a command line), tried once per change so it can't trigger a lockout, and passed to Ansible as `ansible_become_password`.
 - **Disk health** needs `smartmontools` and root or sudo. The server page offers to install it on physical machines. Checks run every 30 minutes and never wake a sleeping disk.
 
+## Monitoring and alerts
+
+Every server is probed once a minute over its pooled SSH connection. New installs start with three rules: unreachable for 2 minutes, disk above 90 % and memory above 90 % for 10 minutes.
+
+- **Disk and inode rules** watch the fullest mount by default, or one mount such as `/data`. If that mount disappears, the rule stays quiet and shows **Mount not found** in the rule list.
+- **Traffic totals** next to the Network chart (and on the Overview) add up the last 30 days, or the retention period if it's shorter. Time when the probe was down counts as zero.
+- **OS end of life:** the server header shows an amber chip in the last six months of security support, and a red one after it ends. The Overview shows a warning icon. Covers Debian (LTS), Ubuntu (standard support), RHEL, Alma, Rocky and Fedora.
+- **Update history** lives in the server's Updates panel: the last 30 apt or dnf transactions, with what was installed, upgraded or removed and whether unattended-upgrades did it.
+
+> [!NOTE]
+> End-of-life dates are built into Fleetdeck (nothing is looked up online), so a release older than your Fleetdeck version may be missing. Unknown releases show nothing.
+
 ## Ansible playbooks from Git
 
 1. **Repositories → Add repository.** Public HTTPS, private SSH with a deploy key from the key store, or HTTPS with an access token.
@@ -91,8 +103,9 @@ Each run pulls the latest commit (recorded on the job), installs `collections/re
 > [!WARNING]
 > Playbooks run on the Fleetdeck host and can execute commands there. Only add repositories you control. Fleetdeck limits the exposure: playbooks get a minimal environment without `FLEETDECK_SECRET`, decrypted keys live in a private temp folder that is wiped after each run, and Git hooks, `file://`/`ext::` transports and submodules are disabled.
 
-## Variables and webhooks
+## Parameters, variables and webhooks
 
+- **Parameters** are text, a checkbox or a choice from a list, and can be reordered in the script editor. Shell scripts get them as environment variables (a checkbox is `true`/`false`), playbooks as extra variables (a checkbox is a real boolean). Values are checked on the server, so an API call with a choice that isn't in the list gets HTTP 400. Schedules and webhooks use the script's default for any value left empty.
 - **Variables** hold values several scripts need, such as an API token. They're stored encrypted, and a script only receives the ones you tick in it (environment variables for shell scripts, extra vars for playbooks). Secret values can't be viewed again and show up as `••••••` in job output.
 - **Webhooks** (on the Schedules page) give one script and a fixed set of servers a secret URL. A `POST` starts the job. Only the URL's hash is stored. If the previous run is still going, the call gets HTTP 409.
 
