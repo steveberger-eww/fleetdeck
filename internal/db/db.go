@@ -197,6 +197,19 @@ ALTER TABLE scripts ADD COLUMN IF NOT EXISTS next_when TEXT NOT NULL DEFAULT 'su
 ALTER TABLE scripts ADD COLUMN IF NOT EXISTS next_ok_only INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS parent_job BIGINT; -- the chain step that started this job
 CREATE INDEX IF NOT EXISTS jobs_parent ON jobs(parent_job);
+
+-- Endpoint checks, run from the Fleetdeck host every minute; listed in their server's Network tab.
+-- last_*: the latest result; failing_since: when the current run of failures began (NULL while it passes).
+CREATE TABLE IF NOT EXISTS checks (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, -- http: URL | tcp: host:port
+  expect_status INTEGER, contains TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, created_at BIGINT NOT NULL,
+  last_t BIGINT, last_ok INTEGER, last_ms BIGINT, last_error TEXT NOT NULL DEFAULT '', failing_since BIGINT, tls_days DOUBLE PRECISION);
+CREATE TABLE IF NOT EXISTS check_results (
+  check_id TEXT NOT NULL REFERENCES checks(id) ON DELETE CASCADE, t BIGINT NOT NULL, ok INTEGER NOT NULL, ms BIGINT,
+  PRIMARY KEY (check_id, t));
+CREATE INDEX IF NOT EXISTS check_results_t ON check_results(t);
 `
 
 // Open opens the Postgres database at url and creates or updates the schema. dataDir (created 0700) holds the files.
@@ -254,7 +267,7 @@ func OpenTest(dataDir string) error {
 		return err
 	}
 	// Test fixtures leave tenant_id out: in tests it defaults to the default organization.
-	for _, t := range []string{"keys", "repos", "servers", "jobs", "schedules", "triggers", "variables", "custom_metrics", "alert_rules", "notifiers", "mute_windows"} {
+	for _, t := range []string{"keys", "repos", "servers", "jobs", "schedules", "triggers", "variables", "custom_metrics", "alert_rules", "notifiers", "mute_windows", "checks"} {
 		if _, err := X.Exec("ALTER TABLE " + t + " ALTER COLUMN tenant_id SET DEFAULT '" + DefaultTenant + "'"); err != nil {
 			return err
 		}

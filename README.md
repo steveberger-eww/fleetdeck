@@ -105,6 +105,7 @@ Every server is probed once a minute over its pooled SSH connection. New install
   > Custom metric commands run with the probe's rights: **as root via `sudo -n`** where available. Anyone who can sign in to Fleetdeck can already run scripts as root, so this adds no new access, but treat the command like a script. Adding or changing one is recorded in the audit log.
 
 - **Proxmox VE:** on a host with `pvesh`, the Containers tab lists that node's VMs and LXC containers (on a cluster, each node shows only its own guests): state, CPU, memory, disk, uptime and history, with a link to the Proxmox web UI. It's read-only; start, stop and consoles stay in Proxmox. `pvesh` needs root, so the SSH user needs root or passwordless sudo.
+- **Endpoint checks** live in a server's Network tab: an HTTP(S) URL (expected status, optional "page must contain") or a TCP port, checked every minute from the Fleetdeck host with a 10-second timeout. HTTPS checks record how many days the certificate has left. Alert on them with the **Endpoint check failing** rule (fails for N minutes) and the **TLS certificate days left** rule (fires below N days). Checks never connect to the Fleetdeck host itself (loopback) or to link-local addresses such as cloud metadata; private networks are allowed.
 - **Update history** lives in the server's Updates panel: the last 30 apt or dnf transactions, with what was installed, upgraded or removed and whether unattended-upgrades did it.
 
 > [!NOTE]

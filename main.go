@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"fleetdeck/internal/alerts"
+	"fleetdeck/internal/checks"
 	"fleetdeck/internal/db"
 	"fleetdeck/internal/jobs"
 	"fleetdeck/internal/probe"
@@ -73,6 +74,7 @@ func run() error {
 	jobs.OnJobDone(alerts.OnJobDone)
 	ssh.Notify = alerts.Notify
 	probe.Start()
+	checks.Start()
 	go func() {
 		for range time.Tick(time.Hour) {
 			if _, err := db.Exec(`DELETE FROM sessions WHERE seen_at < ?`, db.Now()-web.SessionTTL.Milliseconds()); err != nil {

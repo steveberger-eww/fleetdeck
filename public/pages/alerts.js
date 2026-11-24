@@ -3,8 +3,9 @@ import {
   Btn, Th, useSort, Empty, Field, Modal, Footer, Loading, ErrorNote, ago, when,
 } from '../ui.js';
 
-const NEEDS_THRESHOLD = (m) => !['down', 'reboot'].includes(m);
-const HAS_DURATION = (m) => ['down', 'cpu', 'mem', 'swap', 'load', 'temp', 'net', 'gpu', 'custom'].includes(m);
+const NEEDS_THRESHOLD = (m) => !['down', 'reboot', 'check'].includes(m);
+const HAS_DURATION = (m) => ['down', 'check', 'cpu', 'mem', 'swap', 'load', 'temp', 'net', 'gpu', 'custom'].includes(m);
+const FOR_AT_LEAST = (m) => ['down', 'check'].includes(m); // minutes are a duration, not an average
 const unitOf = (u) => (!u ? '' : /^[%°]/.test(u) ? u : ` ${u}`);
 const HAS_MOUNT = (m) => ['disk', 'inodes'].includes(m);
 const inScope = (r, servers) => servers.filter((s) => (r.server_id ? s.id === r.server_id : !r.tag || s.tags.includes(r.tag)));
@@ -14,10 +15,11 @@ const mountMissing = (r, servers) => (r.mount ? inScope(r, servers).filter((s) =
 function ruleText(r, metrics) {
   const m = metrics[r.metric];
   if (r.metric === 'down') return `Unreachable for ${r.minutes} min`;
+  if (r.metric === 'check') return `Endpoint check failing for ${r.minutes} min`;
   if (r.metric === 'reboot') return 'Reboot required';
   if (r.metric === 'custom') return `${r.custom_name} above ${r.threshold}${unitOf(r.custom_unit)}${r.minutes ? ` for ${r.minutes} min` : ''}`;
   const label = r.mount ? `${m.label.replace(' (fullest mount)', '')} on ${r.mount}` : m.label;
-  return `${label} above ${r.threshold}${m.unit}${HAS_DURATION(r.metric) && r.minutes ? ` for ${r.minutes} min` : ''}`;
+  return `${label} ${m.below ? 'below' : 'above'} ${r.threshold}${m.unit}${HAS_DURATION(r.metric) && r.minutes ? ` for ${r.minutes} min` : ''}`;
 }
 
 export function AlertsPage() {
@@ -175,8 +177,8 @@ function RuleDialog({ rule, metrics, custom, onClose, onSaved }) {
     ${v.metric === 'custom' && html`<${Field} label="Custom metric" hint=${!custom.length ? "Add one in a server's Metrics panel first." : null}><select value=${v.custom_id} onChange=${(e) => setV({ ...v, custom_id: e.target.value })}>
       ${custom.map((c) => html`<option value=${c.id}>${c.name}${c.unit ? ` (${c.unit})` : ''}</option>`)}</select></${Field}>`}
     <div class="cols">
-      ${NEEDS_THRESHOLD(v.metric) && html`<${Field} label=${`Is above${m.unit ? ` (${m.unit})` : ''}`}><input type="number" min="0" step="any" value=${v.threshold} onInput=${(e) => setV({ ...v, threshold: e.target.value })} /></${Field}>`}
-      ${HAS_DURATION(v.metric) && html`<${Field} label=${v.metric === 'down' ? 'For at least (minutes)' : 'Averaged over (minutes)'} hint=${v.metric !== 'down' ? '0 uses the latest value' : null}><input type="number" min="0" max="1440" value=${v.minutes} onInput=${(e) => setV({ ...v, minutes: e.target.value })} /></${Field}>`}
+      ${NEEDS_THRESHOLD(v.metric) && html`<${Field} label=${`Is ${m.below ? 'below' : 'above'}${m.unit ? ` (${m.unit.trim()})` : ''}`}><input type="number" min="0" step="any" value=${v.threshold} onInput=${(e) => setV({ ...v, threshold: e.target.value })} /></${Field}>`}
+      ${HAS_DURATION(v.metric) && html`<${Field} label=${FOR_AT_LEAST(v.metric) ? 'For at least (minutes)' : 'Averaged over (minutes)'} hint=${!FOR_AT_LEAST(v.metric) ? '0 uses the latest value' : null}><input type="number" min="0" max="1440" value=${v.minutes} onInput=${(e) => setV({ ...v, minutes: e.target.value })} /></${Field}>`}
     </div>
     <${Field} label="Applies to" hint=${v.scope.startsWith('tag:') ? 'Includes servers that get this tag later.' : null}><select value=${v.scope} onChange=${(e) => setV({ ...v, scope: e.target.value })}>
       <option value="">All servers</option>

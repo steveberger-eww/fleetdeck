@@ -22,6 +22,7 @@ import (
 
 	"fleetdeck/internal/admin"
 	"fleetdeck/internal/alerts"
+	"fleetdeck/internal/checks"
 	"fleetdeck/internal/db"
 	"fleetdeck/internal/httperr"
 	"fleetdeck/internal/jobs"
@@ -884,6 +885,109 @@ func (s *Server) serverRoutes() {
 		}
 		c.audit(fmt.Sprintf("docker %s %s on %s", c.body.String("action"), jsSlice(id, 12), srv.Name), srv.ID)
 		return J{"ok": true, "output": out}, nil
+	})
+
+	// ---- endpoint checks (Network tab): owners set them up, operators run them now, everyone sees them ----
+	type checkOut struct {
+		checks.Check
+		Uptime *float64 `json:"uptime"` // last 24 hours
+	}
+	checkView := func(id string) (*checkOut, error) {
+		ch, err := db.Get[checks.Check](`SELECT * FROM checks WHERE id = ?`, id)
+		if ch == nil || err != nil {
+			return nil, cmpErr(err, notFound("Check"))
+		}
+		up, err := checks.Uptime(id, db.Now()-864e5)
+		return &checkOut{*ch, up}, err
+	}
+	// serverCheck loads a check of a server the user may work on with role need.
+	serverCheck := func(c *ctx, need int) (*db.Server, *checks.Check, error) {
+		srv, err := c.server(c.param("id"), need)
+		if err != nil {
+			return nil, nil, err
+		}
+		ch, err := db.Get[checks.Check](`SELECT * FROM checks WHERE id = ? AND server_id = ?`, c.param("check"), srv.ID)
+		if ch == nil || err != nil {
+			return nil, nil, cmpErr(err, notFound("Check"))
+		}
+		return srv, ch, nil
+	}
+	onServer("GET /api/servers/{id}/checks", func(c *ctx, srv *db.Server) (any, error) {
+		ids, err := db.Select[string](`SELECT id FROM checks WHERE server_id = ? ORDER BY lower(name)`, srv.ID)
+		out := make([]*checkOut, len(ids))
+		for i := range ids {
+			if out[i], err = checkView(ids[i]); err != nil {
+				return nil, err
+			}
+		}
+		return out, err
+	})
+	s.route("POST /api/servers/{id}/checks", func(c *ctx) (any, error) {
+		srv, err := c.server(c.param("id"), roleOwner)
+		if err != nil {
+			return nil, err
+		}
+		v, err := checks.Validate(c.body)
+		if err != nil {
+			return nil, err
+		}
+		v.ID, v.TenantID, v.ServerID = db.NewID(), srv.TenantID, srv.ID
+		if err := exec(`INSERT INTO checks (id, tenant_id, server_id, name, kind, target, expect_status, contains, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			v.ID, v.TenantID, v.ServerID, v.Name, v.Kind, v.Target, v.ExpectStatus, v.Contains, b01(v.Enabled), db.Now()); err != nil {
+			return nil, err
+		}
+		c.audit(fmt.Sprintf("Added %s check %s on %s", v.Kind, v.Target, srv.Name), srv.ID)
+		if err := checks.RunAndSave(detached(c), v); err != nil {
+			return nil, err
+		}
+		return checkView(v.ID)
+	})
+	s.route("PUT /api/servers/{id}/checks/{check}", func(c *ctx) (any, error) {
+		srv, old, err := serverCheck(c, roleOwner)
+		if err != nil {
+			return nil, err
+		}
+		base := obj{"kind": old.Kind, "target": old.Target, "name": old.Name, "contains": old.Contains, "enabled": old.Enabled}
+		if old.ExpectStatus != nil {
+			base["expect_status"] = float64(*old.ExpectStatus)
+		}
+		v, err := checks.Validate(merge(base, c.body))
+		if err != nil {
+			return nil, err
+		}
+		v.ID = old.ID
+		if err := exec(`UPDATE checks SET name = ?, kind = ?, target = ?, expect_status = ?, contains = ?, enabled = ?, failing_since = NULL WHERE id = ?`,
+			v.Name, v.Kind, v.Target, v.ExpectStatus, v.Contains, b01(v.Enabled), v.ID); err != nil {
+			return nil, err
+		}
+		c.audit(fmt.Sprintf("Changed %s check %s on %s", v.Kind, v.Target, srv.Name), srv.ID)
+		if v.Enabled {
+			if err := checks.RunAndSave(detached(c), v); err != nil {
+				return nil, err
+			}
+		}
+		return checkView(v.ID)
+	})
+	s.route("DELETE /api/servers/{id}/checks/{check}", func(c *ctx) (any, error) {
+		srv, ch, err := serverCheck(c, roleOwner)
+		if err != nil {
+			return nil, err
+		}
+		if err := exec(`DELETE FROM checks WHERE id = ?`, ch.ID); err != nil { // its results go with it
+			return nil, err
+		}
+		c.audit(fmt.Sprintf("Removed check %s on %s", ch.Target, srv.Name), srv.ID)
+		return okResp, nil
+	})
+	s.route("POST /api/servers/{id}/checks/{check}/run", func(c *ctx) (any, error) {
+		_, ch, err := serverCheck(c, roleOperator)
+		if err != nil {
+			return nil, err
+		}
+		if err := checks.RunAndSave(detached(c), ch); err != nil {
+			return nil, err
+		}
+		return checkView(ch.ID)
 	})
 
 	// ---- authorized_keys across the fleet ----
