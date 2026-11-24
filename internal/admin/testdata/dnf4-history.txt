@@ -1,0 +1,21 @@
+Transaction ID : 12
+Begin time     : Thu 02 May 2024 10:01:02 AM UTC
+Begin rpmdb    : 1234:abcd
+End time       : Thu 02 May 2024 10:01:09 AM UTC (7 seconds)
+User           : root <root>
+Return-Code    : Success
+Releasever     : 9
+Command Line   : upgrade -y
+Comment        :
+Packages Altered:
+    Upgrade  openssl-1:3.0.7-27.el9.x86_64 @baseos
+    Upgraded openssl-1:3.0.7-25.el9.x86_64 @@System
+    Install  kernel-5.14.0-427.13.1.el9_4.x86_64 @baseos
+    Removed  nano-5.6.1-5.el9.x86_64 @@System
+Scriptlet output:
+   1 warning: something
+Transaction ID : 11
+Begin time     : Sat 20 Apr 2024 09:00:00 AM UTC
+Command Line   : install htop
+Packages Altered:
+    Install htop-3.3.0-1.el9.x86_64 @epel
