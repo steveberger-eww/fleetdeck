@@ -30,6 +30,7 @@ sleep 1
 echo "cpu2=$(head -1 /proc/stat)"
 awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} /^SwapTotal:/{st=$2} /^SwapFree:/{sf=$2} END{printf "mem=%.0f %.0f %.0f %.0f\n", t*1024, a*1024, st*1024, sf*1024}' /proc/meminfo
 df -PTk -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs 2>/dev/null | awk 'NR>1 && $3>0 {printf "fs=%s %s %.0f %.0f %s\n", $1, $2, $3*1024, $4*1024, $7}'
+df -Pi -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs 2>/dev/null | awk 'NR>1 && $2>0 {printf "ino=%s %s %s\n", $3, $2, $6}'
 awk 'NR>2{sub(/^ +/,""); split($0,a,":"); split(a[2],f," "); if(a[1]!="lo" && a[1]!~/^veth/) printf "if=%s %.0f %.0f\n", a[1], f[1], f[9]; if(a[1]!~/^(lo|veth|docker|br-|virbr|cni|flannel|cali|tailscale|wg)/){r+=f[1]; t+=f[9]}} END{printf "net=%.0f %.0f\n", r, t}' /proc/net/dev
 awk '$3~/^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|hd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)$/{r+=$6; w+=$10} END{printf "dio=%.0f %.0f\n", r*512, w*512}' /proc/diskstats
 t=$(cat /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input 2>/dev/null | sort -n | tail -1)

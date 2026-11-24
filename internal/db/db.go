@@ -121,6 +121,7 @@ var migrations = [][3]string{
 	{"alert_state", "notified", "INTEGER NOT NULL DEFAULT 1"}, // 0 = fired during quiet hours, not sent yet
 	{"scripts", "vars", "TEXT NOT NULL DEFAULT '[]'"},         // names of shared variables the script receives
 	{"schedules", "once", "INTEGER NOT NULL DEFAULT 0"},       // one-off run: deleted after it fires
+	{"alert_rules", "mount", "TEXT"},                          // disk/inodes rules: watch this mount only
 }
 
 // Open creates dir (0700) and opens or creates fleetdeck.db in it.
