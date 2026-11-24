@@ -7,7 +7,7 @@ import { Flags, ServerForm, serverBody } from './overview.js';
 import { JobsTable, openRun } from './jobs.js';
 import { muteFor } from './alerts.js';
 
-const TABS = [['overview', 'Overview'], ['updates', 'Updates'], ['services', 'Services'], ['logs', 'Logs'], ['processes', 'Processes'], ['containers', 'Containers'], ['terminal', 'Terminal'], ['jobs', 'Jobs'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['updates', 'Updates'], ['services', 'Services'], ['logs', 'Logs'], ['processes', 'Processes'], ['containers', 'Containers'], ['network', 'Network'], ['terminal', 'Terminal'], ['jobs', 'Jobs'], ['settings', 'Settings']];
 
 async function startJob(server, scriptId, params) {
   const { id } = await api('/api/jobs', { method: 'POST', body: { script_id: scriptId, params, targets: { servers: [server.id] } } });
@@ -38,6 +38,7 @@ export function ServerPage({ id, tab }) {
   else if (tab === 'logs') body = html`<${LogsTab} s=${s} />`;
   else if (tab === 'processes') body = html`<${ProcessesTab} s=${s} />`;
   else if (tab === 'containers') body = html`<${ContainersTab} s=${s} />`;
+  else if (tab === 'network') body = html`<${NetworkTab} s=${s} />`;
   else if (tab === 'terminal') body = html`<${TerminalTab} s=${s} />`;
   else if (tab === 'jobs') body = html`<section class="panel"><${JobsTable} serverId=${s.id} /></section>`;
   else if (tab === 'settings') body = html`<${SettingsTab} s=${s} />`;
@@ -114,10 +115,6 @@ function OverviewTab({ s }) {
           <dt>Checks run as</dt><dd>${n.probeUser}${n.probeUser !== 'root' ? ' (no passwordless sudo)' : ''}</dd>
         </dl></div></section>
     </div>`}
-    ${n?.ifaces?.length > 0 && html`<section class="panel"><div class="panel-h"><h2>Network interfaces</h2><span class="small muted">Live rates from the last check. The chart above leaves out virtual interfaces (Docker, VPN) to avoid counting traffic twice.</span></div>
-      <div class="table-wrap"><table class="t"><thead><tr><th>Interface</th><th class="num">In</th><th class="num">Out</th><th class="num">Received since boot</th><th class="num">Sent since boot</th></tr></thead>
-      <tbody>${n.ifaces.map((i) => html`<tr><td class="mono">${i.name}</td><td class="num">${rate(i.rx)}</td><td class="num">${rate(i.tx)}</td>
-        <td class="num ink2">${bytes(i.rxTotal)}</td><td class="num ink2">${bytes(i.txTotal)}</td></tr>`)}</tbody></table></div></section>`}
     ${n && html`<${DiskHealth} s=${s} />`}
     ${s.notes && html`<section class="panel"><div class="panel-h"><h2>Notes</h2></div><div class="panel-b" style=${{ whiteSpace: 'pre-wrap' }}>${s.notes}</div></section>`}
   </div>`;
@@ -379,6 +376,110 @@ function ContainerHistory({ s, name }) {
     <${LineChart} title="CPU" data=${m.data} fmt=${(v) => `${v.toFixed(v < 10 ? 1 : 0)}%`} series=${[{ key: 'cpu', label: 'CPU (100% = one core)', color: 'var(--s1)' }]} />
     <${LineChart} title="Memory" data=${m.data} fmt=${(v) => bytes(v)} series=${[{ key: 'mem', label: 'Memory', color: 'var(--s1)' }]} />
   </div>`;
+}
+
+// ---------- network: open ports, firewall, interfaces ----------
+const EXPOSURE = {
+  open: ['', 'Open to everyone'], restricted: ['', 'Open to some sources'], blocked: ['ok', 'Blocked by firewall'],
+  bypass: ['bad', 'Open: Docker bypasses ufw'], local: ['', 'This server only'], unknown: ['', 'Depends on firewalld'],
+};
+
+function NetworkTab({ s }) {
+  const net = useLoad(() => api(`/api/servers/${s.id}/network`), [s.id]);
+  const [all, setAll] = useState(false);
+  const [reach, setReach] = useState(null);
+  const [ufwDocker, setUfwDocker] = useState(false);
+  const n = net.data;
+  if (net.loading && !n) return html`<section class="panel"><${Loading} /></section>`;
+  if (net.error) return html`<${ErrorNote} error=${net.error} retry=${net.reload} />`;
+  const exposed = n.ports.filter((p) => p.exposure !== 'local');
+  const list = all ? n.ports : exposed;
+  const bypass = n.ports.filter((p) => p.exposure === 'bypass');
+  const canUfwDocker = n.docker && n.firewall.kind === 'ufw' && n.ufwDocker !== 'active';
+  const check = async () => setReach(await api(`/api/servers/${s.id}/network/reach`, { method: 'POST', body: { ports: exposed.filter((p) => p.proto === 'tcp').map((p) => p.port) } }));
+  const allow = async (p) => {
+    const route = p.docker && n.ufwDocker === 'active';
+    const port = route ? p.containerPort : p.port;
+    if (!await confirmBox({ title: `Open ${p.port}/${p.proto} to everyone?`, confirm: 'Allow', danger: true,
+      body: route ? `Runs "ufw route allow proto ${p.proto} from any to any port ${port}" (${port} is the port inside the container). Every container listening on ${port} becomes reachable.` : `Runs "ufw allow ${port}/${p.proto}".` })) return;
+    await api(`/api/servers/${s.id}/network/allow`, { method: 'POST', body: { port, proto: p.proto, route } });
+    toast(`${p.port}/${p.proto} allowed`, 'ok');
+    net.reload(true);
+  };
+  const ifaces = new Map((n.addrs || []).map((a) => [a.name, { ...a }]));
+  for (const i of s.snapshot?.ifaces || []) ifaces.set(i.name, { ...(ifaces.get(i.name) || { name: i.name, addrs: [] }), ...i });
+  return html`<div class="stack">
+    ${bypass.length > 0 && html`<div class="alert-bar"><span class="grow"><b>Docker publishes ${bypass.map((p) => `${p.port}/${p.proto}`).join(', ')} past ufw.</b> These ports are reachable even though ufw blocks them, because Docker's own rules come first.</span>
+      <${Btn} size="sm" onClick=${() => setUfwDocker(true)}>Let ufw control Docker</${Btn}></div>`}
+    ${n.ufwDocker === 'written' && html`<div class="alert-bar warn"><span class="grow"><b>The ufw-docker rules are written but not active.</b> Reboot the server to apply them.</span></div>`}
+
+    <section class="panel">
+      <div class="panel-h"><h2>Open ports</h2><span class="small muted">What is listening, and whether the firewall lets it through.</span>
+        <div class="seg" role="group" aria-label="Show"><button aria-pressed=${!all} onClick=${() => setAll(false)}>Reachable (${exposed.length})</button><button aria-pressed=${all} onClick=${() => setAll(true)}>All (${n.ports.length})</button></div>
+        <div class="row right">
+          <${Btn} size="sm" title="Try a TCP connection to each port from the Fleetdeck host" onClick=${check} disabled=${!exposed.some((p) => p.proto === 'tcp')}>Test from Fleetdeck</${Btn}>
+          <${Btn} size="sm" kind="ghost" icon="refresh" title="Refresh" onClick=${() => { setReach(null); net.reload(); }} /></div></div>
+      ${!list.length ? html`<${Empty} title=${all ? 'Nothing is listening' : 'Nothing is reachable from outside'}>${!all && n.ports.length ? 'Every listening port is bound to this server only.' : ''}</${Empty}>`
+        : html`<div class="table-wrap"><table class="t"><thead><tr><th class="num">Port</th><th>Listening on</th><th>Program</th><th>Exposure</th>${reach && html`<th title="TCP connect from the Fleetdeck host">From Fleetdeck</th>`}<th class="act"></th></tr></thead>
+        <tbody>${list.map((p) => html`<tr>
+          <td class="num mono nowrap">${p.port}<span class="muted">/${p.proto}</span></td>
+          <td class="mono small ink2">${p.addrs.map((a) => (a === '0.0.0.0' || a === '*' ? 'all IPv4' : a === '::' ? 'all IPv6' : a)).join(', ')}</td>
+          <td>${p.published.length ? p.published.map((x) => html`<div><span class="tag">docker</span> ${x.container} <span class="muted small">→ ${x.containerPort}</span></div>`) : html`<span class="mono">${p.processes.join(', ') || '–'}</span>`}</td>
+          <td><span class=${`chip ${EXPOSURE[p.exposure][0]}`}>${EXPOSURE[p.exposure][1]}</span></td>
+          ${reach && html`<td>${p.proto !== 'tcp' || reach[p.port] == null ? html`<span class="muted">–</span>` : reach[p.port] ? html`<span class=${`chip ${p.exposure === 'blocked' ? 'bad' : ''}`} title=${p.exposure === 'blocked' ? 'The firewall should block this, but it answered' : ''}>Reachable</span>` : html`<span class="chip">No answer</span>`}</td>`}
+          <td class="act">${['blocked', 'restricted'].includes(p.exposure) && html`<${Btn} size="sm" kind="ghost" onClick=${() => allow(p)}>Allow</${Btn}>`}</td></tr>`)}</tbody></table></div>`}
+      ${reach && html`<div class="panel-b small muted" style=${{ borderTop: '1px solid var(--line)' }}>"From Fleetdeck" shows what the Fleetdeck host can reach. If it sits in the same network or VPN, the internet may see less.</div>`}
+    </section>
+
+    <div class="charts" style=${{ alignItems: 'start' }}>
+      <${FirewallPanel} n=${n} onUfwDocker=${canUfwDocker ? () => setUfwDocker(true) : null} />
+      <section class="panel"><div class="panel-h"><h2>Interfaces</h2>
+        <span class="small muted">${n.gateway ? `Gateway ${n.gateway}${n.gatewayDev ? ` via ${n.gatewayDev}` : ''}` : 'No default route'}${n.dns.length ? ` · DNS ${n.dns.join(', ')}` : ''}</span></div>
+        <div class="table-wrap"><table class="t"><thead><tr><th>Interface</th><th>Addresses</th><th class="num">Traffic</th></tr></thead>
+        <tbody>${[...ifaces.values()].filter((i) => i.name !== 'lo' && !/^veth/.test(i.name)).map((i) => {
+          const local = i.addrs.filter((a) => /^fe80:/i.test(a)); // link-local: noise in the table, kept in the tooltip
+          const shown = i.addrs.filter((a) => !/^fe80:/i.test(a));
+          return html`<tr>
+          <td class="nowrap"><span class="mono">${i.name}</span>${i.state && i.state !== 'UP' && i.state !== 'UNKNOWN' ? html` <span class="chip">${i.state.toLowerCase()}</span>` : ''}</td>
+          <td class="mono small ink2" style=${{ overflowWrap: 'anywhere' }} title=${local.length ? `Link-local: ${local.join(', ')}` : ''}>${shown.length ? shown.map((a) => html`<div>${a}</div>`) : local.length ? html`<span class="muted">link-local only</span>` : '–'}</td>
+          <td class="num small nowrap" title=${i.rxTotal != null ? `${bytes(i.rxTotal)} received, ${bytes(i.txTotal)} sent since boot` : ''}>${i.rx == null ? '–' : html`<div>↓ ${rate(i.rx)}</div><div class="ink2">↑ ${rate(i.tx)}</div>`}</td></tr>`;
+        })}</tbody></table></div></section>
+    </div>
+    ${ufwDocker && html`<${UfwDockerDialog} s=${s} ports=${n.ports.filter((p) => p.docker)} onClose=${() => setUfwDocker(false)} />`}
+  </div>`;
+}
+
+function FirewallPanel({ n, onUfwDocker }) {
+  const f = n.firewall;
+  return html`<section class="panel"><div class="panel-h"><h2>Firewall</h2>
+    ${f.kind === 'ufw' ? html`<span class="chip ok">ufw active</span>` : f.kind === 'ufw-inactive' ? html`<span class="chip warn">ufw off</span>` : f.kind === 'firewalld' ? html`<span class="chip ok">firewalld active</span>` : html`<span class="chip warn">None</span>`}</div>
+    <div class="panel-b stack" style=${{ gap: '10px' }}>
+      ${f.kind === 'ufw' && html`<p class="small ink2">Incoming: <b>${f.incoming}</b> · Outgoing: <b>${f.outgoing}</b>${f.routed ? html` · Routed: <b>${f.routed}</b>` : ''}</p>`}
+      ${(f.kind === 'none' || f.kind === 'ufw-inactive') && html`<p class="small ink2">Every port listening on a public address is reachable. Turn on ufw from the terminal (allow SSH first: <span class="mono">ufw allow OpenSSH && ufw enable</span>).</p>`}
+      ${n.docker && f.kind === 'ufw' && html`<div class="row"><span class="small ink2 grow">Docker ports: ${n.ufwDocker === 'active' ? html`<b>controlled by ufw</b> (ufw-docker). Open one with "Allow" on its port.` : html`<b>bypass ufw.</b> Docker's NAT rules come before ufw's.`}</span>
+        ${onUfwDocker && html`<${Btn} size="sm" onClick=${onUfwDocker}>Let ufw control Docker</${Btn}>`}</div>`}
+      ${f.kind === 'ufw' && (f.rules.length ? html`<table class="t"><thead><tr><th>To</th><th>Action</th><th>From</th></tr></thead>
+        <tbody>${f.rules.map((r) => html`<tr><td class="mono small">${r[0]}</td><td class="small">${r[1]}</td><td class="mono small ink2">${r[2]}</td></tr>`)}</tbody></table>` : html`<p class="small muted">No rules: only the defaults apply.</p>`)}
+      ${f.kind === 'firewalld' && html`<pre class="out" style=${{ maxHeight: '260px' }}>${f.raw}</pre>`}
+    </div></section>`;
+}
+
+// Installs the ufw-docker rules (github.com/chaifeng/ufw-docker). Afterwards published ports are closed to the internet
+// unless allowed, so let the user pick which ones stay open; 80/443 are pre-ticked.
+function UfwDockerDialog({ s, ports, onClose }) {
+  const opts = [...new Set(ports.map((p) => `${p.containerPort}/${p.proto}`))];
+  const [keep, setKeep] = useState(() => new Set(opts.filter((o) => /^(80|443)\//.test(o))));
+  const flip = (o) => setKeep((k) => { const x = new Set(k); x.has(o) ? x.delete(o) : x.add(o); return x; });
+  const run = async () => { onClose(); await startJob(s, 'ufw-docker', { KEEP_OPEN: [...keep].join(' ') }); };
+  return html`<${Modal} title="Let ufw control Docker ports" onClose=${onClose}
+    footer=${html`<button class="btn" onClick=${onClose}>Cancel</button><${Btn} kind="primary" onClick=${run}>Apply</${Btn}>`}>
+    <p class="ink2">Adds the <a href="https://github.com/chaifeng/ufw-docker" target="_blank" rel="noopener noreferrer">ufw-docker</a> rules to <span class="mono">/etc/ufw/after.rules</span> (a backup is kept) and reloads ufw.</p>
+    <p class="ink2">Afterwards, published container ports are <b>closed to the internet</b> unless you allow them. Private networks (10.x, 172.16–31.x, 192.168.x) can still reach them.</p>
+    ${opts.length > 0 && html`<div class="field"><span>Keep these open to everyone</span>
+      ${opts.map((o) => html`<label class="check"><input type="checkbox" checked=${keep.has(o)} onChange=${() => flip(o)} /><span class="mono">${o}</span>
+        <span class="small muted">${ports.filter((p) => `${p.containerPort}/${p.proto}` === o).map((p) => `host ${p.port}, ${p.published.map((x) => x.container).join(', ')}`).join('; ')}</span></label>`)}
+      <span class="hint">These are ports inside the containers, which is what ufw-docker matches on.</span></div>`}
+  </${Modal}>`;
 }
 
 // ---------- terminal ----------

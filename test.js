@@ -212,6 +212,46 @@ test('probe: containers, interfaces, network alert', () => {
   assert.ok(D.get("SELECT 1 FROM alert_state WHERE rule_id = 'ru'"));
 });
 
+test('network: what is really open, Docker vs ufw', () => {
+  const admin = require('./lib/admin');
+  const ps = (name, ports) => JSON.stringify({ Names: name, Ports: ports });
+  const out = (ufwDocker, extraRules = []) => [
+    '#ss',
+    'tcp   LISTEN 0 4096   0.0.0.0:22   0.0.0.0:*  users:(("sshd",pid=812,fd=3))',
+    'tcp   LISTEN 0 4096      [::]:22      [::]:*  users:(("sshd",pid=812,fd=4))',
+    'tcp   LISTEN 0 4096 127.0.0.1:5432 0.0.0.0:* users:(("postgres",pid=9,fd=5))',
+    'udp   UNCONN 0 0   127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=7,fd=13))',
+    'tcp   LISTEN 0 4096   0.0.0.0:8080 0.0.0.0:* users:(("docker-proxy",pid=1,fd=4))',
+    'tcp   LISTEN 0 511    0.0.0.0:3000 0.0.0.0:* users:(("node",pid=2,fd=4))',
+    '#addr', 'lo UNKNOWN 127.0.0.1/8 ::1/128', 'eth0@if5 UP 203.0.113.5/24 fe80::1/64',
+    '#route', 'default via 203.0.113.1 dev eth0 proto dhcp metric 100',
+    '#dns', 'Global: 1.1.1.1', 'Link 2 (eth0): 203.0.113.1 2001:db8::53',
+    '#ufw', 'Status: active', 'Logging: on (low)', 'Default: deny (incoming), allow (outgoing), deny (routed)', 'New profiles: skip', '',
+    'To                         Action      From', '--                         ------      ----', '22/tcp                     ALLOW IN    Anywhere', '3000                       ALLOW IN    10.0.0.0/8', 'Anywhere (v6) on tailscale0 ALLOW IN    Anywhere (v6)',
+    '#ufwrules', '### tuple ### allow tcp 22 0.0.0.0/0 any 0.0.0.0/0 in', '### tuple ### allow any 3000 0.0.0.0/0 any 10.0.0.0/8 in', '### tuple ### allow any any 0.0.0.0/0 any 0.0.0.0/0 in_tailscale0', ...extraRules,
+    '#ufwdocker', ...ufwDocker, '#firewalld',
+    '#docker', ps('web', '0.0.0.0:8080->80/tcp, :::8080->80/tcp'), ps('db', '127.0.0.1:6379->6379/tcp'), ps('dns', '0.0.0.0:5353->53/udp'), ps('x', '80/tcp'),
+  ].join('\n');
+  const n = admin.parseNetwork(out([]));
+  const ex = Object.fromEntries(n.ports.map((p) => [`${p.port}/${p.proto}`, p.exposure]));
+  assert.deepStrictEqual(ex, { '22/tcp': 'open', '53/udp': 'local', '3000/tcp': 'restricted', '5353/udp': 'bypass', '5432/tcp': 'local', '6379/tcp': 'local', '8080/tcp': 'bypass' });
+  assert.deepStrictEqual(n.ports.find((p) => p.port === 8080).published, [{ container: 'web', containerPort: 80 }]);
+  assert.deepStrictEqual(n.ports.find((p) => p.port === 22).addrs, ['0.0.0.0', '::']);
+  assert.strictEqual(n.firewall.kind, 'ufw');
+  assert.deepStrictEqual(n.firewall.rules[1], ['3000', 'ALLOW IN', '10.0.0.0/8']);
+  assert.deepStrictEqual(n.firewall.rules[2], ['Anywhere (v6) on tailscale0', 'ALLOW IN', 'Anywhere (v6)']); // single space before ALLOW
+  assert.deepStrictEqual([n.gateway, n.gatewayDev, n.dns], ['203.0.113.1', 'eth0', ['1.1.1.1', '203.0.113.1', '2001:db8::53']]);
+  assert.deepStrictEqual(n.addrs[1], { name: 'eth0', state: 'UP', addrs: ['203.0.113.5/24', 'fe80::1/64'] });
+  // With ufw-docker active, `ufw route` rules on the container port decide; the rest is blocked.
+  const d = admin.parseNetwork(out(['written', 'active'], ['### tuple ### route:allow tcp 80 0.0.0.0/0 any 0.0.0.0/0 in']));
+  assert.strictEqual(d.ufwDocker, 'active');
+  assert.deepStrictEqual(d.ports.filter((p) => p.docker).map((p) => [p.port, p.exposure]), [[5353, 'blocked'], [8080, 'open']]);
+  // No firewall at all: everything not on loopback is open.
+  assert.strictEqual(admin.parseNetwork('#ss\ntcp LISTEN 0 1 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=1,fd=1))').ports[0].exposure, 'open');
+  assert.throws(() => admin.ufwAllow({}, { port: 0, proto: 'tcp' }));
+  assert.throws(() => admin.ufwAllow({}, { port: 80, proto: 'tcp; reboot' }));
+});
+
 test('quiet hours hold back notifications, not alert state', () => {
   const D = require('./lib/db');
   const alerts = require('./lib/alerts');

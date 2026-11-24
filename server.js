@@ -1,6 +1,7 @@
 'use strict';
 // Fleetdeck: agentless server dashboard. Beszel-style monitoring, Semaphore-style jobs, Cockpit-style admin.
 const http = require('node:http');
+const net = require('node:net');
 const fs = require('node:fs');
 const path = require('node:path');
 const { WebSocketServer } = require('ws');
@@ -371,6 +372,25 @@ route('POST', '/api/servers/:id/services', async (ctx) => {
   return { ok: true, output: out };
 });
 
+route('GET', '/api/servers/:id/network', (ctx) => admin.network(getServer(ctx.params.id)));
+route('POST', '/api/servers/:id/network/allow', async (ctx) => {
+  const s = getServer(ctx.params.id);
+  const b = { port: Number(ctx.body.port), proto: String(ctx.body.proto), route: !!ctx.body.route };
+  const out = await admin.ufwAllow(s, b);
+  audit(ctx, `ufw ${b.route ? 'route allow' : 'allow'} ${b.port}/${b.proto} on ${s.name}`, s.id);
+  return { ok: true, output: out };
+});
+// Plain TCP connects from the Fleetdeck host: proves what a firewall really lets through (from where Fleetdeck sits).
+route('POST', '/api/servers/:id/network/reach', async (ctx) => {
+  const s = getServer(ctx.params.id);
+  const ports = [...new Set((Array.isArray(ctx.body.ports) ? ctx.body.ports : []).map(Number))].filter((p) => Number.isInteger(p) && p > 0 && p < 65536).slice(0, 100);
+  const probe1 = (port) => new Promise((resolve) => {
+    const sock = net.connect({ host: s.host, port, timeout: 3000 });
+    const done = (ok) => { sock.destroy(); resolve([port, ok]); };
+    sock.once('connect', () => done(true)).once('timeout', () => done(false)).once('error', () => done(false));
+  });
+  return Object.fromEntries(await Promise.all(ports.map(probe1)));
+});
 route('GET', '/api/servers/:id/timers', (ctx) => admin.timers(getServer(ctx.params.id)));
 route('GET', '/api/servers/:id/restarts', (ctx) => admin.staleServices(getServer(ctx.params.id)));
 route('GET', '/api/servers/:id/logs', (ctx) => admin.logs(getServer(ctx.params.id), ctx.query));

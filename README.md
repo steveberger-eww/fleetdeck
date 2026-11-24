@@ -10,7 +10,7 @@ It combines the core ideas of three projects:
 |---|---|
 | **Beszel** | Metrics every minute (CPU, memory, swap, disk, disk I/O, network, load, temperature) with 30 days of history and 1h–30d charts. Per-interface traffic. Docker containers with health status and CPU/memory history. S.M.A.R.T. disk health. Alert rules for all servers, a tag or one server, with notifications via ntfy, Pushover, Discord, Slack, Telegram, Gotify or a webhook. Quiet hours and one-time maintenance windows. |
 | **Semaphore** | Script library with parameters. Encrypted shared variables (tokens, passwords) that scripts opt into, masked in job output. Run scripts on servers, tags or everything. Jobs keep their output, stream live, and can be cancelled or re-run (all hosts or failed only). Cron schedules and webhook URLs. Encrypted SSH key store. **Git repositories and Ansible playbooks**, with dry runs and per-host results. |
-| **Cockpit** | Per-server pages: pending packages (upgrade all or selected), services still running replaced code after an update, automatic updates on/off, systemd services and timers (start/stop/restart/enable, run a timer now), journal viewer, processes (stop/kill), containers (start/stop/logs), a web terminal and system info. Every authorized SSH key across the fleet, with one-click removal. Deep links to Cockpit for storage, network and firewall, with one-click install. |
+| **Cockpit** | Per-server pages: pending packages (upgrade all or selected), services still running replaced code after an update, automatic updates on/off, systemd services and timers (start/stop/restart/enable, run a timer now), journal viewer, processes (stop/kill), containers (start/stop/logs), a network tab (open ports judged against the real firewall, including Docker ports that bypass ufw, one-click [ufw-docker](https://github.com/chaifeng/ufw-docker) setup, interfaces, gateway and DNS), a web terminal and system info. Every authorized SSH key across the fleet, with one-click removal. Deep links to Cockpit for storage, network and firewall, with one-click install. |
 
 ## Run it
 
@@ -124,5 +124,5 @@ The UI in `public/` uses Preact and htm without a build step.
 
 - **Multiple users or roles:** it's a single-owner panel.
 - **Terraform:** only shell scripts and Ansible playbooks run.
-- **Storage/LVM, network and firewall editing, VMs:** use Cockpit, which Fleetdeck links to.
+- **Storage/LVM, network configuration, full firewall editing, VMs:** use Cockpit, which Fleetdeck links to. Fleetdeck only adds ufw allow rules from the Network tab and sets up ufw-docker.
 - **Cancelling a job** stops its output, but a remote command without a terminal may keep running.
