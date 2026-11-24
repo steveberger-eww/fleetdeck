@@ -125,9 +125,10 @@ function OverviewTab({ s }) {
     </div>
     ${n && html`<div class="grid-2">
       <section class="panel"><div class="panel-h"><h2>Filesystems</h2></div>
-        <div class="table-wrap"><table class="t"><thead><tr><th>Mount</th><th class="hide-sm">Type</th><th>Used</th><th class="num">Size</th></tr></thead>
+        <div class="table-wrap"><table class="t"><thead><tr><th>Mount</th><th class="hide-sm">Type</th><th>Used</th><th class="num hide-sm">Inodes</th><th class="num">Size</th></tr></thead>
         <tbody>${n.disks.map((d) => html`<tr><td class="mono">${d.mount}</td><td class="ink2 hide-sm">${d.type}</td>
           <td><div class="row nw"><div class="bar grow"><i class=${level(d.pct, 0.8, 0.9)} style=${{ width: `${d.pct * 100}%` }} /></div><span class="small nowrap">${pct(d.pct)}</span></div></td>
+          <td class=${`num small nowrap hide-sm ${d.inodePct >= 0.9 ? 'err' : 'ink2'}`}>${d.inodePct != null ? pct(d.inodePct) : '–'}</td>
           <td class="num ink2 nowrap">${bytes(d.used)} / ${bytes(d.size)}</td></tr>`)}</tbody></table></div></section>
       <section class="panel"><div class="panel-h"><h2>System</h2></div><div class="panel-b">
         <dl class="kv">

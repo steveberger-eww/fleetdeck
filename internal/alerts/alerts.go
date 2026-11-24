@@ -56,6 +56,7 @@ var Metrics = MetricList{
 	{Key: "mem", Label: "Memory usage", Unit: "%", Col: "mem", Scale: 100, Def: def(90)},
 	{Key: "swap", Label: "Swap usage", Unit: "%", Col: "swap", Scale: 100, Def: def(50)},
 	{Key: "disk", Label: "Disk usage (fullest mount)", Unit: "%", Def: def(90)},
+	{Key: "inodes", Label: "Inode usage (fullest mount)", Unit: "%", Def: def(90)},
 	{Key: "load", Label: "Load per CPU core", Unit: "", Col: "load1", Scale: 1, Def: def(1.5)},
 	{Key: "temp", Label: "Temperature", Unit: "°C", Col: "temp", Scale: 1, Def: def(80)},
 	{Key: "updates", Label: "Pending updates", Unit: "", Def: def(0)},
@@ -216,7 +217,18 @@ type Rule struct {
 	Enabled   int     `db:"enabled" json:"enabled"`
 	CreatedAt int64   `db:"created_at" json:"created_at"`
 	Tag       *string `db:"tag" json:"tag"`
+	Mount     *string `db:"mount" json:"mount"` // disk and inodes only; nil = the fullest mount
 }
+
+// Label names what a rule watches, e.g. "Disk usage on /data" for a mount-specific rule.
+func (r *Rule) Label(m *Metric) string {
+	if r.Mount == nil {
+		return m.Label
+	}
+	return strings.TrimSuffix(m.Label, " (fullest mount)") + " on " + *r.Mount
+}
+
+var mountRe = regexp.MustCompile(`^/[^\x00-\x1f]{0,255}$`)
 
 // ValidateRule checks a rule from a request body (decoded JSON).
 func ValidateRule(b map[string]any) (*Rule, error) {
@@ -235,7 +247,14 @@ func ValidateRule(b map[string]any) (*Rule, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Rule{Metric: metric, Threshold: threshold, Minutes: int64(minutes), ServerID: serverID, Tag: tag, Enabled: enabled(b)}, nil
+	var mount *string
+	if mt := strings.TrimSpace(orEmpty(b["mount"])); mt != "" && (metric == "disk" || metric == "inodes") {
+		if !mountRe.MatchString(mt) {
+			return nil, httperr.Bad("The mount must be an absolute path like /data")
+		}
+		mount = &mt
+	}
+	return &Rule{Metric: metric, Threshold: threshold, Minutes: int64(minutes), ServerID: serverID, Tag: tag, Mount: mount, Enabled: enabled(b)}, nil
 }
 
 func currentValue(r *Rule, m *Metric, s *db.Server, snap *probe.Snapshot) (*float64, error) {
@@ -283,15 +302,19 @@ func currentValue(r *Rule, m *Metric, s *db.Server, snap *probe.Snapshot) (*floa
 			l = snap.Load[0]
 		}
 		return ptr(l / cores), nil
-	case "disk":
-		if len(snap.Disks) == 0 {
-			return nil, nil
-		}
-		hi := math.Inf(-1)
+	case "disk", "inodes":
+		// With a mount: that mount only, nil (never firing) when it's gone. Without: the fullest mount.
+		var hi *float64
 		for _, d := range snap.Disks {
-			hi = max(hi, d.Pct)
+			p := &d.Pct
+			if r.Metric == "inodes" {
+				p = d.InodePct
+			}
+			if p != nil && (r.Mount == nil || *r.Mount == d.Mount) && (hi == nil || *p > *hi) {
+				hi = p
+			}
 		}
-		return ptr(hi * 100), nil
+		return pct(hi), nil
 	case "reboot":
 		if snap.Reboot {
 			return ptr(1), nil
@@ -488,7 +511,7 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 				if r.Minutes != 0 && m.Col != "" {
 					avg = fmt.Sprintf(", %d min avg", r.Minutes)
 				}
-				msg = fmt.Sprintf("%s: %s is %s%s (threshold %s%s%s)", s.Name, m.Label, vs, m.Unit, fmtNum(r.Threshold), m.Unit, avg)
+				msg = fmt.Sprintf("%s: %s is %s%s (threshold %s%s%s)", s.Name, r.Label(m), vs, m.Unit, fmtNum(r.Threshold), m.Unit, avg)
 			}
 		}
 		cur, err := db.Get[int](`SELECT notified FROM alert_state WHERE rule_id = ? AND server_id = ?`, r.ID, s.ID)
@@ -510,16 +533,16 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 			}
 			db.Event("alert", "Firing: "+msg+note, db.EventOpts{Level: "error", ServerID: s.ID})
 			if quiet == nil {
-				Notify("🔴 "+s.Name+": "+m.Label, msg, "error")
+				Notify("🔴 "+s.Name+": "+r.Label(m), msg, "error")
 			}
 		case !firing && cur != nil:
 			if _, err := db.Exec(`DELETE FROM alert_state WHERE rule_id = ? AND server_id = ?`, r.ID, s.ID); err != nil {
 				return err
 			}
-			db.Event("alert", "Resolved: "+s.Name+" "+m.Label, db.EventOpts{Level: "success", ServerID: s.ID})
+			db.Event("alert", "Resolved: "+s.Name+" "+r.Label(m), db.EventOpts{Level: "success", ServerID: s.ID})
 			// Only tell people it's fixed if they were told it broke. Muted-and-gone stays silent.
 			if *cur != 0 {
-				Notify("✅ "+s.Name+": "+m.Label+" resolved", s.Name+": "+m.Label+" is back to normal", "success")
+				Notify("✅ "+s.Name+": "+r.Label(m)+" resolved", s.Name+": "+r.Label(m)+" is back to normal", "success")
 			}
 		case firing:
 			// Still firing when quiet hours end: send what was held back.
@@ -532,7 +555,7 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 				return err
 			}
 			if send {
-				Notify("🔴 "+s.Name+": "+m.Label, msg+" (still firing after quiet hours)", "error")
+				Notify("🔴 "+s.Name+": "+r.Label(m), msg+" (still firing after quiet hours)", "error")
 			}
 		}
 	}

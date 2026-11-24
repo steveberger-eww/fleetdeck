@@ -69,6 +69,8 @@ type Disk struct {
 	Size  float64 `json:"size"`
 	Used  float64 `json:"used"`
 	Pct   float64 `json:"pct"`
+	// InodePct is nil when the filesystem has no fixed inode count (btrfs, zfs).
+	InodePct *float64 `json:"inodePct,omitempty"`
 }
 
 // Counters are byte totals since boot: network in/out, disk read/write.
@@ -320,6 +322,7 @@ func Parse(text string) *Snapshot {
 	kv := map[string]string{}
 	var disks []Disk
 	diskAt := map[string]int{}
+	inodes := map[string]float64{} // mount -> used/total
 	var smartDevs, ctrs, cstats []string
 	ifaces := []Iface{}
 	for _, line := range strings.Split(text, "\n") {
@@ -338,6 +341,10 @@ func Parse(text string) *Snapshot {
 		case "if":
 			f := append(strings.Split(v, " "), "", "")
 			ifaces = append(ifaces, Iface{Name: f[0], RxTotal: or0(num(f[1])), TxTotal: or0(num(f[2]))})
+		case "ino":
+			if f := strings.SplitN(v, " ", 3); len(f) == 3 && num(f[1]) > 0 {
+				inodes[f[2]] = or0(num(f[0])) / num(f[1])
+			}
 		case "fs":
 			// One entry per device: bind mounts and btrfs subvolumes repeat the same numbers. Prefer the "/" mount.
 			f := strings.Split(v, " ")
@@ -383,6 +390,11 @@ func Parse(text string) *Snapshot {
 	}
 	if s.Disks == nil {
 		s.Disks = []Disk{}
+	}
+	for i := range s.Disks {
+		if p, ok := inodes[s.Disks[i].Mount]; ok {
+			s.Disks[i].InodePct = &p
+		}
 	}
 	if v := kv["virt"]; v != "none" {
 		s.Virt = v

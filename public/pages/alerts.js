@@ -5,12 +5,17 @@ import {
 
 const NEEDS_THRESHOLD = (m) => !['down', 'reboot'].includes(m);
 const HAS_DURATION = (m) => ['down', 'cpu', 'mem', 'swap', 'load', 'temp', 'net'].includes(m);
+const HAS_MOUNT = (m) => ['disk', 'inodes'].includes(m);
+const inScope = (r, servers) => servers.filter((s) => (r.server_id ? s.id === r.server_id : !r.tag || s.tags.includes(r.tag)));
+// Servers in the rule's scope that report disks but not the rule's mount.
+const mountMissing = (r, servers) => (r.mount ? inScope(r, servers).filter((s) => s.snapshot?.disks && !s.snapshot.disks.some((d) => d.mount === r.mount)) : []);
 
 function ruleText(r, metrics) {
   const m = metrics[r.metric];
   if (r.metric === 'down') return `Unreachable for ${r.minutes} min`;
   if (r.metric === 'reboot') return 'Reboot required';
-  return `${m.label} above ${r.threshold}${m.unit}${HAS_DURATION(r.metric) && r.minutes ? ` for ${r.minutes} min` : ''}`;
+  const label = r.mount ? `${m.label.replace(' (fullest mount)', '')} on ${r.mount}` : m.label;
+  return `${label} above ${r.threshold}${m.unit}${HAS_DURATION(r.metric) && r.minutes ? ` for ${r.minutes} min` : ''}`;
 }
 
 export function AlertsPage() {
@@ -19,6 +24,7 @@ export function AlertsPage() {
   const [rule, setRule] = useState(null);
   const [channel, setChannel] = useState(null);
   const sort = useSort(a.data?.rules);
+  const servers = useStore(serversStore) || [];
   if (a.loading || n.loading) return html`<div class="page"><${Loading} /></div>`;
   if (a.error) return html`<div class="page"><${ErrorNote} error=${a.error} retry=${a.reload} /></div>`;
   const { metrics, rules, firing, history } = a.data;
@@ -55,7 +61,7 @@ export function AlertsPage() {
         <tbody>${sort.rows.map((r) => html`<tr>
           <td><input type="checkbox" class="switch" role="switch" checked=${r.enabled} onChange=${() => toggleRule(r)} aria-label=${`Enabled: ${ruleText(r, metrics)}`} /></td>
           <td>${ruleText(r, metrics)}</td><td class="ink2">${r.server_name || (r.tag ? html`<span class="tag">${r.tag}</span>` : 'All servers')}</td>
-          <td class="hide-sm">${firingBy(r) ? html`<span class="chip bad">Firing on ${firingBy(r)}</span>` : html`<span class="muted small">${r.enabled ? 'Quiet' : 'Off'}</span>`}</td>
+          <td class="hide-sm">${firingBy(r) ? html`<span class="chip bad">Firing on ${firingBy(r)}</span>` : mountMissing(r, servers).length ? html`<span class="chip warn" title=${mountMissing(r, servers).map((s) => s.name).join(', ')}>Mount not found</span>` : html`<span class="muted small">${r.enabled ? 'Quiet' : 'Off'}</span>`}</td>
           <td class="act"><div class="row nw"><${Btn} size="sm" kind="ghost" icon="edit" title="Edit" onClick=${() => setRule(r)} /><${Btn} size="sm" kind="quiet-danger" icon="trash" title="Delete" onClick=${() => delRule(r)} /></div></td>
         </tr>`)}</tbody></table></div>`}
     </section>
@@ -146,15 +152,17 @@ function RuleDialog({ rule, metrics, onClose, onSaved }) {
   const servers = useStore(serversStore) || [];
   const tags = [...new Set(servers.flatMap((s) => s.tags))].sort();
   // scope: '' = all servers, 'tag:<name>', or a server id
-  const [v, setV] = useState({ metric: 'cpu', threshold: 90, minutes: 5, enabled: true, ...rule, scope: rule.server_id || (rule.tag ? `tag:${rule.tag}` : '') });
+  const [v, setV] = useState({ metric: 'cpu', threshold: 90, minutes: 5, enabled: true, ...rule, mount: rule.mount || '', scope: rule.server_id || (rule.tag ? `tag:${rule.tag}` : '') });
   const dirty = useDirty(v);
   const [err, setErr] = useState('');
   const m = metrics[v.metric];
+  const tagOf = v.scope.startsWith('tag:') && v.scope.slice(4);
+  const mounts = [...new Set(inScope({ server_id: tagOf ? null : v.scope, tag: tagOf }, servers).flatMap((s) => (s.snapshot?.disks || []).map((d) => d.mount)))].sort();
   const save = async () => {
     setErr('');
     try {
       const tag = v.scope.startsWith('tag:') ? v.scope.slice(4) : null;
-      const body = { metric: v.metric, enabled: v.enabled, threshold: Number(v.threshold), minutes: Number(v.minutes), tag, server_id: tag ? null : v.scope || null };
+      const body = { metric: v.metric, enabled: v.enabled, threshold: Number(v.threshold), minutes: Number(v.minutes), tag, server_id: tag ? null : v.scope || null, mount: HAS_MOUNT(v.metric) ? v.mount : null };
       await api(rule.id ? `/api/alerts/rules/${rule.id}` : '/api/alerts/rules', { method: rule.id ? 'PUT' : 'POST', body });
       onSaved();
     } catch (e) { setErr(e.message); }
@@ -170,6 +178,8 @@ function RuleDialog({ rule, metrics, onClose, onSaved }) {
       <option value="">All servers</option>
       ${tags.length > 0 && html`<optgroup label="Servers tagged">${tags.map((t) => html`<option value=${`tag:${t}`}>${t}</option>`)}</optgroup>`}
       <optgroup label="One server">${servers.map((s) => html`<option value=${s.id}>${s.name}</option>`)}</optgroup></select></${Field}>
+    ${HAS_MOUNT(v.metric) && html`<${Field} label="Mount (optional)" hint="Empty watches the fullest mount."><input class="mono" list="rule-mounts" value=${v.mount} onInput=${(e) => setV({ ...v, mount: e.target.value })} placeholder="/data" />
+      <datalist id="rule-mounts">${mounts.map((x) => html`<option value=${x} />`)}</datalist></${Field}>`}
     ${err && html`<p class="err" role="alert">${err}</p>`}
   </${Modal}>`;
 }

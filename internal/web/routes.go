@@ -1777,8 +1777,8 @@ func (s *Server) alertRoutes() {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO alert_rules (id, server_id, tag, metric, threshold, minutes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, db.Now()); err != nil {
+		if err := exec(`INSERT INTO alert_rules (id, server_id, tag, metric, threshold, minutes, enabled, created_at, mount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, db.Now(), v.Mount); err != nil {
 			return nil, err
 		}
 		c.audit("Created alert rule "+v.Metric, "")
@@ -1795,8 +1795,8 @@ func (s *Server) alertRoutes() {
 		if err != nil {
 			return nil, err
 		}
-		if err := exec(`UPDATE alert_rules SET server_id = ?, tag = ?, metric = ?, threshold = ?, minutes = ?, enabled = ? WHERE id = ?`,
-			v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, old.ID); err != nil {
+		if err := exec(`UPDATE alert_rules SET server_id = ?, tag = ?, metric = ?, threshold = ?, minutes = ?, enabled = ?, mount = ? WHERE id = ?`,
+			v.ServerID, v.Tag, v.Metric, v.Threshold, v.Minutes, v.Enabled, v.Mount, old.ID); err != nil {
 			return nil, err
 		}
 		if err := exec(`DELETE FROM alert_state WHERE rule_id = ?`, old.ID); err != nil { // re-evaluated on the next probe

@@ -78,14 +78,14 @@ func eq(t *testing.T, got, want any) {
 func TestScriptsVerbatim(t *testing.T) {
 	// sha256(PROBE + "|" + SMART) of lib/probe.js's strings.
 	h := sha256.Sum256([]byte(PROBE + "|" + SMART))
-	eq(t, hex.EncodeToString(h[:]), "7a9de34ca1b96346f90e35d6d7402d1da3c56ab2e6f8e461c9cebab4b9ede02f")
+	eq(t, hex.EncodeToString(h[:]), "e3db0cd74a490d88b8f32337cb5b12d03045e80458c8bb2682c16d935ab30213")
 }
 
 func TestProbeParser(t *testing.T) {
 	s := Parse(strings.Join([]string{
 		"hostname=web1", "os=Debian GNU/Linux 12 (bookworm)", "kernel=6.1.0", "cores=4", "virt=none", "ips=10.0.0.5 fd00::5",
 		"uptime=90061.5", "load=0.50 0.20 0.10", "cpu1=cpu  100 0 100 800 0 0 0 0 0 0", "cpu2=cpu  150 0 150 900 0 0 0 0 0 0",
-		"mem=1000 250 400 100", "fs=/dev/sda2 ext4 2000 500 /srv/data", "fs=/dev/sda1 vfat 100 90 /boot", "fs=/dev/sda2 ext4 2000 500 /", "net=10 20", "dio=512 1024",
+		"mem=1000 250 400 100", "fs=/dev/sda2 ext4 2000 500 /srv/data", "fs=/dev/sda1 vfat 100 90 /boot", "fs=/dev/sda2 ext4 2000 500 /", "ino=6400 64000 /", "net=10 20", "dio=512 1024",
 		"temp=48500", "pkg=apt", "updates=3", "security=1", "reboot=1", "failed=0", "cockpit=inactive", "docker=2 5", "probe_user=root",
 	}, "\n"))
 	eq(t, *s.CPU, 0.5)
@@ -99,6 +99,8 @@ func TestProbeParser(t *testing.T) {
 	sort.Strings(mounts)
 	eq(t, mounts, []string{"/", "/boot"})
 	eq(t, *s.Disk, 0.25) // root mount, not the fullest
+	eq(t, *s.Disks[0].InodePct, 0.1) // ino=, from df -Pi
+	eq(t, s.Disks[1].InodePct, (*float64)(nil)) // vfat: df reports no inodes
 	eq(t, *s.Temp, 48.5)
 	eq(t, *s.Docker, Docker{Running: 2, Total: 5})
 	eq(t, s.IPs, []string{"10.0.0.5", "fd00::5"})
