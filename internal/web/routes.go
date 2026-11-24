@@ -206,6 +206,10 @@ func scheduleInput(b obj) jobs.ScheduleInput {
 	if b["enabled"] == false {
 		in.Enabled = new(false)
 	}
+	in.Once = b["once"] == true
+	if v, ok := b["run_at"].(float64); ok {
+		in.RunAt = new(int64(v))
+	}
 	return in
 }
 
@@ -1587,8 +1591,8 @@ func (s *Server) jobRoutes() {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO schedules (id, name, script_id, cron, targets, params, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, v.Name, v.ScriptID, v.Cron, v.Targets, v.Params, v.Enabled, db.Now()); err != nil {
+		if err := exec(`INSERT INTO schedules (id, name, script_id, cron, targets, params, enabled, once, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, v.Name, v.ScriptID, v.Cron, v.Targets, v.Params, v.Enabled, v.Once, db.Now()); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Created schedule "%s" (%s)`, v.Name, *v.Cron), "")
@@ -1610,8 +1614,8 @@ func (s *Server) jobRoutes() {
 		if err != nil {
 			return nil, err
 		}
-		if err := exec(`UPDATE schedules SET name = ?, script_id = ?, cron = ?, targets = ?, params = ?, enabled = ? WHERE id = ?`,
-			v.Name, v.ScriptID, v.Cron, v.Targets, v.Params, v.Enabled, old.ID); err != nil {
+		if err := exec(`UPDATE schedules SET name = ?, script_id = ?, cron = ?, targets = ?, params = ?, enabled = ?, once = ? WHERE id = ?`,
+			v.Name, v.ScriptID, v.Cron, v.Targets, v.Params, v.Enabled, v.Once, old.ID); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Updated schedule "%s"`, v.Name), "")

@@ -1,4 +1,4 @@
-import { html, useState, useEffect, useMemo, api, useLoad, useQuery, toast, confirmBox, Btn, Th, useSort, Empty, Field, Loading, ErrorNote, ago, when } from '../ui.js';
+import { html, useState, useEffect, useMemo, api, useLoad, useQuery, toast, confirmBox, Btn, Th, useSort, Empty, Field, Loading, ErrorNote, ago, when, getClock, setClock } from '../ui.js';
 import { getTheme, setTheme } from '../theme.js';
 
 export function SettingsPage() {
@@ -79,6 +79,7 @@ function ThemePanel() {
   const [t, setT] = useState(getTheme());
   return html`<section class="panel"><div class="panel-h"><h2>Appearance</h2></div><div class="panel-b">
     <div class="seg" role="group" aria-label="Theme">${[['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([k, l]) => html`<button aria-pressed=${t === k} onClick=${() => { setTheme(k); setT(k); }}>${l}</button>`)}</div>
+    <div class="seg" role="group" aria-label="Clock">${[['', 'Clock of this browser'], ['24', '24-hour'], ['12', '12-hour']].map(([k, l]) => html`<button aria-pressed=${getClock() === k} onClick=${() => setClock(k)}>${l}</button>`)}</div>
   </div></section>`;
 }
 

@@ -142,7 +142,7 @@ export function SchedulesPage() {
         <tbody>${sort.rows.map((s) => html`<tr>
           <td class="shrink"><input type="checkbox" class="switch" role="switch" checked=${s.enabled} onChange=${() => toggle(s)} aria-label=${`Enable ${s.name}`} /></td>
           <td><b>${s.name}</b><div class="small muted">${s.script_name}</div></td>
-          <td>${cronLabel(s.cron) ? html`${cronLabel(s.cron)}<div class="mono small muted">${s.cron}</div>` : html`<span class="mono">${s.cron}</span>`}</td>
+          <td>${s.once || cronLabel(s.cron) ? html`${s.once ? 'Once' : cronLabel(s.cron)}<div class="mono small muted">${s.cron}</div>` : html`<span class="mono">${s.cron}</span>`}</td>
           <td class="ink2 trunc max-cell sm hide-sm">${targetText(s.targets, servers)}</td>
           <td class="ink2 nowrap">${s.enabled && s.next ? when(s.next) : '–'}</td>
           <td class="nowrap">${s.last_job ? html`<a href=${`#/jobs/${s.last_job}`}>${ago(s.last_run)}</a>` : html`<span class="muted">never</span>`}</td>

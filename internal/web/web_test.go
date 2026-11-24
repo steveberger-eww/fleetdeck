@@ -2,11 +2,13 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"fleetdeck/internal/db"
 	"fleetdeck/internal/sec"
@@ -129,6 +131,15 @@ func TestAPISmoke(t *testing.T) {
 	code, m, _ = call("PUT", "/api/schedules/"+sched["id"].(string), `{"enabled":false}`)
 	if code != 200 || m["enabled"] != false || m["cron"] != "0 3 * * *" {
 		t.Fatalf("schedule merge: %d %v", code, m)
+	}
+	runAt := time.Now().Add(3 * time.Hour).Truncate(time.Minute)
+	code, once, _ := call("POST", "/api/schedules", fmt.Sprintf(`{"name":"later","script_id":"%s","run_at":%d,"targets":{"servers":["%s"]}}`, script["id"], runAt.UnixMilli(), server["id"]))
+	if code != 200 || once["once"] != true || once["next"] != float64(runAt.UnixMilli()) {
+		t.Fatalf("one-off schedule: %d %v", code, once)
+	}
+	code, m, _ = call("PUT", "/api/schedules/"+once["id"].(string), `{"enabled":false}`)
+	if code != 200 || m["once"] != true {
+		t.Fatalf("one-off merge: %d %v", code, m)
 	}
 	code, rule, _ := call("POST", "/api/alerts/rules", `{"metric":"cpu","threshold":"85","minutes":5,"server_id":"`+server["id"].(string)+`"}`)
 	expect(code, 200, rule, "create rule")

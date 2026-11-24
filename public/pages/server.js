@@ -1,6 +1,6 @@
 import {
   html, useState, useEffect, useRef, useMemo, api, go, store, useStore, useLoad, useQuery, useHold, serversStore, refreshServers, toast, confirmBox,
-  Btn, Th, useSort, StatusChip, LineChart, Empty, Modal, Loading, ErrorNote, Output, Icon, Copy, Menu, CellBar,
+  Btn, Th, useSort, StatusChip, LineChart, Empty, Modal, Footer, Field, Loading, ErrorNote, Output, Icon, Copy, Menu, CellBar,
   bytes, rate, pct, ago, dur, uptime, when, logTime, level,
 } from '../ui.js';
 import { ServerForm, serverBody, PRIV_TEXT } from './overview.js';
@@ -66,7 +66,7 @@ export function ServerPage({ id, tab }) {
   else if (tab === 'containers') body = html`<${ContainersTab} s=${s} />`;
   else if (tab === 'network') body = html`<${NetworkTab} s=${s} />`;
   else if (tab === 'terminal') body = html`<${TerminalTab} s=${s} />`;
-  else if (tab === 'jobs') body = html`<section class="panel"><${JobsTable} serverId=${s.id} /></section>`;
+  else if (tab === 'jobs') body = html`<div class="stack"><${ScheduledPanel} s=${s} /><section class="panel"><${JobsTable} serverId=${s.id} /></section></div>`;
   else if (tab === 'settings') body = html`<${SettingsTab} s=${s} />`;
   else body = html`<${OverviewTab} s=${s} />`;
 
@@ -182,6 +182,9 @@ function UpdatesTab({ s }) {
   const sort = useSort(list, 'security', 1, (x) => (x.security ? 0 : 1)); // security fixes first
   const toggle = (name) => setSel((x) => { const n = new Set(x); n.has(name) ? n.delete(name) : n.add(name); return n; });
   const auto = s.snapshot?.autoUpdates;
+  const [later, setLater] = useState(false);
+  const timers = useLoad(() => (auto ? api(`/api/servers/${s.id}/timers`) : null), [s.id, auto]);
+  const autoNext = timers.data?.find((x) => AUTO_TIMERS.includes(x.unit) && x.active === 'active' && x.next)?.next;
   const toggleAuto = async (e) => {
     e.target.checked = auto; // reflect reality until the job has run and the next probe reports it
     if (auto && !await confirmBox({ title: `Turn off automatic updates on ${s.name}?`, body: 'Security fixes then only arrive when you install updates yourself or on a schedule.', confirm: 'Turn off', danger: true })) return;
@@ -193,11 +196,12 @@ function UpdatesTab({ s }) {
       <div class="row right">
         <${Btn} size="sm" icon="refresh" onClick=${() => setRefresh((r) => r + 1)} disabled=${p.loading}>Refresh package lists</${Btn}>
         ${sel.size > 0 && html`<${Btn} size="sm" onClick=${() => startJob(s, 'upgrade-packages', { PACKAGES: [...sel].join(' ') })}>Upgrade ${sel.size} selected</${Btn}>`}
-        ${list.length > 0 && html`<${Btn} size="sm" kind="primary" onClick=${() => startJob(s, 'update')}>Upgrade all ${list.length}</${Btn}>`}
+        ${list.length > 0 && html`<${Btn} size="sm" icon="clock" onClick=${() => setLater(true)}>Later…</${Btn}><${Btn} size="sm" kind="primary" onClick=${() => startJob(s, 'update')}>Upgrade all ${list.length}</${Btn}>`}
       </div></div>
+    ${later && html`<${ScheduleRun} s=${s} scriptId="update" onClose=${() => setLater(false)} />`}
     ${auto != null && html`<div class="panel-b row b-bottom">
       <label class="check"><input type="checkbox" class="switch" role="switch" checked=${auto} onChange=${(e) => toggleAuto(e).catch((x) => toast(x.message, 'bad'))} />Automatic security updates</label>
-      <span class="small muted">${auto ? `${s.snapshot.pkg === 'apt' ? 'unattended-upgrades' : 'dnf-automatic'} installs updates by itself.` : 'Updates are only installed when you or a schedule run them.'}</span></div>`}
+      <span class="small muted">${auto ? `${s.snapshot.pkg === 'apt' ? 'unattended-upgrades' : 'dnf-automatic'} installs updates by itself${autoNext ? `, next run ${when(autoNext)}` : ''}.` : 'Updates are only installed when you or a schedule run them.'}</span></div>`}
     ${p.loading ? html`<${Loading} />` : p.error ? html`<div class="panel-b"><${ErrorNote} error=${p.error} retry=${p.reload} /></div>`
       : !list.length ? html`<${Empty} title="Everything is up to date">Fleetdeck checks the package cache every minute. Refresh the package lists to look for new releases now.</${Empty}>`
       : html`<div class="table-wrap"><table class="t"><thead><tr><th class="shrink"><input type="checkbox" aria-label="Select all" checked=${sel.size === list.length} onChange=${() => setSel(sel.size === list.length ? new Set() : new Set(list.map((x) => x.name)))} /></th>
@@ -206,6 +210,73 @@ function UpdatesTab({ s }) {
           <td>${x.security && html`<span class="chip warn">security</span>`}</td>
           <td class="mono">${x.name}</td><td class="mono ink2 hide-sm">${x.from || '–'}</td><td class="mono">${x.version}</td><td class="ink2 hide-sm">${x.source}</td></tr>`)}</tbody></table></div>`}
   </section></div>`;
+}
+
+// The systemd timers that install updates for unattended-upgrades / dnf-automatic.
+const AUTO_TIMERS = ['apt-daily-upgrade.timer', 'dnf-automatic-install.timer', 'dnf-automatic.timer', 'dnf5-automatic.timer'];
+
+// ---------- one-off runs ("in 3 hours", "at 22:00") ----------
+const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+function runAtOf(mode, hours, time) {
+  if (mode === 'in') return hours > 0 ? Date.now() + hours * 3600e3 : null;
+  const m = HHMM.exec(time.trim());
+  if (!m) return null;
+  const d = new Date();
+  d.setHours(+m[1], +m[2], 0, 0);
+  if (d <= Date.now()) d.setDate(d.getDate() + 1); // already past today: tomorrow
+  return d.getTime();
+}
+
+function ScheduleRun({ s, scriptId = 'update', onClose }) {
+  const scripts = useLoad(() => api('/api/scripts'));
+  const [v, setV] = useState({ script_id: scriptId, params: {}, mode: 'at', hours: 2, time: '22:00' });
+  const [err, setErr] = useState('');
+  const script = scripts.data?.find((x) => x.id === v.script_id);
+  const runAt = runAtOf(v.mode, Number(v.hours), v.time);
+  const save = async () => {
+    setErr('');
+    try {
+      await api('/api/schedules', { method: 'POST', body: { name: `${script?.name || v.script_id} on ${s.name}`.slice(0, 100), script_id: v.script_id, params: v.params, targets: { servers: [s.id] }, run_at: runAt } });
+      toast(`Scheduled for ${when(runAt)}`, 'ok', { label: 'Show', href: `#/servers/${s.id}/jobs` });
+      onClose(true);
+    } catch (e) { setErr(e.message); }
+  };
+  return html`<${Modal} title=${`Run later on ${s.name}`} onClose=${onClose}
+    footer=${html`<${Footer} onClose=${onClose} onSave=${save} label="Schedule" disabled=${!runAt || !script} />`}>
+    <${Field} label="Script">${scripts.loading ? html`<${Loading} />` : html`<select value=${v.script_id} onChange=${(e) => setV({ ...v, script_id: e.target.value, params: {} })}>${scripts.data.map((x) => html`<option value=${x.id}>${x.name}</option>`)}</select>`}</${Field}>
+    ${script?.params.map((p) => html`<${Field} label=${p.label}><input class="mono" value=${v.params[p.name] ?? p.default} onInput=${(e) => setV({ ...v, params: { ...v.params, [p.name]: e.target.value } })} /></${Field}>`)}
+    <div class="seg" role="group" aria-label="When">${[['at', 'At a time'], ['in', 'In some hours']].map(([k, l]) => html`<button type="button" aria-pressed=${v.mode === k} onClick=${() => setV({ ...v, mode: k })}>${l}</button>`)}</div>
+    ${v.mode === 'at'
+      ? html`<${Field} label="Time (24-hour)" hint="Today, or tomorrow if that time has passed"><input class="mono" inputmode="numeric" placeholder="22:00" value=${v.time} onInput=${(e) => setV({ ...v, time: e.target.value })} autofocus /></${Field}>`
+      : html`<${Field} label="Hours from now"><input type="number" min="0.25" step="0.25" value=${v.hours} onInput=${(e) => setV({ ...v, hours: e.target.value })} autofocus /></${Field}>`}
+    <p class="small ink2">${runAt ? `Runs ${when(runAt)}, once.` : 'Enter a time like 22:00.'}</p>
+    ${err && html`<p class="err">${err}</p>`}
+  </${Modal}>`;
+}
+
+// Schedules that reach this server (directly, by tag or "all"), with one-off runs cancellable here.
+function ScheduledPanel({ s }) {
+  const list = useLoad(() => api('/api/schedules'), [], { poll: 60_000 });
+  const [add, setAdd] = useState(false);
+  const mine = (list.data || []).filter((x) => x.enabled && (x.targets.all || x.targets.servers?.includes(s.id) || x.targets.tags?.some((t) => s.tags.includes(t))))
+    .sort((a, b) => (a.next || Infinity) - (b.next || Infinity));
+  const cancel = async (x) => {
+    if (!await confirmBox({ title: `Cancel "${x.name}"?`, confirm: 'Cancel run', danger: true })) return;
+    await api(`/api/schedules/${x.id}`, { method: 'DELETE' });
+    list.reload(true);
+  };
+  return html`<section class="panel">
+    <div class="panel-h"><h2>Scheduled</h2><a class="small" href="#/schedules">All schedules</a>
+      <${Btn} size="sm" icon="clock" class="right" onClick=${() => setAdd(true)}>Run later…</${Btn}></div>
+    ${list.error ? html`<div class="panel-b"><${ErrorNote} error=${list.error} retry=${list.reload} /></div>`
+      : !list.loading && !mine.length ? html`<div class="panel-b small muted">Nothing scheduled on this server.</div>`
+      : mine.length > 0 && html`<div class="table-wrap"><table class="t"><tbody>${mine.map((x) => html`<tr>
+        <td><b>${x.name}</b><div class="small muted">${x.script_name}</div></td>
+        <td class="ink2">${x.once ? 'Once' : html`<span class="mono">${x.cron}</span>`}</td>
+        <td class="nowrap">${x.next ? when(x.next) : '–'}</td>
+        <td class="act">${x.once && html`<${Btn} size="sm" kind="quiet-danger" onClick=${() => cancel(x).catch((e) => toast(e.message, 'bad'))}>Cancel</${Btn}>`}</td></tr>`)}</tbody></table></div>`}
+    ${add && html`<${ScheduleRun} s=${s} onClose=${(saved) => { setAdd(false); if (saved) list.reload(true); }} />`}
+  </section>`;
 }
 
 // Services whose binaries or libraries were replaced by an update but are still running the old code.

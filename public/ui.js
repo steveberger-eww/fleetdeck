@@ -122,11 +122,20 @@ export function dur(ms) {
   return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
 export const uptime = (s) => (s == null ? '–' : dur(s * 1000));
-const dtf = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+// Clock: '' = the locale's default, '24' or '12'. Read once at load; changing it reloads the page.
+export function getClock() {
+  try { return localStorage.getItem('fd-clock') || ''; } catch { return ''; }
+}
+export function setClock(c) {
+  try { localStorage.setItem('fd-clock', c); } catch { /* private mode */ }
+  location.reload();
+}
+const hc = { 24: { hourCycle: 'h23' }, 12: { hourCycle: 'h12' } }[getClock()];
+const dtf = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short', ...hc });
 export const when = (t) => (t ? dtf.format(new Date(t)) : '–');
-const tf = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+const tf = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', ...hc });
 const df = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
-const lf = new Intl.DateTimeFormat(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const lf = new Intl.DateTimeFormat(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', ...hc });
 export const logTime = (t) => lf.format(new Date(t));
 export const level = (v, warn = 0.75, bad = 0.9) => (v == null ? '' : v >= bad ? 'bad' : v >= warn ? 'warn' : '');
 export const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;

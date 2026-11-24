@@ -127,3 +127,22 @@ func TestJSONShapes(t *testing.T) {
 		t.Error(o)
 	}
 }
+
+func TestRunAt(t *testing.T) {
+	if err := Seed(); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().Add(3 * time.Hour)
+	in := ScheduleInput{Name: "later", ScriptID: "update", Targets: &Targets{All: true}, RunAt: new(when.UnixMilli())}
+	v, err := ValidateSchedule(in, true)
+	if err != nil || v.Once != 1 {
+		t.Fatal(v, err)
+	}
+	if match, _ := ParseCron(*v.Cron); !match(when.Truncate(time.Minute)) || match(when.Truncate(time.Minute).Add(time.Minute)) {
+		t.Fatal("cron", *v.Cron)
+	}
+	in.RunAt = new(time.Now().UnixMilli())
+	if _, err := ValidateSchedule(in, true); err == nil {
+		t.Fatal("current minute must be rejected")
+	}
+}

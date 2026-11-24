@@ -1135,6 +1135,8 @@ type ScheduleInput struct {
 	Targets  *Targets `json:"targets"`
 	Params   Values   `json:"params"`
 	Enabled  *bool    `json:"enabled"` // nil = true
+	Once     bool     `json:"once"`
+	RunAt    *int64   `json:"run_at"` // one-off at this time (ms): sets Cron and Once
 }
 
 // ScheduleFields are the validated columns; Cron is nil for triggers.
@@ -1145,6 +1147,7 @@ type ScheduleFields struct {
 	Targets  Targets
 	Params   Values
 	Enabled  int
+	Once     int
 }
 
 // ValidateSchedule validates a schedule; withCron=false for webhook triggers, which share the shape but have no cron.
@@ -1159,6 +1162,17 @@ func ValidateSchedule(b ScheduleInput, withCron bool) (*ScheduleFields, error) {
 	out := &ScheduleFields{Name: name, ScriptID: b.ScriptID, Params: b.Params, Enabled: 1}
 	if out.Params == nil {
 		out.Params = Values{}
+	}
+	if b.RunAt != nil && withCron {
+		// Cron in the Fleetdeck host's time zone, so the browser's zone doesn't matter.
+		t := time.UnixMilli(*b.RunAt).Local().Truncate(time.Minute)
+		if !t.After(time.Now()) {
+			return nil, httperr.Bad("pick a time in the future")
+		}
+		b.Cron, b.Once = fmt.Sprintf("%d %d %d %d *", t.Minute(), t.Hour(), t.Day(), int(t.Month())), true
+	}
+	if b.Once {
+		out.Once = 1
 	}
 	if withCron {
 		if _, err := ParseCron(b.Cron); err != nil {
@@ -1194,6 +1208,7 @@ type Schedule struct {
 	Targets   Targets `db:"targets" json:"targets"`
 	Params    Values  `db:"params" json:"params"`
 	Enabled   bool    `db:"enabled" json:"enabled"`
+	Once      bool    `db:"once" json:"once"`
 	LastRun   *int64  `db:"last_run" json:"last_run"`
 	LastJob   *int64  `db:"last_job" json:"last_job"`
 	CreatedAt int64   `db:"created_at" json:"created_at"`
@@ -1268,6 +1283,10 @@ func tick() {
 				continue
 			}
 			_, err = RunSchedule(s, "")
+			if err == nil && s.Once {
+				// ponytail: a one-off missed while Fleetdeck was down waits for the same date next year; delete it then.
+				_, err = db.Exec(`DELETE FROM schedules WHERE id = ?`, s.ID)
+			}
 		}
 		if err != nil {
 			db.Event("schedule", fmt.Sprintf("Schedule \"%s\" failed to start: %s", s.Name, err), db.EventOpts{Level: "error"})
