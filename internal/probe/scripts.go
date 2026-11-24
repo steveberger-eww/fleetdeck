@@ -78,6 +78,12 @@ for c in /sys/class/drm/card*; do
   h=$(ls -d "$d"/hwmon/hwmon* 2>/dev/null | head -1)
   echo "amd=${c##*/},$(cat "$d/gpu_busy_percent" 2>/dev/null),$(cat "$d/mem_info_vram_used" 2>/dev/null),$(cat "$d/mem_info_vram_total" 2>/dev/null),$(cat "$h/temp1_input" 2>/dev/null),$(cat "$h/power1_average" 2>/dev/null)"
 done
+# Proxmox VE: this node's VMs and LXC containers (pvesh needs root; on a cluster it lists every node's guests).
+if command -v pvesh >/dev/null 2>&1; then
+  T=''; command -v timeout >/dev/null 2>&1 && T='timeout 10'
+  echo "pve_node=$(uname -n | cut -d. -f1)"
+  echo "pve=$($T pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | tr -d '\n')"
+fi
 echo "probe_user=$(id -un)"
 true
 `
