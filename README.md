@@ -14,12 +14,12 @@ It combines the core ideas of three projects:
 
 ## Run it
 
-Requires Node 22.5 or newer.
+Requires Go 1.26 or newer to build. The result is a single binary with the UI embedded.
 
 ```sh
-npm install
-npm start          # http://127.0.0.1:8080
-npm test
+go build -o fleetdeck .
+./fleetdeck        # http://127.0.0.1:8080
+go test ./...
 ```
 
 On first start, the console prints a **setup token**. Open the page, enter the token and choose your password.
@@ -107,18 +107,19 @@ Anyone with access to Fleetdeck has root on every server in it, so the defaults 
 
 ## How it works
 
-`server.js` handles HTTP, authentication and routing. The rest lives in `lib/`:
+`main.go` reads the config and starts everything; the rest lives in `internal/`:
 
-- `ssh.js`: one pooled ssh2 connection per server, plus host-key pinning
-- `probe.js`: monitoring
-- `jobs.js`: jobs, cron and the built-in scripts
-- `alerts.js`: alert rules and notifications
-- `admin.js`: services, logs, packages, processes and Docker
-- `repos.js`: Git sync and Ansible runs
-- `sec.js`: encryption, password hashing and TOTP
-- `db.js`: storage in `node:sqlite`
+- `web`: HTTP, authentication, routing and the terminal WebSocket
+- `ssh`: one pooled connection per server (golang.org/x/crypto/ssh), plus host-key pinning
+- `probe`: monitoring
+- `jobs`: jobs, cron and the built-in scripts
+- `alerts`: alert rules and notifications
+- `admin`: services, logs, packages, processes, network and Docker
+- `repos`: Git sync and Ansible runs
+- `sec`: encryption, password hashing and TOTP
+- `db`: storage in SQLite (pure Go driver, no cgo)
 
-The UI in `public/` uses Preact and htm without a build step.
+The UI in `public/` uses Preact and htm without a build step; its libraries and fonts are vendored in `public/vendor/` and `public/fonts/` and embedded into the binary.
 
 ## Not included
 

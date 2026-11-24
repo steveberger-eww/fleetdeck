@@ -28,18 +28,18 @@
 
 ## 2. Architecture
 
-- **Backend:** Node 22. `node:sqlite` stores everything (no DB server). Uses **ssh2** for SSH: one pooled connection per server; keys stay in memory, so nothing decrypted touches disk; PTYs can be resized; host-key callback for pinning. Uses **ws** for the terminal websocket.
-- **Frontend:** **Preact + htm**, no build step, served from `node_modules`. **xterm.js** for the terminal. Hand-written SVG charts. **uqr** draws the TOTP QR code.
+- **Backend:** Go (originally Node 22; ported to Go as a single static binary). SQLite via a pure-Go driver stores everything (no DB server). Uses **x/crypto/ssh** for SSH: one pooled connection per server; keys stay in memory, so nothing decrypted touches disk; PTYs can be resized; host-key callback for pinning. Uses **coder/websocket** for the terminal websocket.
+- **Frontend:** **Preact + htm**, no build step, vendored in `public/` and embedded in the binary. **xterm.js** for the terminal. Hand-written SVG charts. The TOTP QR code is rendered server-side as SVG (**rsc.io/qr**).
 - **Probe:** one script piped over stdin, run with `sudo -n` when available, so it works with any remote login shell.
 - **Files:**
-  - `server.js`: HTTP, routing, auth
-  - `lib/db.js`
-  - `lib/sec.js`: crypto, sessions, TOTP
-  - `lib/ssh.js`
-  - `lib/probe.js`
-  - `lib/jobs.js`: jobs, cron, schedules
-  - `lib/alerts.js`
-  - `lib/admin.js`: services, logs, packages, processes, docker
+  - `main.go`, `internal/web`: HTTP, routing, auth
+  - `internal/db`
+  - `internal/sec`: crypto, sessions, TOTP
+  - `internal/ssh`
+  - `internal/probe`
+  - `internal/jobs`: jobs, cron, schedules
+  - `internal/alerts`
+  - `internal/admin`: services, logs, packages, processes, docker
   - `public/`: the UI
 
 ## 3. Security
