@@ -98,8 +98,8 @@ func TestProbeParser(t *testing.T) {
 	}
 	sort.Strings(mounts)
 	eq(t, mounts, []string{"/", "/boot"})
-	eq(t, *s.Disk, 0.25) // root mount, not the fullest
-	eq(t, *s.Disks[0].InodePct, 0.1) // ino=, from df -Pi
+	eq(t, *s.Disk, 0.25)                        // root mount, not the fullest
+	eq(t, *s.Disks[0].InodePct, 0.1)            // ino=, from df -Pi
 	eq(t, s.Disks[1].InodePct, (*float64)(nil)) // vfat: df reports no inodes
 	eq(t, *s.Temp, 48.5)
 	eq(t, *s.Docker, Docker{Running: 2, Total: 5})
