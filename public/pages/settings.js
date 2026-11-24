@@ -1,6 +1,6 @@
 import {
   html, useState, useEffect, useMemo, api, go, useLoad, useQuery, useStore, useDirty, toast, confirmBox, Btn, Th, useSort, Empty, Field, Modal, Footer, Loading, ErrorNote, Copy,
-  ago, when, getClock, setClock, meStore, refreshMe, can, isSuper, switchOrg, ROLES,
+  ago, when, getClock, setClock, meStore, refreshMe, can, isSuper, switchOrg, ROLES, passkeysSupported, createPasskey,
 } from '../ui.js';
 import { getTheme, setTheme } from '../theme.js';
 
@@ -31,6 +31,7 @@ function AccountSettings() {
         : html`<${ProfilePanel} a=${a} onChange=${reload} />
           <${PasswordPanel} has=${a.has_password} onChange=${reload} />
           <${TotpPanel} enabled=${a.totp} onChange=${reload} />
+          <${PasskeysPanel} list=${a.passkeys} onChange=${reload} />
           <${SsoSummary} />`}
       <${ThemePanel} />
     </div>
@@ -98,6 +99,37 @@ function TotpPanel({ enabled, onChange }) {
             <span class="mono wrap-any">${setup.secret.match(/.{1,4}/g).join(' ')}</span>
             <${Field} label="Code from the app"><input inputmode="numeric" maxlength="6" autofocus value=${code} onInput=${(e) => setCode(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && enable()} /></${Field}>
             <div class="row"><${Btn} kind="primary" onClick=${enable}>Turn on</${Btn}><button class="btn ghost" onClick=${() => setSetup(null)}>Cancel</button></div></div></div>`}
+      ${err && html`<p class="err" role="alert">${err}</p>`}
+    </div></section>`;
+}
+
+function PasskeysPanel({ list, onChange }) {
+  const [name, setName] = useState('');
+  const [err, setErr] = useState('');
+  const add = async () => {
+    setErr('');
+    try {
+      const options = await api('/api/account/passkeys/begin', { method: 'POST', body: { name } });
+      await api('/api/account/passkeys/finish', { method: 'POST', body: { credential: await createPasskey(options) } });
+      setName('');
+      toast('Passkey added', 'ok');
+      onChange();
+    } catch (e) { if (e.name !== 'NotAllowedError') setErr(e.message); }
+  };
+  const remove = async (p) => {
+    if (!await confirmBox({ title: `Remove the passkey "${p.name}"?`, body: 'You can no longer sign in with it. Also remove it from the device or password manager.', confirm: 'Remove passkey', danger: true })) return;
+    await api(`/api/account/passkeys/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
+    toast('Passkey removed');
+    onChange();
+  };
+  return html`<section class="panel"><div class="panel-h"><h2>Passkeys</h2>${list.length > 0 && html`<span class="chip ok">${list.length}</span>`}</div>
+    <div class="panel-b form">
+      <p class="small ink2">Sign in with your fingerprint, face or device PIN instead of a password and code. A passkey counts as both factors.</p>
+      ${list.length > 0 && html`<table class="t"><tbody>${list.map((p) => html`<tr><td><b>${p.name}</b><div class="small muted">Added ${ago(p.created_at)}${p.last_used ? `, last used ${ago(p.last_used)}` : ', never used'}</div></td>
+        <td class="act"><${Btn} size="sm" kind="ghost" icon="trash" title="Remove" onClick=${() => remove(p)} /></td></tr>`)}</tbody></table>`}
+      ${passkeysSupported() ? html`<div class="row nw"><input placeholder="Name, e.g. MacBook or YubiKey" value=${name} onInput=${(e) => setName(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && name.trim() && add()} class="grow" aria-label="Passkey name" />
+          <${Btn} kind="primary" disabled=${!name.trim()} onClick=${add}>Add passkey</${Btn}></div>`
+        : html`<p class="small ink2">Passkeys need HTTPS (or localhost) and a browser that supports them.</p>`}
       ${err && html`<p class="err" role="alert">${err}</p>`}
     </div></section>`;
 }

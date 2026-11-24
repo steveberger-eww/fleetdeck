@@ -210,6 +210,11 @@ CREATE TABLE IF NOT EXISTS check_results (
   check_id TEXT NOT NULL REFERENCES checks(id) ON DELETE CASCADE, t BIGINT NOT NULL, ok INTEGER NOT NULL, ms BIGINT,
   PRIMARY KEY (check_id, t));
 CREATE INDEX IF NOT EXISTS check_results_t ON check_results(t);
+
+-- Passkeys (WebAuthn). id: base64url credential id; credential: the verified credential as JSON (public key, sign count).
+CREATE TABLE IF NOT EXISTS passkeys (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, credential TEXT NOT NULL, created_at BIGINT NOT NULL, last_used BIGINT);
 `
 
 // Open opens the Postgres database at url and creates or updates the schema. dataDir (created 0700) holds the files.

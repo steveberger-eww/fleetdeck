@@ -758,8 +758,9 @@ func (s *Server) tenancyRoutes() {
 		for _, x := range list {
 			out = append(out, J{"id": x.Hash[:16], "created_at": x.CreatedAt, "seen_at": x.SeenAt, "ip": x.IP, "ua": x.UA, "current": x.Hash == c.sess.Hash})
 		}
+		passkeys, err := db.Select[passkeyRow](`SELECT * FROM passkeys WHERE user_id = ? ORDER BY created_at`, c.user.ID)
 		return J{"email": c.user.Email, "name": c.user.Name, "totp": c.user.TOTPSecret != nil, "has_password": c.user.PasswordHash != nil,
-			"locked": c.sess.Locked != 0, "sessions": out}, nil
+			"locked": c.sess.Locked != 0, "sessions": out, "passkeys": passkeys}, err
 	}, account)
 
 	s.route("PUT /api/account", func(c *ctx) (any, error) {

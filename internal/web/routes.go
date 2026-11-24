@@ -543,6 +543,7 @@ func detached(c *ctx) context.Context { return context.WithoutCancel(c.r.Context
 func (s *Server) routes() {
 	s.tenancyRoutes()
 	s.ssoRoutes()
+	s.passkeyRoutes()
 	s.serverRoutes()
 	s.libraryRoutes()
 	s.jobRoutes()
