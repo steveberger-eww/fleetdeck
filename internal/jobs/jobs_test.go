@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"slices"
@@ -178,4 +179,95 @@ func TestTypedParams(t *testing.T) {
 		t.Fatal(err)
 	}
 	eq(t, vars, map[string]any{"DRY": true, "ENV": "prod", "REGION": "eu"})
+}
+
+// Chains run on a server that refuses connections, so every step fails right away.
+func TestChain(t *testing.T) {
+	OnJobDone(chain)
+	if _, err := db.Exec(`INSERT INTO servers (id, name, host, port, created_at) VALUES ('dead', 'dead', '127.0.0.1', 1, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	var script func(id, next, when string)
+	script = func(id, next, when string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO scripts (id, tenant_id, name, body, created_at) VALUES (?, 'default', ?, 'true', 0) ON CONFLICT (id) DO NOTHING`, id, id); err != nil {
+			t.Fatal(err)
+		}
+		if next == "" {
+			return
+		}
+		script(next, "", "")
+		if _, err := db.Exec(`UPDATE scripts SET next_script_id = ?, next_when = ? WHERE id = ?`, next, when, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobCount := func() int { n, _ := db.Get[int](`SELECT COUNT(*) FROM jobs`); return *n }
+	settle := func(want int) {
+		t.Helper()
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+			mu.Lock()
+			idle := len(live) == 0
+			mu.Unlock()
+			if idle && jobCount() >= want {
+				time.Sleep(300 * time.Millisecond) // a step that shouldn't start would by now
+				break
+			}
+		}
+		if got := jobCount(); got != want {
+			ev, _ := db.Rows(`SELECT message FROM events ORDER BY id`)
+			js, _ := db.Rows(`SELECT id, name, status, actor, parent_job FROM jobs ORDER BY id`)
+			t.Fatalf("%d jobs, want %d\n%v\n%v", got, want, ev, js)
+		}
+	}
+	start := func(id string) int64 {
+		t.Helper()
+		sc, _ := GetScript(id)
+		sp := SpecFromScript(sc, Values{}, false)
+		sp.Targets, sp.TenantID, sp.Actor = Targets{Servers: []string{"dead"}}, "default", "test"
+		jid, err := StartJob(sp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return jid
+	}
+	base := jobCount()
+
+	// step1 -always-> step2 (fails) -failure-> step3 (fails) -success-> step4: skipped.
+	script("step3", "step4", "success")
+	script("step2", "step3", "failure")
+	script("step1", "step2", "always")
+	first := start("step1")
+	settle(base + 3)
+	j, _ := GetJob(first)
+	for _, name := range []string{"step2", "step3"} {
+		next, _ := GetJob(*j.NextJob)
+		if next.Name != name || *next.ParentJob != j.ID || *next.Actor != fmt.Sprintf("chain from #%d", j.ID) {
+			t.Fatalf("%s: %+v", name, next)
+		}
+		j = next
+	}
+	if j.NextJob != nil {
+		t.Fatal("step4 ran after a failure")
+	}
+
+	// Cancelled jobs and dry runs never continue.
+	chain("default", first, "", "cancelled", "", nil)
+	if _, err := db.Exec(`UPDATE jobs SET options = '{"check":true}' WHERE id = ?`, first); err != nil {
+		t.Fatal(err)
+	}
+	chain("default", first, "", "failed", "", nil)
+	settle(base + 3)
+
+	// A loop stops after MaxChain jobs.
+	script("loop-b", "loop-a", "failure")
+	script("loop-a", "loop-b", "failure")
+	start("loop-a")
+	settle(base + 3 + MaxChain)
+
+	if _, err := ValidateScript("default", ScriptInput{Name: "x", Body: "true", NextScript: "step1", NextWhen: "always", Self: "step1"}); err == nil {
+		t.Error("chained to itself")
+	}
+	if _, err := ValidateScript("default", ScriptInput{Name: "x", Body: "true", NextScript: "step1", NextWhen: "sometimes"}); err == nil {
+		t.Error("bad next_when")
+	}
 }

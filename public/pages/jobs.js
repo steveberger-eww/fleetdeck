@@ -177,7 +177,11 @@ export function JobPage({ id }) {
       if (m.type === 'snapshot') setJob(m.job);
       else if (m.type === 'data') patch(m.server, (r) => ({ ...r, output: r.output + m.data }));
       else if (m.type === 'run') patch(m.server, (r) => ({ ...r, status: m.status, exit_code: m.code ?? r.exit_code }));
-      else if (m.type === 'job') { setJob((j) => ({ ...j, status: m.status, finished_at: Date.now() })); es.close(); }
+      else if (m.type === 'job') {
+        setJob((j) => ({ ...j, status: m.status, finished_at: Date.now() }));
+        es.close();
+        setTimeout(() => api(`/api/jobs/${id}`).then(setJob, () => {}), 1000); // a chained script starts right after
+      }
     };
     es.onerror = () => { es.close(); api(`/api/jobs/${id}`).then(setJob, (e) => setError(e.message)); };
     return () => es.close();
@@ -209,7 +213,7 @@ export function JobPage({ id }) {
   return html`<div class="page">
     <div class="page-h">
       <div><div class="row"><h1>${job.name}</h1><${JobChip} status=${job.status} /></div>
-        <p class="sub">Job #${job.id}, started by ${job.actor} ${ago(job.created_at)}, ${job.finished_at ? 'took' : 'running for'} ${dur(took)}${job.options?.check ? '. Dry run, nothing was changed' : ''}</p></div>
+        <p class="sub">Job #${job.id}, started by ${job.parent_job ? html`<a href=${`#/jobs/${job.parent_job}`}>#${job.parent_job}</a>` : job.actor} ${ago(job.created_at)}, ${job.finished_at ? 'took' : 'running for'} ${dur(took)}${job.options?.check ? '. Dry run, nothing was changed' : ''}${job.next_job && html` · Then ran <a href=${`#/jobs/${job.next_job}`}>#${job.next_job}</a>`}</p></div>
       ${can('operator') && html`<div class="row right">
         ${job.status === 'running' && html`<${Btn} kind="danger" icon="stop" onClick=${cancel}>Cancel</${Btn}>`}
         ${job.status !== 'running' && failed.length > 0 && failed.length < hosts.length && html`<${Btn} onClick=${() => rerun(true)}>Re-run failed</${Btn}>`}

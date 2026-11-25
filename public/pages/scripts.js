@@ -22,7 +22,7 @@ export function ScriptsPage() {
   const sort = useSort(scripts.data);
   const [edit, setEdit] = useState(null);
   const del = async (s) => {
-    if (!await confirmBox({ title: `Delete "${s.name}"?`, body: 'Schedules that use it are deleted too. Past jobs keep their output.', confirm: 'Delete script', danger: true })) return;
+    if (!await confirmBox({ title: `Delete "${s.name}"?`, body: 'Schedules that use it are deleted too, and scripts that run it next stop before it. Past jobs keep their output.', confirm: 'Delete script', danger: true })) return;
     await api(`/api/scripts/${s.id}`, { method: 'DELETE' });
     toast('Script deleted');
     scripts.reload(true);
@@ -38,7 +38,8 @@ export function ScriptsPage() {
       ${scripts.loading ? html`<${Loading} />` : scripts.error ? html`<${ErrorNote} error=${scripts.error} retry=${scripts.reload} />` : html`<div class="table-wrap"><table class="t">
         <thead><tr><${Th} sort=${sort} k="name">Script</${Th}><${Th} sort=${sort} k="params" get=${(s) => s.params.length} desc>Parameters</${Th}><${Th} sort=${sort} k="as_root" get=${(s) => (s.as_root ? 'root' : 'user')}>Runs as</${Th}><th class="act"></th></tr></thead>
         <tbody>${sort.rows.map((s) => html`<tr>
-          <td><div class="row nw"><b>${s.name}</b>${s.builtin ? html`<span class="tag">built-in</span>` : s.shared && html`<span class="tag" title="From the shared library of this Fleetdeck">shared</span>`}${s.kind === 'ansible' && html`<span class="tag">ansible</span>`}</div><div class="small muted">${s.kind === 'ansible' ? html`<span class="mono">${s.playbook}</span> ` : ''}${s.description}</div></td>
+          <td><div class="row nw"><b>${s.name}</b>${s.builtin ? html`<span class="tag">built-in</span>` : s.shared && html`<span class="tag" title="From the shared library of this Fleetdeck">shared</span>`}${s.kind === 'ansible' && html`<span class="tag">ansible</span>`}</div><div class="small muted">${s.kind === 'ansible' ? html`<span class="mono">${s.playbook}</span> ` : ''}${s.description}</div>
+            ${s.next_script_id && html`<div class="small ink2">Then runs ${scripts.data.find((x) => x.id === s.next_script_id)?.name || 'another script'} ${NEXT_WHEN[s.next_when]}</div>`}</td>
           <td class="mono small ink2">${[...s.params.map((p) => p.name), ...s.vars].map((n) => (s.kind === 'ansible' ? n : `$${n}`)).join(' ') || '–'}</td>
           <td class="ink2">${s.kind === 'ansible' ? (s.as_root ? 'become root' : 'SSH user') : s.as_root ? 'root' : 'SSH user'}</td>
           <td class="act"><div class="row nw">
@@ -52,8 +53,13 @@ export function ScriptsPage() {
   </div>`;
 }
 
+const NEXT_WHEN = { success: 'when it succeeds', failure: 'when it fails', always: 'always' };
+
 function ScriptDialog({ script, onClose, onSaved }) {
-  const [v, setV] = useState({ name: '', description: '', body: '#!/bin/sh\nset -e\n\n', as_root: true, params: [], vars: [], kind: 'shell', repo_id: '', playbook: '', ...script });
+  const [v, setV] = useState({ name: '', description: '', body: '#!/bin/sh\nset -e\n\n', as_root: true, params: [], vars: [], kind: 'shell', repo_id: '', playbook: '', next_script_id: '', next_when: 'success', next_ok_only: false, ...script });
+  const all = useLoad(() => api('/api/scripts'));
+  // A shared script can only run another shared one next.
+  const nextChoices = (all.data || []).filter((x) => x.id !== script.id && (!(script.shared || v.shared) || x.shared));
   const dirty = useDirty(v);
   const repos = useLoad(() => api('/api/repos'));
   const shared = useLoad(() => api('/api/variables'));
@@ -114,6 +120,16 @@ function ScriptDialog({ script, onClose, onSaved }) {
         onClick=${() => setV({ ...v, vars: v.vars.includes(x.name) ? v.vars.filter((n) => n !== x.name) : [...v.vars, x.name] })}>${x.name}</button>`)}</div>`
         : html`<span class="small muted">None yet. Add tokens and passwords under <a href="#/variables" onClick=${onClose}>Variables</a>.</span>`}
       <span class="hint">Ticked variables are passed ${ansible ? 'as extra vars' : 'as environment variables'}. Secret values are masked in the output.</span>
+    </div>
+    <div class="field"><span>After this script finishes, run</span>
+      <div class="row nw">
+        <select value=${v.next_script_id || ''} onChange=${set('next_script_id')} class="grow" aria-label="Next script">
+          <option value="">Nothing</option>${nextChoices.map((x) => html`<option value=${x.id}>${x.name}</option>`)}</select>
+        ${v.next_script_id && html`<select value=${v.next_when} onChange=${set('next_when')} aria-label="When">
+          ${Object.entries(NEXT_WHEN).map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select>`}
+      </div>
+      ${v.next_script_id && html`<label class="check"><input type="checkbox" checked=${v.next_ok_only} onChange=${set('next_ok_only')} />Only on the servers where this script succeeded</label>
+        <span class="hint">The next script uses its parameter defaults. Cancelled jobs and dry runs don't continue; a chain stops after 10 jobs.</span>`}
     </div>
     ${err && html`<p class="err">${err}</p>`}
   </${Modal}>`;
