@@ -31,6 +31,7 @@ function Login({ auth, onDone, title, sub, ssoHref = '/api/auth/oidc/start' }) {
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const submit = async () => {
+    if (!needCode && (!f.email || !f.password)) return setErr('Enter your email and password.');
     setBusy(true); setErr('');
     try {
       const r = await api('/api/auth/login', { method: 'POST', body: { email: f.email, password: f.password, code: needCode ? f.code : undefined } });
@@ -55,7 +56,7 @@ function Login({ auth, onDone, title, sub, ssoHref = '/api/auth/oidc/start' }) {
       <${Field} label="Password"><input type="password" autocomplete="current-password" value=${f.password} onInput=${set('password')} onKeyDown=${enter} /></${Field}>`}
     ${needCode && html`<${Field} label="Authentication code"><input inputmode="numeric" autocomplete="one-time-code" autofocus maxlength="6" value=${f.code} onInput=${set('code')} onKeyDown=${enter} /></${Field}>`}
     ${err && html`<p class="err" role="alert">${err}</p>`}
-    <button class=${`btn ${orgBtn || sso ? '' : 'primary'}`} type="submit" disabled=${busy || (!needCode && (!f.email || !f.password))} onClick=${submit}>${busy ? 'Signing in…' : 'Sign in'}</button>
+    <button class=${`btn ${orgBtn || sso ? '' : 'primary'}`} type="submit" disabled=${busy} onClick=${submit}>${busy ? 'Signing in…' : 'Sign in'}</button>
     ${!needCode && passkeysSupported() && html`<button class="btn" type="button" disabled=${busy} onClick=${passkey}>Sign in with a passkey</button>`}
   </${AuthFrame}>`;
 }

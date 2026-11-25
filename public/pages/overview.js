@@ -1,7 +1,7 @@
 import {
   html, useState, useMemo, api, go, useStore, useLoad, useQuery, setQuery, useDirty, serversStore, runningStore, refreshServers,
   Btn, Lamp, Gauge, Spark, Empty, Field, Modal, Footer, Copy, Loading, JobChip, Icon, bytes, rate, traffic, ago, uptime, plural, eol,
-  flagList, byAttention, compare, can,
+  flagList, attention, byAttention, compare, can,
 } from '../ui.js';
 import { openRun, confirmRun } from './jobs.js';
 
@@ -21,10 +21,11 @@ function Unit({ s, selected, onSelect }) {
   const root = rootDisk(s);
   const info = n ? `${n.os || n.osId}, up ${uptime(n.uptime)}` : s.error ? s.error.message : 'Waiting for the first check';
   const end = eol(n);
-  return html`<div class=${`unit ${s.status}`} role="listitem" onClick=${(e) => !e.target.closest('a,input') && go(`/servers/${s.id}`)}>
+  const a = attention(s);
+  return html`<div class=${`unit ${s.status} ${a <= 2 ? 'bad' : a === 3 ? 'warn' : ''}`} role="listitem" onClick=${(e) => !e.target.closest('a,input') && go(`/servers/${s.id}`)}>
     <input type="checkbox" checked=${selected} aria-label=${`Select ${s.name}`} onChange=${onSelect} />
     <div class="name">
-      <div class="row nw"><${Lamp} status=${s.status} label /><a class="trunc" href=${`#/servers/${s.id}`} title=${info}>${s.name}</a>${end && html`<span class=${`eol ${end.kind}`} title=${`${n.os}: ${end.text}`} role="img" aria-label=${end.text}><${Icon} name="warn" size=${14} /></span>`}${s.tags.map((t) => html`<span class="tag hide-md">${t}</span>`)}</div>
+      <div class="row nw"><${Lamp} status=${s.status} label /><a class="trunc" href=${`#/servers/${s.id}`} title=${info}>${s.name}</a>${end && html`<span class=${`eol ${end.kind}`} title=${`${n.os}: ${end.text}`} role="img" aria-label=${end.text}><${Icon} name="warn" size=${14} /></span>`}${s.tags.length > 0 && html`<span class="tags hide-md">${s.tags.map((t) => html`<span class="tag">${t}</span>`)}</span>`}</div>
       <span class="mono trunc" title=${info}>${s.user}@${s.host}</span>
     </div>
     <div class="gauge-col"><${Gauge} label="CPU" value=${n?.cpu} /><${Spark} points=${s.spark} idx=${1} /></div>
@@ -37,6 +38,7 @@ function Unit({ s, selected, onSelect }) {
 
 // Stat-card filters; each is a predicate over a server.
 const FILTERS = {
+  problems: (s) => attention(s) <= 2, // the red rows: unreachable, alerts, failed units, unhealthy containers, disk health
   down: (s) => s.status === 'down' || s.ssh?.hostKeyMismatch,
   updates: (s) => s.snapshot?.updates > 0,
   alerts: (s) => s.alerts > 0,
@@ -73,6 +75,7 @@ export function Overview() {
   if (!servers) return html`<div class="page"><${Loading} /></div>`;
 
   const up = servers.filter((s) => s.status === 'up').length;
+  const problems = servers.filter(FILTERS.problems).length;
   const down = servers.filter(FILTERS.down).length;
   const withUpdates = servers.filter(FILTERS.updates);
   const updates = withUpdates.reduce((a, s) => a + s.snapshot.updates, 0);
@@ -104,6 +107,7 @@ export function Overview() {
     : html`
       <div class="strip" role="group" aria-label="Filter by state">
         <button onClick=${() => setFilter('')} title="Show all servers"><b>${up}<small> / ${servers.length}</small></b><span>Online</span></button>
+        <button class=${problems ? 'bad' : ''} ...${card('problems')}><b>${problems}</b><span>Need attention</span></button>
         <button class=${down ? 'bad' : ''} ...${card('down')}><b>${down}</b><span>Unreachable</span></button>
         <button class=${updates ? 'warn' : ''} ...${card('updates')}><b>${updates}</b><span>Pending updates${security ? `, ${security} security` : ''}</span></button>
         <button class=${alerting ? 'bad' : ''} ...${card('alerts')}><b>${alerting}</b><span>Alerts firing</span></button>
@@ -120,7 +124,7 @@ export function Overview() {
 
       <div class="row">
         <input type="search" class="w-sm" placeholder="Filter servers" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter servers" />
-        ${tags.map((t) => html`<button class="pill" aria-pressed=${tag === t} onClick=${() => setTag(tag === t ? '' : t)}>${t}</button>`)}
+        ${tags.map((t) => html`<button class="pill hide-sm" aria-pressed=${tag === t} onClick=${() => setTag(tag === t ? '' : t)}>${t}</button>`)}
         <label class="row nw right small muted">Sort
           <select value=${sortBy} onChange=${(e) => setSort(e.target.value)} aria-label="Sort servers">
             <option value="attention">Needs attention</option><option value="name">Name</option><option value="cpu">CPU</option><option value="mem">Memory</option><option value="disk">Disk</option>

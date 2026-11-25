@@ -148,8 +148,7 @@ export function JobsTable({ serverId, limit = 30, status = '' }) {
 export function JobsPage() {
   const [status, setStatus] = useQuery('status');
   return html`<div class="page">
-    <div class="page-h"><div><h1>Jobs</h1><p class="sub">Every script run, with per-server output. Kept for 90 days by default.</p></div>
-      ${can('operator') && html`<div class="right"><${Btn} kind="primary" icon="play" onClick=${() => openRun()}>Run script</${Btn}></div>`}</div>
+    <div class="page-h"><div><h1>Jobs</h1><p class="sub">Every script run, with per-server output. Kept for 90 days by default.</p></div></div>
     <section class="panel">
       <div class="panel-h"><div class="seg" role="group" aria-label="Status">${STATUS_FILTERS.map(([k, l]) => html`<button aria-pressed=${status === k} onClick=${() => setStatus(k)}>${l}</button>`)}</div></div>
       <${JobsTable} limit=${40} status=${status} />
