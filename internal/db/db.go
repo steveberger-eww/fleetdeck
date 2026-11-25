@@ -1,5 +1,5 @@
-// Package db is Fleetdeck's storage: one SQLite file (pure Go driver, no cgo) plus small query helpers.
-// The schema is shared with the earlier Node version, so existing data directories keep working.
+// Package db is Fleetdeck's storage: Postgres (pgx) plus small query helpers.
+// Queries are written with ? placeholders; the helpers rebind them to $1, $2, ...
 package db
 
 import (
@@ -10,163 +10,259 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
-	_ "modernc.org/sqlite"
 )
 
 var (
 	X       *sqlx.DB // the database; use the helpers below unless you need a transaction
-	DataDir string   // absolute path of DATA_DIR
+	DataDir string   // absolute path of DATA_DIR (secret.key, git checkouts, temp files)
 )
 
+// DefaultTenant is the organization a fresh install (or the SQLite import) starts with.
+const DefaultTenant = "default"
+
+// Booleans are INTEGER 0/1 and timestamps BIGINT epoch ms, as in the SQLite days, so the Go side didn't change.
+// Everything an organization owns has a tenant_id; per-server data (metrics, runs, alert state) is scoped through
+// its server or job. Every query in web/ filters on it. scripts.tenant_id NULL = the shared library (built-ins);
+// events.tenant_id NULL = instance events (sign-ins, setup).
+// ponytail: tenancy is enforced in the queries, not with row-level security: the background workers (probe, jobs,
+// alerts) work across tenants and would need a bypass anyway. Add RLS if queries ever get written by hand outside web/.
+// Additive changes go at the end as ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
 const schema = `
+CREATE TABLE IF NOT EXISTS tenants (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, created_at BIGINT NOT NULL);
+INSERT INTO tenants (id, name, slug, created_at) VALUES ('default', 'Default', 'default', 0) ON CONFLICT DO NOTHING;
+
+-- Instance settings (key_check, public_url, instance single sign-on, retention).
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+-- Organization settings (notify_jobs, the organization's own single sign-on).
+CREATE TABLE IF NOT EXISTS tenant_settings (
+  tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, key TEXT NOT NULL, value TEXT, PRIMARY KEY (tenant_id, key));
+
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', password_hash TEXT,
+  password_login INTEGER NOT NULL DEFAULT 1, -- 0 = single sign-on only (once an identity is connected)
+  totp_secret TEXT, totp_last BIGINT NOT NULL DEFAULT -1, super_admin INTEGER NOT NULL DEFAULT 0,
+  last_tenant TEXT, created_at BIGINT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users (lower(email));
+
+-- role: admin (everything) | owner (their servers, can share them) | operator (works on assigned servers) | viewer
+CREATE TABLE IF NOT EXISTS memberships (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  role TEXT NOT NULL, created_at BIGINT NOT NULL, PRIMARY KEY (user_id, tenant_id));
+
+-- provider: 'instance' or 'tenant:<id>'; subject: the provider's sub claim.
+CREATE TABLE IF NOT EXISTS identities (
+  provider TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL, PRIMARY KEY (provider, subject));
+
+CREATE TABLE IF NOT EXISTS invites (
+  token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  email TEXT NOT NULL, role TEXT NOT NULL, created_by TEXT, expires_at BIGINT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS keys (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, public_key TEXT NOT NULL,
-  private_enc TEXT NOT NULL, passphrase_enc TEXT, created_at INTEGER NOT NULL);
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, public_key TEXT NOT NULL,
+  private_enc TEXT NOT NULL, passphrase_enc TEXT, created_at BIGINT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS repos (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, url TEXT NOT NULL, branch TEXT NOT NULL DEFAULT 'main',
+  auth TEXT NOT NULL DEFAULT 'none', key_id TEXT REFERENCES keys(id), username TEXT, token_enc TEXT,
+  last_sync BIGINT, last_commit TEXT, last_error TEXT, created_at BIGINT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS servers (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL DEFAULT 22,
-  user TEXT NOT NULL DEFAULT 'root', key_id TEXT REFERENCES keys(id),
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL DEFAULT 22,
+  "user" TEXT NOT NULL DEFAULT 'root', key_id TEXT REFERENCES keys(id),
   tags TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', host_key TEXT,
-  paused INTEGER NOT NULL DEFAULT 0, last_json TEXT, created_at INTEGER NOT NULL);
+  paused INTEGER NOT NULL DEFAULT 0, last_json TEXT, created_at BIGINT NOT NULL,
+  host_key_raw TEXT, -- full key for known_hosts (Ansible)
+  sudo_enc TEXT);    -- encrypted sudo password, for users without NOPASSWD
 
 CREATE TABLE IF NOT EXISTS metrics (
-  server_id TEXT NOT NULL, t INTEGER NOT NULL,
-  cpu REAL, mem REAL, swap REAL, disk REAL, load1 REAL, rx REAL, tx REAL, dr REAL, dw REAL, temp REAL,
-  PRIMARY KEY (server_id, t)) WITHOUT ROWID;
+  server_id TEXT NOT NULL, t BIGINT NOT NULL,
+  cpu DOUBLE PRECISION, mem DOUBLE PRECISION, swap DOUBLE PRECISION, disk DOUBLE PRECISION, load1 DOUBLE PRECISION,
+  rx DOUBLE PRECISION, tx DOUBLE PRECISION, dr DOUBLE PRECISION, dw DOUBLE PRECISION, temp DOUBLE PRECISION,
+  gpu DOUBLE PRECISION,     -- busiest GPU, 0-1
+  gpu_mem DOUBLE PRECISION, -- its memory used, 0-1
+  PRIMARY KEY (server_id, t));
+CREATE INDEX IF NOT EXISTS metrics_t ON metrics(t);
 
 -- Keyed by name, not id: compose recreates containers with new ids.
 CREATE TABLE IF NOT EXISTS container_metrics (
-  server_id TEXT NOT NULL, name TEXT NOT NULL, t INTEGER NOT NULL, cpu REAL, mem REAL,
-  PRIMARY KEY (server_id, name, t)) WITHOUT ROWID;
+  server_id TEXT NOT NULL, name TEXT NOT NULL, t BIGINT NOT NULL, cpu DOUBLE PRECISION, mem DOUBLE PRECISION,
+  PRIMARY KEY (server_id, name, t));
 
 CREATE TABLE IF NOT EXISTS scripts (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
+  id TEXT PRIMARY KEY, tenant_id TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
   as_root INTEGER NOT NULL DEFAULT 1, params TEXT NOT NULL DEFAULT '[]', builtin INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL);
+  created_at BIGINT NOT NULL, kind TEXT NOT NULL DEFAULT 'shell', repo_id TEXT REFERENCES repos(id), playbook TEXT,
+  vars TEXT NOT NULL DEFAULT '[]'); -- names of shared variables the script receives
 
 CREATE TABLE IF NOT EXISTS jobs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, script_id TEXT, name TEXT NOT NULL, body TEXT NOT NULL,
+  id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  script_id TEXT, name TEXT NOT NULL, body TEXT NOT NULL,
   as_root INTEGER NOT NULL, params TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, actor TEXT,
-  created_at INTEGER NOT NULL, finished_at INTEGER);
+  created_at BIGINT NOT NULL, finished_at BIGINT,
+  kind TEXT NOT NULL DEFAULT 'shell', repo_id TEXT, options TEXT NOT NULL DEFAULT '{}', commit_sha TEXT);
 
 CREATE TABLE IF NOT EXISTS job_runs (
-  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, server_id TEXT NOT NULL, server_name TEXT,
-  status TEXT NOT NULL, exit_code INTEGER, output TEXT NOT NULL DEFAULT '', started_at INTEGER, finished_at INTEGER,
+  job_id BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, server_id TEXT NOT NULL, server_name TEXT,
+  status TEXT NOT NULL, exit_code INTEGER, output TEXT NOT NULL DEFAULT '', started_at BIGINT, finished_at BIGINT,
   PRIMARY KEY (job_id, server_id));
 
 CREATE TABLE IF NOT EXISTS schedules (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, script_id TEXT NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, script_id TEXT NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
   cron TEXT NOT NULL, targets TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
-  last_run INTEGER, last_job INTEGER, created_at INTEGER NOT NULL);
+  last_run BIGINT, last_job BIGINT, created_at BIGINT NOT NULL,
+  once INTEGER NOT NULL DEFAULT 0); -- one-off run: deleted after it fires
+
+CREATE TABLE IF NOT EXISTS custom_metrics (
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, unit TEXT NOT NULL DEFAULT '', command TEXT NOT NULL,
+  server_id TEXT REFERENCES servers(id) ON DELETE CASCADE, tag TEXT, created_at BIGINT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS custom_values (
+  server_id TEXT NOT NULL, metric_id TEXT NOT NULL, t BIGINT NOT NULL, v DOUBLE PRECISION,
+  PRIMARY KEY (server_id, metric_id, t));
 
 CREATE TABLE IF NOT EXISTS alert_rules (
-  id TEXT PRIMARY KEY, server_id TEXT REFERENCES servers(id) ON DELETE CASCADE, metric TEXT NOT NULL,
-  threshold REAL NOT NULL DEFAULT 0, minutes INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
-  created_at INTEGER NOT NULL);
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  server_id TEXT REFERENCES servers(id) ON DELETE CASCADE, metric TEXT NOT NULL,
+  threshold DOUBLE PRECISION NOT NULL DEFAULT 0, minutes INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+  created_at BIGINT NOT NULL,
+  tag TEXT,   -- rule applies to servers with this tag
+  mount TEXT, -- disk/inodes rules: watch this mount only
+  custom_id TEXT REFERENCES custom_metrics(id) ON DELETE CASCADE); -- metric 'custom'
 
 CREATE TABLE IF NOT EXISTS alert_state (
   rule_id TEXT NOT NULL REFERENCES alert_rules(id) ON DELETE CASCADE,
   server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-  since INTEGER NOT NULL, message TEXT NOT NULL, PRIMARY KEY (rule_id, server_id));
+  since BIGINT NOT NULL, message TEXT NOT NULL,
+  notified INTEGER NOT NULL DEFAULT 1, -- 0 = fired during quiet hours, not sent yet
+  PRIMARY KEY (rule_id, server_id));
 
 CREATE TABLE IF NOT EXISTS notifiers (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, config_enc TEXT NOT NULL,
-  enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, type TEXT NOT NULL, config_enc TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1, created_at BIGINT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, t INTEGER NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info',
+  id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, tenant_id TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+  t BIGINT NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info',
   server_id TEXT, actor TEXT, ip TEXT, message TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_t ON events(t);
 
-CREATE TABLE IF NOT EXISTS repos (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, branch TEXT NOT NULL DEFAULT 'main',
-  auth TEXT NOT NULL DEFAULT 'none', key_id TEXT REFERENCES keys(id), username TEXT, token_enc TEXT,
-  last_sync INTEGER, last_commit TEXT, last_error TEXT, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS events_tenant ON events(tenant_id, id);
+
+-- Who sees a server besides the organization's admins.
+CREATE TABLE IF NOT EXISTS server_members (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (server_id, user_id));
 
 -- Quiet hours: alerts keep their state but don't notify. daily: minutes after local midnight; once: epoch ms.
 CREATE TABLE IF NOT EXISTS mute_windows (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', server_id TEXT REFERENCES servers(id) ON DELETE CASCADE, tag TEXT,
-  kind TEXT NOT NULL, start_at INTEGER NOT NULL, end_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL DEFAULT '', server_id TEXT REFERENCES servers(id) ON DELETE CASCADE, tag TEXT,
+  kind TEXT NOT NULL, start_at BIGINT NOT NULL, end_at BIGINT NOT NULL, created_at BIGINT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS triggers (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, script_id TEXT NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, script_id TEXT NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
   targets TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}', token_hash TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1,
-  last_run INTEGER, last_job INTEGER, created_at INTEGER NOT NULL);
+  last_run BIGINT, last_job BIGINT, created_at BIGINT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS variables (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, value_enc TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 1,
-  description TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, value_enc TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 1,
+  description TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL, UNIQUE (tenant_id, name));
 
--- Custom metrics: a shell command run by the probe that prints one number. Scoped like alert rules.
-CREATE TABLE IF NOT EXISTS custom_metrics (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, unit TEXT NOT NULL DEFAULT '', command TEXT NOT NULL,
-  server_id TEXT REFERENCES servers(id) ON DELETE CASCADE, tag TEXT, created_at INTEGER NOT NULL);
-
-CREATE TABLE IF NOT EXISTS custom_values (
-  server_id TEXT NOT NULL, metric_id TEXT NOT NULL, t INTEGER NOT NULL, v REAL,
-  PRIMARY KEY (server_id, metric_id, t)) WITHOUT ROWID;
-
+-- tenant_id: the organization the session works in. locked = signed in with that organization's own single
+-- sign-on: the session stays in it and has no super-admin powers.
 CREATE TABLE IF NOT EXISTS sessions (
-  hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, ip TEXT, ua TEXT);
+  hash TEXT PRIMARY KEY, created_at BIGINT NOT NULL, seen_at BIGINT NOT NULL, ip TEXT, ua TEXT,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, tenant_id TEXT REFERENCES tenants(id) ON DELETE SET NULL,
+  locked INTEGER NOT NULL DEFAULT 0);
 `
 
-// Additive migrations for databases created by earlier versions.
-var migrations = [][3]string{
-	{"servers", "host_key_raw", "TEXT"}, // full key for known_hosts (Ansible)
-	{"servers", "sudo_enc", "TEXT"},     // encrypted sudo password, for users without NOPASSWD
-	{"scripts", "kind", "TEXT NOT NULL DEFAULT 'shell'"},
-	{"scripts", "repo_id", "TEXT REFERENCES repos(id)"},
-	{"scripts", "playbook", "TEXT"},
-	{"jobs", "kind", "TEXT NOT NULL DEFAULT 'shell'"},
-	{"jobs", "repo_id", "TEXT"},
-	{"jobs", "options", "TEXT NOT NULL DEFAULT '{}'"},
-	{"jobs", "commit_sha", "TEXT"},
-	{"alert_rules", "tag", "TEXT"},                                                       // rule applies to servers with this tag
-	{"alert_state", "notified", "INTEGER NOT NULL DEFAULT 1"},                            // 0 = fired during quiet hours, not sent yet
-	{"scripts", "vars", "TEXT NOT NULL DEFAULT '[]'"},                                    // names of shared variables the script receives
-	{"schedules", "once", "INTEGER NOT NULL DEFAULT 0"},                                  // one-off run: deleted after it fires
-	{"alert_rules", "mount", "TEXT"},                                                     // disk/inodes rules: watch this mount only
-	{"metrics", "gpu", "REAL"},                                                           // busiest GPU, 0-1
-	{"metrics", "gpu_mem", "REAL"},                                                       // its memory used, 0-1
-	{"alert_rules", "custom_id", "TEXT REFERENCES custom_metrics(id) ON DELETE CASCADE"}, // metric 'custom'
-}
-
-// Open creates dir (0700) and opens or creates fleetdeck.db in it.
-func Open(dir string) error {
-	abs, err := filepath.Abs(dir)
+// Open opens the Postgres database at url and creates or updates the schema. dataDir (created 0700) holds the files.
+func Open(dataDir, url string) error {
+	abs, err := filepath.Abs(dataDir)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return err
 	}
-	dsn := "file:" + filepath.Join(abs, "fleetdeck.db") +
-		"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate"
-	x, err := sqlx.Open("sqlite", dsn)
+	if url == "" {
+		return errors.New("DATABASE_URL is not set (e.g. postgres://fleetdeck:fleetdeck@localhost:5432/fleetdeck?sslmode=disable)")
+	}
+	x, err := sqlx.Open("pgx", url)
 	if err != nil {
 		return err
 	}
 	if _, err := x.Exec(schema); err != nil {
+		x.Close()
 		return fmt.Errorf("schema: %w", err)
 	}
-	for _, m := range migrations {
-		var n int
-		if err := x.Get(&n, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, m[0], m[1]); err != nil {
-			return err
-		}
-		if n == 0 {
-			if _, err := x.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2])); err != nil {
-				return fmt.Errorf("migrate %s.%s: %w", m[0], m[1], err)
-			}
-		}
+	if X != nil {
+		X.Close()
 	}
 	X, DataDir = x, abs
 	return nil
+}
+
+var testSchema string
+
+// OpenTest opens a fresh, empty schema in FLEETDECK_TEST_DATABASE_URL (default: the compose.yaml database).
+// DropTest removes it again.
+func OpenTest(dataDir string) error {
+	DropTest()
+	url := os.Getenv("FLEETDECK_TEST_DATABASE_URL")
+	if url == "" {
+		url = "postgres://fleetdeck:fleetdeck@localhost:5432/fleetdeck?sslmode=disable"
+	}
+	name := "test_" + strings.ReplaceAll(NewID(), "-", "")
+	admin, err := sqlx.Open("pgx", url)
+	if err != nil {
+		return err
+	}
+	defer admin.Close()
+	if _, err := admin.Exec("CREATE SCHEMA " + name); err != nil {
+		return err
+	}
+	sep := "?"
+	if strings.Contains(url, "?") {
+		sep = "&"
+	}
+	testSchema = name
+	if err := Open(dataDir, url+sep+"search_path="+name); err != nil {
+		return err
+	}
+	// Test fixtures leave tenant_id out: in tests it defaults to the default organization.
+	for _, t := range []string{"keys", "repos", "servers", "jobs", "schedules", "triggers", "variables", "custom_metrics", "alert_rules", "notifiers", "mute_windows"} {
+		if _, err := X.Exec("ALTER TABLE " + t + " ALTER COLUMN tenant_id SET DEFAULT '" + DefaultTenant + "'"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DropTest drops the schema OpenTest made, if any.
+func DropTest() {
+	if testSchema == "" || X == nil {
+		return
+	}
+	if _, err := X.Exec("DROP SCHEMA " + testSchema + " CASCADE"); err != nil {
+		log.Printf("drop test schema: %v", err)
+	}
+	testSchema = ""
 }
 
 // Now is the current time in epoch milliseconds, the unit every timestamp column uses.
@@ -184,7 +280,7 @@ func NewID() string {
 // Get scans one row into a T (struct with `db` tags, or a scalar). Returns nil, nil when there is no row.
 func Get[T any](q string, args ...any) (*T, error) {
 	var v T
-	if err := X.Get(&v, q, args...); err != nil {
+	if err := X.Get(&v, X.Rebind(q), args...); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -196,7 +292,7 @@ func Get[T any](q string, args ...any) (*T, error) {
 // Select scans all rows into a slice of T. Never returns a nil slice (so it encodes as [] in JSON).
 func Select[T any](q string, args ...any) ([]T, error) {
 	v := []T{}
-	if err := X.Select(&v, q, args...); err != nil {
+	if err := X.Select(&v, X.Rebind(q), args...); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -207,7 +303,7 @@ type Row = map[string]any
 
 // Rows returns all rows as maps.
 func Rows(q string, args ...any) ([]Row, error) {
-	rs, err := X.Queryx(q, args...)
+	rs, err := X.Queryx(X.Rebind(q), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -229,15 +325,21 @@ func Rows(q string, args ...any) ([]Row, error) {
 }
 
 // Exec runs a statement.
-func Exec(q string, args ...any) (sql.Result, error) { return X.Exec(q, args...) }
+func Exec(q string, args ...any) (sql.Result, error) { return X.Exec(X.Rebind(q), args...) }
+
+// Txn is a transaction whose Exec and Get take ? placeholders like the helpers above.
+type Txn struct{ *sqlx.Tx }
+
+func (t Txn) Exec(q string, args ...any) (sql.Result, error) { return t.Tx.Exec(t.Rebind(q), args...) }
+func (t Txn) Get(dest any, q string, args ...any) error      { return t.Tx.Get(dest, t.Rebind(q), args...) }
 
 // Tx runs fn in a transaction; it commits when fn returns nil and rolls back otherwise.
-func Tx(fn func(tx *sqlx.Tx) error) error {
+func Tx(fn func(tx Txn) error) error {
 	tx, err := X.Beginx()
 	if err != nil {
 		return err
 	}
-	if err := fn(tx); err != nil {
+	if err := fn(Txn{tx}); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -247,7 +349,7 @@ func Tx(fn func(tx *sqlx.Tx) error) error {
 // Setting returns a settings value, or fallback when it is unset.
 func Setting(key, fallback string) string {
 	var v sql.NullString
-	if err := X.Get(&v, `SELECT value FROM settings WHERE key = ?`, key); err != nil || !v.Valid {
+	if err := X.Get(&v, `SELECT value FROM settings WHERE key = $1`, key); err != nil || !v.Valid {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			log.Printf("setting %s: %v", key, err)
 		}
@@ -259,17 +361,41 @@ func Setting(key, fallback string) string {
 // SetSetting stores a value; nil deletes the key. Non-string values are stored with fmt's %v.
 func SetSetting(key string, value any) error {
 	if value == nil {
-		_, err := X.Exec(`DELETE FROM settings WHERE key = ?`, key)
+		_, err := X.Exec(`DELETE FROM settings WHERE key = $1`, key)
 		return err
 	}
-	_, err := X.Exec(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	_, err := X.Exec(`INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
 		key, fmt.Sprint(value))
+	return err
+}
+
+// TenantSetting returns an organization's setting, or fallback when it is unset.
+func TenantSetting(tenant, key, fallback string) string {
+	v, err := Get[sql.NullString](`SELECT value FROM tenant_settings WHERE tenant_id = ? AND key = ?`, tenant, key)
+	if err != nil {
+		log.Printf("tenant setting %s: %v", key, err)
+	}
+	if v == nil || !v.Valid {
+		return fallback
+	}
+	return v.String
+}
+
+// SetTenantSetting stores an organization's setting; nil deletes it.
+func SetTenantSetting(tenant, key string, value any) error {
+	if value == nil {
+		_, err := Exec(`DELETE FROM tenant_settings WHERE tenant_id = ? AND key = ?`, tenant, key)
+		return err
+	}
+	_, err := Exec(`INSERT INTO tenant_settings (tenant_id, key, value) VALUES (?, ?, ?) ON CONFLICT (tenant_id, key) DO UPDATE SET value = excluded.value`,
+		tenant, key, fmt.Sprint(value))
 	return err
 }
 
 // EventOpts are the optional columns of an event. Empty strings are stored as NULL.
 type EventOpts struct {
 	Level    string // info (default), warn, error
+	TenantID string // "" = the server's organization, or an instance event when there is no server
 	ServerID string
 	Actor    string
 	IP       string
@@ -280,8 +406,9 @@ func Event(kind, message string, o EventOpts) {
 	if o.Level == "" {
 		o.Level = "info"
 	}
-	if _, err := X.Exec(`INSERT INTO events (t, kind, level, server_id, actor, ip, message) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		Now(), kind, o.Level, nullStr(o.ServerID), nullStr(o.Actor), nullStr(o.IP), message); err != nil {
+	if _, err := Exec(`INSERT INTO events (t, kind, level, tenant_id, server_id, actor, ip, message)
+    VALUES (?, ?, ?, COALESCE(?, (SELECT tenant_id FROM servers WHERE id = ?)), ?, ?, ?, ?)`,
+		Now(), kind, o.Level, nullStr(o.TenantID), o.ServerID, nullStr(o.ServerID), nullStr(o.Actor), nullStr(o.IP), message); err != nil {
 		log.Printf("event %s: %v (%s)", kind, err, message)
 	}
 }
@@ -296,6 +423,7 @@ func nullStr(s string) any {
 // Server is a row of the servers table. JSON tags match the column names.
 type Server struct {
 	ID         string  `db:"id" json:"id"`
+	TenantID   string  `db:"tenant_id" json:"-"`
 	Name       string  `db:"name" json:"name"`
 	Host       string  `db:"host" json:"host"`
 	Port       int     `db:"port" json:"port"`

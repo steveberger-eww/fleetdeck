@@ -43,8 +43,11 @@ func run() error {
 	}
 	trustProxy := os.Getenv("FLEETDECK_TRUST_PROXY") == "1"
 
-	if err := db.Open(cmp.Or(os.Getenv("DATA_DIR"), "data")); err != nil {
+	if err := db.Open(cmp.Or(os.Getenv("DATA_DIR"), "data"), os.Getenv("DATABASE_URL")); err != nil {
 		return fmt.Errorf("database: %w", err)
+	}
+	if err := db.ImportSQLite(); err != nil {
+		return fmt.Errorf("import from SQLite: %w", err)
 	}
 	if err := sec.Init(); err != nil {
 		return err
@@ -65,9 +68,6 @@ func run() error {
 	}
 	if err := jobs.Start(); err != nil {
 		return fmt.Errorf("jobs: %w", err)
-	}
-	if err := alerts.Seed(); err != nil {
-		return fmt.Errorf("alerts: %w", err)
 	}
 	probe.OnProbe(alerts.Evaluate)
 	jobs.OnJobDone(alerts.OnJobDone)

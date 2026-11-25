@@ -19,13 +19,14 @@ import (
 
 func TestMain(m *testing.M) {
 	dir, _ := os.MkdirTemp("", "fleetdeck-test-")
-	if err := db.Open(dir); err != nil {
+	if err := db.OpenTest(dir); err != nil {
 		panic(err)
 	}
 	if err := sec.Init(); err != nil {
 		panic(err)
 	}
 	code := m.Run()
+	db.DropTest()
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
@@ -34,10 +35,10 @@ func TestMain(m *testing.M) {
 func TestSeries(t *testing.T) {
 	now := db.Now()/60_000*60_000 - 30_000 // mid-minute, so now and now+1 share a bucket
 	for _, q := range []string{
-		`INSERT INTO metrics (server_id, t, cpu, mem, temp) VALUES ('a', ?, 0.2, 0.5, NULL), ('a', ? + 1, 0.4, NULL, 40), ('a', ? - 7200000, 0.9, 0.9, 0)`,
-		`INSERT INTO container_metrics (server_id, name, t, cpu, mem) VALUES ('a', 'web', ?, 10, NULL), ('a', 'web', ? + 1, 20, NULL), ('a', 'web', ? - 7200000, 1, 1)`,
+		`INSERT INTO metrics (server_id, t, cpu, mem, temp) VALUES ('a', ?, 0.2, 0.5, NULL), ('a', ?, 0.4, NULL, 40), ('a', ?, 0.9, 0.9, 0)`,
+		`INSERT INTO container_metrics (server_id, name, t, cpu, mem) VALUES ('a', 'web', ?, 10, NULL), ('a', 'web', ?, 20, NULL), ('a', 'web', ?, 1, 1)`,
 	} {
-		if _, err := db.Exec(q, now, now, now); err != nil {
+		if _, err := db.Exec(q, now, now+1, now-7200000); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -290,7 +291,7 @@ func TestCustomMetrics(t *testing.T) {
 	eq(t, Parse("x=1").Custom, map[string]CustomValue(nil))
 
 	now := db.Now() / 60_000 * 60_000
-	_, err = db.Exec(`INSERT INTO custom_values (server_id, metric_id, t, v) VALUES ('cm', 'c-all', ?, 10), ('cm', 'c-all', ? + 1, 20), ('cm', 'c-tag', ?, 99)`, now, now, now)
+	_, err = db.Exec(`INSERT INTO custom_values (server_id, metric_id, t, v) VALUES ('cm', 'c-all', ?, 10), ('cm', 'c-all', ?, 20), ('cm', 'c-tag', ?, 99)`, now, now+1, now)
 	must(t, err)
 	sr, err := CustomSeries("cm", "c-all", "1h")
 	must(t, err)

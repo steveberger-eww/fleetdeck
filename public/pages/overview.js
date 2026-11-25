@@ -1,7 +1,7 @@
 import {
   html, useState, useMemo, api, go, useStore, useLoad, useQuery, setQuery, useDirty, serversStore, runningStore, refreshServers,
   Btn, Lamp, Gauge, Spark, Empty, Field, Modal, Footer, Copy, Loading, JobChip, Icon, bytes, rate, traffic, ago, uptime, plural, eol,
-  flagList, byAttention, compare,
+  flagList, byAttention, compare, can,
 } from '../ui.js';
 import { openRun, confirmRun } from './jobs.js';
 
@@ -58,7 +58,8 @@ export function Overview() {
   const [sortBy, setSort] = useQuery('sort', 'attention');
   const [adding] = useQuery('add');
   const [sel, setSel] = useState(() => new Set());
-  const alerts = useLoad(() => api('/api/alerts'), [], { poll: 30_000 });
+  const admin = can('admin');
+  const alerts = useLoad(() => (admin ? api('/api/alerts') : null), [admin], { poll: admin ? 30_000 : 0 }); // the firing list is admins'; others see counts per server
   const jobs = useLoad(() => api('/api/jobs?limit=6'), [], { poll: 10_000 });
 
   const tags = useMemo(() => [...new Set((servers || []).flatMap((s) => s.tags))].sort(), [servers]);
@@ -93,12 +94,13 @@ export function Overview() {
   return html`<div class="page">
     <div class="page-h">
       <div><h1>Fleet</h1><p class="sub">${plural(servers.length, 'server')}, checked every minute</p></div>
-      <div class="row right"><${Btn} kind="primary" icon="plus" onClick=${() => setQuery({ add: '1' })}>Add server</${Btn}></div>
+      ${can('owner') && html`<div class="row right"><${Btn} kind="primary" icon="plus" onClick=${() => setQuery({ add: '1' })}>Add server</${Btn}></div>`}
     </div>
 
-    ${servers.length === 0 ? html`<div class="panel"><${Empty} title="Add your first server"
+    ${servers.length === 0 ? (can('owner') ? html`<div class="panel"><${Empty} title="Add your first server"
         action=${html`<${Btn} kind="primary" icon="plus" onClick=${() => setQuery({ add: '1' })}>Add server</${Btn}>`}>
         Fleetdeck connects over SSH, so nothing gets installed on the server. You need its address and a user that can log in with a key.</${Empty}></div>`
+      : html`<div class="panel"><${Empty} title="No servers for you yet">An admin or a server's owner can give you access on the server's Settings tab.</${Empty}></div>`)
     : html`
       <div class="strip" role="group" aria-label="Filter by state">
         <button onClick=${() => setFilter('')} title="Show all servers"><b>${up}<small> / ${servers.length}</small></b><span>Online</span></button>
@@ -111,10 +113,10 @@ export function Overview() {
       ${firing.length > 0 && html`<div class="alert-bar" role="status"><span class="grow"><b>${plural(firing.length, 'alert')} firing</b>
         <ul>${firing.slice(0, 3).map((a) => html`<li><a href=${`#/servers/${a.server_id}`}>${a.server_name}</a>: ${a.message} <span class="muted">(${ago(a.since)})</span></li>`)}
           ${firing.length > 3 && html`<li class="muted">and ${firing.length - 3} more</li>`}</ul></span>
-        <a class="btn sm" href="#/alerts">Alerts</a></div>`}
+        ${admin && html`<a class="btn sm" href="#/alerts">Alerts</a>`}</div>`}
 
       ${filter === 'updates' && withUpdates.length > 0 && html`<div class="alert-bar info"><span class="grow">${plural(withUpdates.length, 'server')} with ${plural(updates, 'pending update')}.</span>
-        <${Btn} size="sm" kind="primary" icon="refresh" onClick=${installUpdates}>Install updates on ${plural(withUpdates.length, 'server')}</${Btn}></div>`}
+        ${can('operator') && html`<${Btn} size="sm" kind="primary" icon="refresh" onClick=${installUpdates}>Install updates on ${plural(withUpdates.length, 'server')}</${Btn}>`}</div>`}
 
       <div class="row">
         <input type="search" class="w-sm" placeholder="Filter servers" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Filter servers" />
@@ -138,8 +140,8 @@ export function Overview() {
       ${sel.size > 0 && html`<div class="bulkbar" role="region" aria-label="Selection">
         <b>${sel.size} selected</b>
         <div class="row right">
-          <${Btn} size="sm" kind="primary" icon="play" onClick=${() => openRun({ targets: { servers: [...sel] } })}>Run script</${Btn}>
-          <${Btn} size="sm" icon="refresh" onClick=${() => openRun({ targets: { servers: [...sel] }, scriptId: 'update' })}>Update</${Btn}>
+          ${can('operator') && html`<${Btn} size="sm" kind="primary" icon="play" onClick=${() => openRun({ targets: { servers: [...sel] } })}>Run script</${Btn}>
+          <${Btn} size="sm" icon="refresh" onClick=${() => openRun({ targets: { servers: [...sel] }, scriptId: 'update' })}>Update</${Btn}>`}
           <${Btn} size="sm" kind="ghost" onClick=${() => setSel(new Set())}>Clear</${Btn}>
         </div></div>`}
 
@@ -151,7 +153,7 @@ export function Overview() {
         : html`<${Empty} title="No jobs yet">Run a script on one or more servers and its output shows up here.</${Empty}>`}
       </section>`}
 
-    ${adding && html`<${ServerDialog} onClose=${closeAdd} />`}
+    ${adding && can('owner') && html`<${ServerDialog} onClose=${closeAdd} />`}
   </div>`;
 }
 

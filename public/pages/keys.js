@@ -1,4 +1,4 @@
-import { html, useState, useMemo, api, useLoad, useDirty, toast, confirmBox, Btn, Empty, Field, Modal, Footer, Loading, ErrorNote, Copy, when, ago } from '../ui.js';
+import { html, useState, useMemo, api, useLoad, useDirty, toast, confirmBox, Btn, Empty, Field, Modal, Footer, Loading, ErrorNote, Copy, when, ago, can } from '../ui.js';
 
 const copyKey = async (k) => { await navigator.clipboard.writeText(k.public_key); toast(`Public key of ${k.name} copied`, 'ok'); };
 const keyType = (pub) => (pub.split(' ')[0] || '').replace(/^ssh-/, '');
@@ -23,8 +23,8 @@ export function KeysPage() {
             <td class="small">${k.used_by.length ? k.used_by.map((s, i) => html`${i ? ', ' : ''}<a href=${`#/servers/${s.id}`}>${s.name}</a>`) : html`<span class="muted">No server</span>`}</td>
             <td class="ink2 nowrap hide-sm" title=${when(k.created_at)}>${ago(k.created_at)}</td>
             <td class="act"><div class="row nw"><${Btn} size="sm" kind="ghost" icon="copy" onClick=${() => copyKey(k)}>Copy public key</${Btn}>
-              <${Btn} size="sm" kind="quiet-danger" icon="trash" title=${k.used_by.length ? 'In use by servers' : 'Delete key'} disabled=${k.used_by.length > 0} onClick=${() => del(k)} /></div></td></tr>`)}</tbody></table></div>`}</section>`}
-    <${AuthorizedPanel} />
+              ${can('admin') && html`<${Btn} size="sm" kind="quiet-danger" icon="trash" title=${k.used_by.length ? 'In use by servers' : 'Delete key'} disabled=${k.used_by.length > 0} onClick=${() => del(k)} />`}</div></td></tr>`)}</tbody></table></div>`}</section>`}
+    ${can('admin') && html`<${AuthorizedPanel} />`}
     ${dialog && html`<${KeyDialog} mode=${dialog} onClose=${() => setDialog(null)} onSaved=${() => { setDialog(null); keys.reload(true); }} />`}
   </div>`;
 }

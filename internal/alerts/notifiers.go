@@ -154,6 +154,7 @@ var Types = TypeList{
 // Notifier is a row of notifiers; config_enc is EncryptConfig of the channel's settings.
 type Notifier struct {
 	ID        string `db:"id" json:"id"`
+	TenantID  string `db:"tenant_id" json:"-"`
 	Name      string `db:"name" json:"name"`
 	Type      string `db:"type" json:"type"`
 	ConfigEnc string `db:"config_enc" json:"-"`
@@ -274,10 +275,10 @@ func SendOne(n *Notifier, title, message, level string) error {
 	return t.send(c, title, message, level)
 }
 
-// Notify sends through every enabled channel in the background; failures go to the event log.
+// Notify sends through every enabled channel of the organization in the background; failures go to the event log.
 // level: info, success or error.
-func Notify(title, message, level string) {
-	ns, err := db.Select[Notifier](`SELECT * FROM notifiers WHERE enabled = 1`)
+func Notify(tenant, title, message, level string) {
+	ns, err := db.Select[Notifier](`SELECT * FROM notifiers WHERE tenant_id = ? AND enabled = 1`, tenant)
 	if err != nil {
 		log.Printf("notify: %v", err)
 		return
@@ -290,7 +291,7 @@ func Notify(title, message, level string) {
 				}
 			}()
 			if err := SendOne(&n, title, message, level); err != nil {
-				db.Event("notify", fmt.Sprintf(`Notification via "%s" failed: %s`, n.Name, err), db.EventOpts{Level: "error"})
+				db.Event("notify", fmt.Sprintf(`Notification via "%s" failed: %s`, n.Name, err), db.EventOpts{Level: "error", TenantID: n.TenantID})
 			}
 		}()
 	}

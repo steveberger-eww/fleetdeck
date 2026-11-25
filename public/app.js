@@ -1,6 +1,7 @@
 import {
-  html, render, useState, useEffect, useRef, useMemo, api, useRoute, go, Icon, Logo, ToastHost, ConfirmHost,
+  html, render, useState, useEffect, useRef, useMemo, api, useRoute, go, Icon, Logo, ToastHost, ConfirmHost, useLoad, Btn,
   Lamp, useStore, serversStore, runningStore, refreshServers, refreshRunning, Field, byAttention, attention, isMac, dismissConfirm,
+  meStore, refreshMe, can, ROLES, Empty, toast, switchOrg,
 } from './ui.js';
 import { getTheme, setTheme } from './theme.js';
 import { Overview } from './pages/overview.js';
@@ -10,9 +11,9 @@ import { ScriptsPage, SchedulesPage } from './pages/scripts.js';
 import { AlertsPage } from './pages/alerts.js';
 import { KeysPage, VariablesPage } from './pages/keys.js';
 import { ReposPage } from './pages/repos.js';
-import { SettingsPage, SsoPage, AuditPage } from './pages/settings.js';
+import { SettingsPage, SsoPage, OrgSsoPage, AuditPage } from './pages/settings.js';
 
-// ---------- sign in / first-run setup ----------
+// ---------- sign in / first-run setup / invites ----------
 function AuthFrame({ title, sub, children }) {
   return html`<main class="auth"><div class="panel">
     <div class="brand"><${Logo} size=${26} />Fleetdeck</div>
@@ -22,60 +23,115 @@ function AuthFrame({ title, sub, children }) {
     </form></div></main>`;
 }
 
-function Login({ auth, onDone }) {
-  const [pw, setPw] = useState('');
-  const [code, setCode] = useState('');
+// ?org=<slug> (the organization's own sign-in link) adds its single sign-on button. `ssoHref` points the instance button elsewhere (invites).
+function Login({ auth, onDone, title, sub, ssoHref = '/api/auth/oidc/start' }) {
+  const [f, setF] = useState({ email: '', password: '', code: '' });
   const [needCode, setNeedCode] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const submit = async () => {
     setBusy(true); setErr('');
     try {
-      const r = await api('/api/auth/login', { method: 'POST', body: { password: pw, code: needCode ? code : undefined } });
+      const r = await api('/api/auth/login', { method: 'POST', body: { email: f.email, password: f.password, code: needCode ? f.code : undefined } });
       if (r.totp_required) setNeedCode(true); else onDone();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
-  const sso = auth.sso && !needCode && html`<a class="btn primary" href="/api/auth/oidc/start">Sign in with ${auth.sso}</a>`;
-  if (!auth.password) return html`<${AuthFrame} title="Sign in">${sso}</${AuthFrame}>`;
-  return html`<${AuthFrame} title="Sign in" sub=${needCode ? 'Enter the 6-digit code from your authenticator app.' : null}>
-    ${sso && html`${sso}<div class="or">or use your password</div>`}
-    ${!needCode && html`<${Field} label="Password"><input type="password" autocomplete="current-password" autofocus value=${pw} onInput=${(e) => setPw(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && submit()} /></${Field}>`}
-    ${needCode && html`<${Field} label="Authentication code"><input inputmode="numeric" autocomplete="one-time-code" autofocus maxlength="6" value=${code} onInput=${(e) => setCode(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && submit()} /></${Field}>`}
+  const enter = (e) => e.key === 'Enter' && submit();
+  const org = auth.org;
+  const orgBtn = org?.sso && !needCode && html`<a class="btn primary" href=${`/api/auth/oidc/start?org=${encodeURIComponent(org.slug)}`}>Sign in with ${org.name}</a>`;
+  const sso = auth.sso && !needCode && html`<a class=${`btn ${orgBtn ? '' : 'primary'}`} href=${ssoHref}>Sign in with ${auth.sso}</a>`;
+  return html`<${AuthFrame} title=${title || (org ? `Sign in to ${org.name}` : 'Sign in')} sub=${needCode ? 'Enter the 6-digit code from your authenticator app.' : sub}>
+    ${(orgBtn || sso) && html`${orgBtn}${sso}<div class="or">or use your password</div>`}
+    ${!needCode && html`<${Field} label="Email"><input type="text" autocomplete="username" autofocus value=${f.email} onInput=${set('email')} /></${Field}>
+      <${Field} label="Password"><input type="password" autocomplete="current-password" value=${f.password} onInput=${set('password')} onKeyDown=${enter} /></${Field}>`}
+    ${needCode && html`<${Field} label="Authentication code"><input inputmode="numeric" autocomplete="one-time-code" autofocus maxlength="6" value=${f.code} onInput=${set('code')} onKeyDown=${enter} /></${Field}>`}
     ${err && html`<p class="err" role="alert">${err}</p>`}
-    <button class=${`btn ${sso ? '' : 'primary'}`} type="submit" disabled=${busy} onClick=${submit}>${busy ? 'Signing in…' : 'Sign in'}</button>
+    <button class=${`btn ${orgBtn || sso ? '' : 'primary'}`} type="submit" disabled=${busy || (!needCode && (!f.email || !f.password))} onClick=${submit}>${busy ? 'Signing in…' : 'Sign in'}</button>
   </${AuthFrame}>`;
 }
 
 const MIN_PW = 10;
+// Password + repeat with the length hint, shared by setup and invites.
+function NewPassword({ f, set, onEnter }) {
+  const short = f.password.length > 0 && f.password.length < MIN_PW;
+  const left = MIN_PW - f.password.length;
+  return html`<label class="field"><span>Password</span><input type="password" autocomplete="new-password" value=${f.password} onInput=${set('password')} />
+      <span class=${`hint ${short ? 'err' : ''}`}>${short ? `${left} more character${left === 1 ? '' : 's'}. A passphrase works well.` : `At least ${MIN_PW} characters. A passphrase works well.`}</span></label>
+    <label class="field"><span>Repeat password</span><input type="password" autocomplete="new-password" value=${f.confirm} onInput=${set('confirm')} onKeyDown=${(e) => e.key === 'Enter' && onEnter()} />
+      ${f.confirm.length > 0 && f.confirm !== f.password && html`<span class="hint err">Doesn't match yet.</span>`}</label>`;
+}
+const pwOk = (f) => f.password.length >= MIN_PW && f.password === f.confirm;
+
 function Setup({ onDone }) {
-  const [f, setF] = useState({ token: '', password: '', confirm: '' });
+  const [f, setF] = useState({ token: '', name: '', email: '', organization: '', password: '', confirm: '' });
   const [err, setErr] = useState('');
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const short = f.password.length > 0 && f.password.length < MIN_PW;
-  const mismatch = f.confirm.length > 0 && f.confirm !== f.password;
+  const ok = pwOk(f) && f.token && f.name && f.email && f.organization;
   const submit = async () => {
-    if (f.password !== f.confirm) return setErr('Passwords do not match');
-    try { await api('/api/auth/setup', { method: 'POST', body: { token: f.token, password: f.password } }); onDone(); } catch (e) { setErr(e.message); }
+    if (!ok) return;
+    try { await api('/api/auth/setup', { method: 'POST', body: { token: f.token, name: f.name, email: f.email, organization: f.organization, password: f.password } }); onDone(); } catch (e) { setErr(e.message); }
   };
-  return html`<${AuthFrame} title="Set up Fleetdeck" sub="Choose the password that protects every server you add. The setup token is printed in the server console (or docker logs).">
+  return html`<${AuthFrame} title="Set up Fleetdeck" sub="Create the first account. It can manage every organization on this Fleetdeck. The setup token is printed in the server console (or docker logs).">
     <${Field} label="Setup token"><input class="mono" autofocus value=${f.token} onInput=${set('token')} /></${Field}>
-    <label class="field"><span>Password</span><input type="password" autocomplete="new-password" value=${f.password} onInput=${set('password')} />
-      <span class=${`hint ${short ? 'err' : ''}`}>${short ? `${MIN_PW - f.password.length} more character${MIN_PW - f.password.length === 1 ? '' : 's'}. A passphrase works well.` : `At least ${MIN_PW} characters. A passphrase works well.`}</span></label>
-    <label class="field"><span>Repeat password</span><input type="password" autocomplete="new-password" value=${f.confirm} onInput=${set('confirm')} onKeyDown=${(e) => e.key === 'Enter' && submit()} />
-      ${mismatch && html`<span class="hint err">Doesn't match yet.</span>`}</label>
+    <${Field} label="Your name"><input autocomplete="name" value=${f.name} onInput=${set('name')} /></${Field}>
+    <${Field} label="Email"><input type="email" autocomplete="username" value=${f.email} onInput=${set('email')} /></${Field}>
+    <${Field} label="Organization" hint="Your company or team. You can add more organizations later."><input autocomplete="organization" value=${f.organization} onInput=${set('organization')} /></${Field}>
+    <${NewPassword} f=${f} set=${set} onEnter=${submit} />
     ${err && html`<p class="err" role="alert">${err}</p>`}
-    <button class="btn primary" type="submit" disabled=${f.password.length < MIN_PW || mismatch || !f.token} onClick=${submit}>Create password and sign in</button>
+    <button class="btn primary" type="submit" disabled=${!ok} onClick=${submit}>Create account and sign in</button>
+  </${AuthFrame}>`;
+}
+
+const ROLE_TEXT = { admin: 'admin', owner: 'owner', operator: 'operator', viewer: 'viewer' };
+const intoApp = () => { location.hash = '#/'; location.reload(); };
+
+// #/invite/<token>: works signed in (join with this account) and signed out (create an account, or sign in first).
+function Invite({ token, auth }) {
+  const inv = useLoad(() => api(`/api/invites/${encodeURIComponent(token)}`), [token]);
+  const [f, setF] = useState({ name: '', password: '', confirm: '' });
+  const [err, setErr] = useState('');
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const accept = async (body) => {
+    setErr('');
+    try { await api(`/api/invites/${encodeURIComponent(token)}/accept`, { method: 'POST', body }); intoApp(); } catch (e) { setErr(e.message); }
+  };
+  if (inv.loading) return null;
+  if (inv.error) return html`<${AuthFrame} title="Invite"><p class="err" role="alert">${inv.error}</p><a class="btn" href="/">Go to Fleetdeck</a></${AuthFrame}>`;
+  const d = inv.data;
+  const sub = `You're invited to ${d.org} as ${ROLE_TEXT[d.role] || d.role}.`;
+  const ssoHref = `/api/auth/oidc/start?invite=${encodeURIComponent(token)}`;
+  if (d.user) {
+    return html`<${AuthFrame} title=${`Join ${d.org}`} sub=${sub}>
+      <p class="small ink2">You're signed in as <b>${d.user}</b>${d.user !== d.email ? html`. The invite was sent to <b>${d.email}</b>` : ''}.</p>
+      ${err && html`<p class="err" role="alert">${err}</p>`}
+      <${Btn} kind="primary" type="submit" onClick=${() => accept({})}>Join ${d.org}</${Btn}>
+      <a class="btn ghost" href="#/">Not now</a>
+    </${AuthFrame}>`;
+  }
+  if (d.exists) return html`<${Login} auth=${auth} onDone=${() => location.reload()} title=${`Sign in to join ${d.org}`} sub=${`${sub} There's already an account for ${d.email}.`} ssoHref=${ssoHref} />`;
+  const submit = () => pwOk(f) && f.name && accept({ name: f.name, password: f.password });
+  return html`<${AuthFrame} title=${`Join ${d.org}`} sub=${sub}>
+    ${d.sso && html`<a class="btn primary" href=${ssoHref}>Accept with ${d.sso}</a><div class="or">or create a password</div>`}
+    <${Field} label="Email" hint="The invite is for this address."><input value=${d.email} disabled /></${Field}>
+    <${Field} label="Your name"><input autocomplete="name" autofocus value=${f.name} onInput=${set('name')} /></${Field}>
+    <${NewPassword} f=${f} set=${set} onEnter=${submit} />
+    ${err && html`<p class="err" role="alert">${err}</p>`}
+    <button class=${`btn ${d.sso ? '' : 'primary'}`} type="submit" disabled=${!pwOk(f) || !f.name} onClick=${submit}>Create account and join</button>
   </${AuthFrame}>`;
 }
 
 // ---------- navigation: one source for the sidebar and the palette ----------
+// [label, path, icon, lowest role that may open it]
 const NAV = [
-  [null, [['Overview', '/', 'overview'], ['Alerts', '/alerts', 'bell']]],
-  ['Automation', [['Jobs', '/jobs', 'jobs'], ['Scripts', '/scripts', 'scripts'], ['Schedules', '/schedules', 'clock'], ['Repositories', '/repos', 'git'], ['Variables', '/variables', 'vars']]],
-  ['Access', [['SSH keys', '/keys', 'key']]],
-  ['System', [['Audit log', '/audit', 'audit'], ['Settings', '/settings', 'gear']]],
+  [null, [['Overview', '/', 'overview'], ['Alerts', '/alerts', 'bell', 'admin']]],
+  ['Automation', [['Jobs', '/jobs', 'jobs'], ['Scripts', '/scripts', 'scripts'], ['Schedules', '/schedules', 'clock', 'admin'], ['Repositories', '/repos', 'git', 'admin'], ['Variables', '/variables', 'vars', 'admin']]],
+  ['Access', [['SSH keys', '/keys', 'key', 'owner']]],
+  ['System', [['Audit log', '/audit', 'audit', 'admin'], ['Settings', '/settings', 'gear']]],
 ];
-const PAGES = NAV.flatMap(([, items]) => items);
+const ALL_PAGES = NAV.flatMap(([, items]) => items);
+// The sidebar for the current role (empty groups dropped).
+const navFor = () => NAV.map(([g, items]) => [g, items.filter(([, , , r]) => !r || can(r))]).filter(([, items]) => items.length);
 
 // ---------- command palette (⌘K / Ctrl K) ----------
 function Palette({ onClose }) {
@@ -95,16 +151,16 @@ function Palette({ onClose }) {
     const sorted = servers.slice().sort(byAttention);
     const all = [
       ...sorted.map((s) => ({ group: 'Servers', label: s.name, hint: s.host, status: s.status, run: () => go(`/servers/${s.id}`) })),
-      { group: 'Actions', label: 'Run a script…', icon: 'play', run: () => openRun() },
-      { group: 'Actions', label: 'Add server…', icon: 'plus', run: () => go('/?add=1') },
+      can('operator') && { group: 'Actions', label: 'Run a script…', icon: 'play', run: () => openRun() },
+      can('owner') && { group: 'Actions', label: 'Add server…', icon: 'plus', run: () => go('/?add=1') },
       // per-server actions only once you type, so the empty list stays short
       ...(n ? sorted.flatMap((s) => [
-        { group: 'Actions', label: `Terminal: ${s.name}`, hint: s.host, icon: 'term', run: () => go(`/servers/${s.id}/terminal`) },
+        can('operator') && { group: 'Actions', label: `Terminal: ${s.name}`, hint: s.host, icon: 'term', run: () => go(`/servers/${s.id}/terminal`) },
         { group: 'Actions', label: `Logs: ${s.name}`, hint: s.host, icon: 'audit', run: () => go(`/servers/${s.id}/logs`) },
-        { group: 'Actions', label: `Update: ${s.name}`, hint: s.host, icon: 'refresh', run: () => openRun({ targets: { servers: [s.id] }, scriptId: 'update' }) },
+        can('operator') && { group: 'Actions', label: `Update: ${s.name}`, hint: s.host, icon: 'refresh', run: () => openRun({ targets: { servers: [s.id] }, scriptId: 'update' }) },
       ]) : []),
-      ...PAGES.map(([label, path, icon]) => ({ group: 'Pages', label, icon, run: () => go(path) })),
-    ];
+      ...navFor().flatMap(([, items]) => items).map(([label, path, icon]) => ({ group: 'Pages', label, icon, run: () => go(path) })),
+    ].filter(Boolean);
     return (n ? all.filter((x) => `${x.label} ${x.hint || ''}`.toLowerCase().includes(n)) : all).slice(0, 40);
   }, [q, servers]);
   const pick = (x) => { onClose(); x?.run(); };
@@ -154,13 +210,35 @@ function Crumbs({ parts, servers }) {
     return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/">Fleet</a><span>/</span>
       ${parts[2] ? html`<a href=${`#/servers/${parts[1]}`}>${s?.name || 'Server'}</a><span>/</span><b>${TAB_LABEL[parts[2]] || parts[2]}</b>` : html`<b>${s?.name || 'Server'}</b>`}</nav>`;
   }
-  if (parts[0] === 'settings' && parts[1] === 'sso') return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/settings">Settings</a><span>/</span><b>Single sign-on</b></nav>`;
+  if (parts[0] === 'settings' && parts[1]) {
+    const sub = { sso: 'Single sign-on', org: 'Organization', instance: 'Instance' }[parts[1]] || parts[1];
+    return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/settings">Settings</a><span>/</span>
+      ${parts[2] === 'sso' ? html`<a href=${`#/settings/${parts[1]}`}>${sub}</a><span>/</span><b>Single sign-on</b>` : html`<b>${sub}</b>`}</nav>`;
+  }
   if (parts[0] === 'jobs' && parts[1]) return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/jobs">Jobs</a><span>/</span><b>#${parts[1]}</b></nav>`;
   return html`<span class="crumbs" />`;
 }
 
+const roleName = (r) => ROLES.find(([k]) => k === r)?.[1] || r;
+const signOut = async () => { await api('/api/auth/logout', { method: 'POST' }); location.hash = ''; location.reload(); };
+
+// Sidebar footer: the organization (switchable when there are several), who you are, theme, sign out.
+function SideMe({ me }) {
+  const many = !me.locked && me.tenants.length > 1;
+  return html`<div class="side-foot">
+    <div class="side-me">
+      ${many ? html`<select value=${me.tenant.id} aria-label="Organization" onChange=${(e) => switchOrg(e.target.value).catch((x) => toast(x.message, 'bad'))}>
+          ${me.tenants.map((t) => html`<option value=${t.id}>${t.name}</option>`)}</select>`
+        : html`<b class="trunc">${me.tenant.name}</b>`}
+      <span class="small muted trunc" title=${me.user.email}>${me.user.name || me.user.email} · ${roleName(me.role)}${me.user.super_admin ? ' · super admin' : ''}</span>
+    </div>
+    <${ThemeButton} /><button class="btn ghost sm right" onClick=${signOut}><${Icon} name="out" />Sign out</button>
+  </div>`;
+}
+
 function Shell() {
   const { path } = useRoute();
+  const me = useStore(meStore);
   const servers = useStore(serversStore);
   const running = useStore(runningStore);
   const [open, setOpen] = useState(false);
@@ -180,8 +258,10 @@ function Shell() {
   const parts = path.split('/').filter(Boolean);
   const section = parts[0] || '';
   const firing = (servers || []).reduce((n, s) => n + s.alerts, 0);
+  const need = section && ALL_PAGES.find(([, p]) => p === `/${section}`)?.[3];
   let page;
-  if (!section) page = html`<${Overview} />`;
+  if (need && !can(need)) page = html`<div class="page"><${Empty} title="Not available with your role" action=${html`<a class="btn" href="#/">Back to the fleet</a>`}>An admin of ${me.tenant.name} can change your role.</${Empty}></div>`;
+  else if (!section) page = html`<${Overview} />`;
   else if (section === 'servers' && parts[1]) page = html`<${ServerPage} key=${parts[1]} id=${parts[1]} tab=${parts[2] || 'overview'} />`;
   else if (section === 'jobs' && parts[1]) page = html`<${JobPage} key=${parts[1]} id=${parts[1]} />`;
   else if (section === 'jobs') page = html`<${JobsPage} />`;
@@ -193,7 +273,8 @@ function Shell() {
   else if (section === 'repos') page = html`<${ReposPage} />`;
   else if (section === 'audit') page = html`<${AuditPage} />`;
   else if (section === 'settings' && parts[1] === 'sso') page = html`<${SsoPage} />`;
-  else if (section === 'settings') page = html`<${SettingsPage} />`;
+  else if (section === 'settings' && parts[1] === 'org' && parts[2] === 'sso') page = html`<${OrgSsoPage} />`;
+  else if (section === 'settings') page = html`<${SettingsPage} key=${parts[1] || ''} tab=${parts[1] || ''} />`;
   else page = html`<div class="page"><h1>Page not found</h1><a href="#/">Back to the fleet</a></div>`;
 
   const badge = (label) => {
@@ -201,24 +282,23 @@ function Shell() {
     if (label === 'Jobs' && running > 0) return html`<span class="count info" aria-label=${`${running} running`}>${running}</span>`;
     return null;
   };
-  const signOut = async () => { await api('/api/auth/logout', { method: 'POST' }); location.reload(); };
   return html`<div class=${`app ${open ? 'open' : ''}`}>
     <div class="scrim" onClick=${() => setOpen(false)} />
     <nav class="side" aria-label="Main">
       <a class="brand" href="#/"><${Logo} />Fleetdeck</a>
-      ${NAV.map(([group, items]) => html`${group && html`<div class="side-h">${group}</div>`}
+      ${navFor().map(([group, items]) => html`${group && html`<div class="side-h">${group}</div>`}
         <div class="nav">${items.map(([label, p, icon]) => html`<a href=${`#${p}`} aria-current=${(p === '/' ? !section : `/${section}` === p) ? 'page' : undefined}>
           <${Icon} name=${icon} />${label}${badge(label)}</a>`)}</div>`)}
       <div class="side-h">Servers${servers?.length > 0 && html`<span class="n">${servers.length}</span>`}</div>
       <${SideServers} servers=${servers} current=${section === 'servers' ? parts[1] : null} />
-      <div class="side-foot"><${ThemeButton} /><button class="btn ghost sm right" onClick=${signOut}><${Icon} name="out" />Sign out</button></div>
+      <${SideMe} me=${me} />
     </nav>
     <div class="main">
       <header class="top">
         <button class="btn ghost icon menu-btn" aria-label="Open menu" onClick=${() => setOpen(true)}><${Icon} name="menu" /></button>
         <${Crumbs} parts=${parts} servers=${servers} />
         <button class="search-btn right" onClick=${() => setPalette(true)}><${Icon} name="search" /><span>Search servers, pages, actions</span><span class="kbd">${isMac ? '⌘K' : 'Ctrl K'}</span></button>
-        <button class="btn primary" onClick=${() => openRun()} aria-label="Run script"><${Icon} name="play" /><span class="hide-sm">Run script</span></button>
+        ${can('operator') && html`<button class="btn primary" onClick=${() => openRun()} aria-label="Run script"><${Icon} name="play" /><span class="hide-sm">Run script</span></button>`}
       </header>
       <main>${page}</main>
     </div>
@@ -227,9 +307,23 @@ function Shell() {
   </div>`;
 }
 
+// Signed in, but in no organization (yet).
+function NoOrg({ me }) {
+  return html`<${AuthFrame} title="You're not in an organization yet" sub=${`Signed in as ${me.user.email}.`}>
+    ${me.tenants.length ? html`<p class="small ink2">Open one of these:</p>${me.tenants.map((t) => html`<${Btn} onClick=${() => switchOrg(t.id)}>${t.name}</${Btn}>`)}`
+      : html`<p class="small ink2">Ask an admin of your organization for an invite link. Opening it adds this account.</p>`}
+    <button class="btn ghost" onClick=${signOut}><${Icon} name="out" />Sign out</button>
+  </${AuthFrame}>`;
+}
+
 function App() {
+  const { path } = useRoute();
+  const me = useStore(meStore);
   const [auth, setAuth] = useState(null);
-  const check = () => api('/api/auth/state').then(setAuth).catch(() => setAuth({ error: true }));
+  const org = new URLSearchParams(location.search).get('org');
+  const check = () => api(`/api/auth/state${org ? `?org=${encodeURIComponent(org)}` : ''}`)
+    .then(async (a) => { if (a.authed) await refreshMe(); setAuth(a); })
+    .catch(() => setAuth({ error: true }));
   useEffect(() => {
     check();
     const out = () => setAuth((a) => ({ ...a, authed: false }));
@@ -242,7 +336,10 @@ function App() {
       <button class="btn primary" onClick=${() => { setAuth(null); check(); }}>Try again</button></div></div></main>`;
   }
   if (auth.setup) return html`<${Setup} onDone=${check} />`;
+  if (path.startsWith('/invite/')) return html`<${Invite} key=${path} token=${path.slice(8)} auth=${auth} /><${ToastHost} />`;
   if (!auth.authed) return html`<${Login} auth=${auth} onDone=${check} />`;
+  if (!me) return null;
+  if (!me.tenant) return html`<${NoOrg} me=${me} /><${ToastHost} />`;
   return html`<${Shell} />`;
 }
 

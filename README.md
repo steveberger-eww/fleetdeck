@@ -8,7 +8,7 @@
 Monitoring, one-click maintenance and day-to-day administration in one place, all over SSH, with nothing to install on the servers.
 
 ![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)
-![SQLite](https://img.shields.io/badge/SQLite-embedded-003B57?logo=sqlite&logoColor=white)
+![Postgres](https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
 
 [Features](#features) · [Getting started](#getting-started) · [Adding a server](#adding-a-server) · [Monitoring](#monitoring-and-alerts) · [Ansible](#ansible-playbooks-from-git) · [Security](#security-model) · [How it works](#how-it-works)
@@ -23,31 +23,40 @@ Fleetdeck combines the core ideas of three projects in a single binary:
 |---|---|
 | **Beszel** | Per-minute metrics (CPU, memory, swap, disk and inodes per mount, disk I/O, network, load, temperature, NVIDIA and AMD GPUs) with 30 days of history, plus custom metrics from any shell command. Per-interface traffic and 30-day traffic totals, Docker containers with health and history, S.M.A.R.T. disk health. Alert rules for all servers, a tag or one server (disk and inode rules can watch one mount), sent via ntfy, Pushover, Discord, Slack, Telegram, Gotify or a webhook. Quiet hours and maintenance windows. |
 | **Semaphore** | Script library with parameters (text, checkbox, choice) and encrypted shared variables. Run on servers, tags or everything. Jobs stream live, keep their output and can be cancelled or re-run (all hosts or failed only). Cron schedules, webhook URLs, an encrypted SSH key store, and **Git repositories with Ansible playbooks** (dry runs, per-host results). |
+| **Organizations** | Several organizations (tenants) on one instance, e.g. an IT company and each of its customers. People sign in once and switch between their organizations. Roles per organization: **admin** (everything), **owner** (adds servers, edits and shares the ones they have), **operator** (works on assigned servers: jobs, services, terminal), **viewer** (read-only on assigned servers). Invites by link, an instance-wide single sign-on plus each organization's own, and super admins who see every organization. |
 | **Cockpit** | Per-server pages: package updates with install history, an OS end-of-life warning, services running replaced code, automatic updates, systemd services and timers, journal, processes, containers, a network tab (open ports checked against the real firewall, incl. Docker ports that bypass ufw, one-click [ufw-docker](https://github.com/chaifeng/ufw-docker)), a web terminal and system info. Every authorized SSH key across the fleet, with one-click removal. |
 
 ## Getting started
 
 ### Build from source
 
-You need Go 1.26 or newer. The result is a single binary with the UI embedded.
+You need Go 1.26 or newer and a PostgreSQL database. The result is a single binary with the UI embedded.
 
 ```sh
+docker compose up -d   # local Postgres from compose.yaml
+export DATABASE_URL='postgres://fleetdeck:fleetdeck@localhost:5432/fleetdeck?sslmode=disable'
 go build -o fleetdeck .
-./fleetdeck        # http://127.0.0.1:8080
+./fleetdeck            # http://127.0.0.1:8080
 ```
 
-Run the tests with `go test ./...`.
+Run the tests with `go test ./...`. Each package works in its own throwaway schema of the compose database (or of `FLEETDECK_TEST_DATABASE_URL`).
+
+### Moving from SQLite
+
+Versions before Postgres kept everything in `DATA_DIR/fleetdeck.db`. When Fleetdeck starts with an empty Postgres database and finds that file, it imports it first (one transaction, row counts checked per table), so just stop the old version and start the new one with `DATABASE_URL` set. Keep `DATA_DIR`: its `secret.key` (or your `FLEETDECK_SECRET`) decrypts the imported keys and tokens.
+
+Everything lands in one organization. The former single owner becomes a super admin who signs in as **`admin`** with the old password (and 2FA); change the sign-in email under **Settings → Account**. Built-in scripts become the shared library.
 
 ### Docker
 
 ```sh
 docker build -t fleetdeck .
 docker run -d --name fleetdeck -p 127.0.0.1:8080:8080 -v fleetdeck:/data \
-  -e FLEETDECK_SECRET="$(openssl rand -base64 32)" fleetdeck
+  -e DATABASE_URL='postgres://…' -e FLEETDECK_SECRET="$(openssl rand -base64 32)" fleetdeck
 docker logs fleetdeck   # setup token
 ```
 
-On first start, the console prints a **setup token**. Open the page, enter the token and choose your password.
+On first start, the console prints a **setup token**. Open the page, enter the token, and create the first account (a super admin) and its organization.
 
 > [!IMPORTANT]
 > Fleetdeck listens on localhost by default. To reach it from elsewhere, put it behind a reverse proxy with HTTPS (Caddy, Traefik, nginx) and set `FLEETDECK_TRUST_PROXY=1`, or keep it on a VPN such as Tailscale or WireGuard.
@@ -57,12 +66,17 @@ On first start, the console prints a **setup token**. Open the page, enter the t
 | Variable | Default | Description |
 |---|---|---|
 | `HOST` / `PORT` | `127.0.0.1` / `8080` | Listen address |
-| `DATA_DIR` | `./data` | SQLite database and `secret.key` |
+| `DATABASE_URL` | – | PostgreSQL connection URL (required) |
+| `DATA_DIR` | `./data` | `secret.key`, Git checkouts and temporary files |
 | `FLEETDECK_SECRET` | – | Master key for encrypting SSH keys and tokens. Without it, a random key is written to `DATA_DIR/secret.key`. |
 | `FLEETDECK_TRUST_PROXY` | – | `1` trusts `X-Forwarded-*` headers (client IP, HTTPS detection for secure cookies) |
-| `FLEETDECK_PASSWORD_LOGIN` | – | `1` allows password sign-in even when it's turned off in favour of single sign-on (for when your provider is down) |
+| `FLEETDECK_PUBLIC_URL` | – | Fleetdeck's address, e.g. `https://fleetdeck.example.com`, for single sign-on redirects and invite links. Can also be set under **Settings → Instance**. Without it, the address the browser used counts (fine for `localhost`). |
+| `FLEETDECK_PASSWORD_LOGIN` | – | `1` allows password sign-in for accounts that turned it off in favour of single sign-on (for when your provider is down) |
 
-Single sign-on (authentik, Keycloak, any OpenID Connect provider) is set up in the app under **Settings → Single sign-on**, step by step.
+Single sign-on (authentik, Keycloak, any OpenID Connect provider) works at two levels, both set up step by step in the app. All providers use the same redirect URI.
+
+- **Instance** (**Settings → Instance**, super admins): e.g. your company's authentik. It signs in existing accounts (matched by connected identity or email) and can accept invites.
+- **Organization** (**Settings → Organization**, its admins): the organization's own provider, used from `https://…/?org=<short name>`. It signs in that organization's members only and can add new people with a default role. These sessions stay in that organization and can't change the account's password, 2FA or email, so an organization's provider can't take over accounts elsewhere. This is the feature meant for a business license later (`licensed()` in `internal/web/tenancy.go`).
 
 ## Adding a server
 
@@ -120,7 +134,8 @@ Each run pulls the latest commit (recorded on the job), installs `collections/re
 Anyone with access to Fleetdeck has root on every server in it, so the defaults are strict:
 
 - **Sign-in:** scrypt-hashed password, optional TOTP, 5-attempt lockout per IP. First-run setup needs the console token.
-- **Single sign-on (optional):** OpenID Connect with PKCE, state bound to the browser, nonce and signed ID token checked. Only the one connected account (its `sub`) gets in. Password sign-in can then be turned off.
+- **Single sign-on (optional):** OpenID Connect with PKCE, state bound to the browser, nonce and signed ID token checked. An organization's own provider only reaches that organization (see above). Each account can turn off its password once single sign-on is connected.
+- **Organizations:** every query is scoped to the session's organization; people below admin only see servers assigned to them, and viewers can't change anything. Invite links are single-use and expire after 7 days. Every organization needs at least one admin, the instance at least one super admin.
 - **Sessions:** random tokens stored hashed; `HttpOnly`, `SameSite=Strict`, `Secure` behind HTTPS cookies; 7-day idle expiry; revocable in Settings.
 - **CSRF / WebSocket hijacking:** cross-origin requests and terminal connections are rejected; API writes accept JSON only.
 - **Secrets at rest:** SSH keys, passphrases and tokens are encrypted with AES-256-GCM and decrypted only in memory.
@@ -144,13 +159,12 @@ Anyone with access to Fleetdeck has root on every server in it, so the defaults 
 | `admin` | Services, logs, packages, processes, network and Docker |
 | `repos` | Git sync and Ansible runs |
 | `sec` | Encryption, password hashing and TOTP |
-| `db` | SQLite storage (pure Go, no cgo) |
+| `db` | PostgreSQL storage and the one-time SQLite import |
 
 The UI in `public/` uses Preact and htm without a build step. Libraries and fonts are vendored and embedded into the binary.
 
 ## Out of scope
 
-- **Multiple users or roles:** it's a single-owner panel.
 - **Terraform:** only shell scripts and Ansible playbooks run.
 - **Storage/LVM, network configuration, full firewall editing, VMs:** use Cockpit, which Fleetdeck links to (with one-click install).
 - **Cancelling a job** stops its output, but a remote command without a terminal may keep running.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"fleetdeck/internal/db"
+	"fleetdeck/internal/jobs"
 	"fleetdeck/internal/sec"
 )
 
@@ -21,11 +22,11 @@ func TestServerValidationBlocksSSHOptionInjection(t *testing.T) {
 		{"name": "x", "host": "a b"},
 		{"name": "x", "host": "a", "tags": "ok, no spaces allowed"},
 	} {
-		if _, err := ValidateServer(b); err == nil {
+		if _, err := ValidateServer("default", b); err == nil {
 			t.Errorf("accepted %v", b)
 		}
 	}
-	got, err := ValidateServer(map[string]any{"name": "x", "host": "web1.example.com", "tags": "Prod, web"})
+	got, err := ValidateServer("default", map[string]any{"name": "x", "host": "web1.example.com", "tags": "Prod, web"})
 	want := &ServerFields{Name: "x", Host: "web1.example.com", User: "root", Port: 22, KeyID: nil, Tags: "prod,web", Notes: "", Paused: 0}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, %v", got, err)
@@ -34,9 +35,10 @@ func TestServerValidationBlocksSSHOptionInjection(t *testing.T) {
 
 // One pass through the API the way the browser uses it. Nothing here needs SSH: the server is created paused.
 func TestAPISmoke(t *testing.T) {
-	if err := db.Open(t.TempDir()); err != nil {
+	if err := db.OpenTest(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(db.DropTest)
 	t.Setenv("FLEETDECK_SECRET", "")
 	if err := sec.Init(); err != nil {
 		t.Fatal(err)
@@ -85,7 +87,7 @@ func TestAPISmoke(t *testing.T) {
 	}
 	code, m, _ = call("POST", "/api/auth/setup", `{"token":"nope","password":"correct horse"}`)
 	expect(code, 401, m, "bad setup token")
-	code, m, _ = call("POST", "/api/auth/setup", `{"token":"`+token+`","password":"correct horse"}`)
+	code, m, _ = call("POST", "/api/auth/setup", `{"token":"`+token+`","email":"ops@example.com","name":"Ops","password":"correct horse"}`)
 	expect(code, 200, m, "setup")
 	if !strings.HasPrefix(cookie, "fd_session=") {
 		t.Fatal("no session cookie")
@@ -176,7 +178,7 @@ func TestAPISmoke(t *testing.T) {
 	code, m, _ = call("DELETE", "/api/custom-metrics/"+cm["id"].(string), "")
 	expect(code, 200, m, "delete custom metric")
 	_, alertsPage, _ := call("GET", "/api/alerts", "")
-	if len(alertsPage["rules"].([]any)) != 1 || len(alertsPage["custom"].([]any)) != 0 {
+	if len(alertsPage["rules"].([]any)) != 4 || len(alertsPage["custom"].([]any)) != 0 { // 3 default rules + cpu
 		t.Fatalf("custom rule not removed with its metric: %v", alertsPage)
 	}
 	code, variable, _ := call("POST", "/api/variables", `{"name":"REGION","value":"eu","secret":false}`)
@@ -194,7 +196,7 @@ func TestAPISmoke(t *testing.T) {
 		t.Fatalf("keys: %v", list)
 	}
 	_, alertsPage, _ = call("GET", "/api/alerts", "")
-	if alertsPage["metrics"].(map[string]any)["cpu"] == nil || len(alertsPage["rules"].([]any)) != 1 {
+	if alertsPage["metrics"].(map[string]any)["cpu"] == nil || len(alertsPage["rules"].([]any)) != 4 {
 		t.Fatalf("alerts: %v", alertsPage)
 	}
 	_, _, list = call("GET", "/api/variables", "")
@@ -208,10 +210,10 @@ func TestAPISmoke(t *testing.T) {
 
 	// Lockout: the bad setup token above plus 4 wrong passwords make 5 failures; then 429 even for the right one.
 	for i := 0; i < 4; i++ {
-		code, m, _ = call("POST", "/api/auth/login", `{"password":"wrong password"}`)
+		code, m, _ = call("POST", "/api/auth/login", `{"email":"ops@example.com","password":"wrong password"}`)
 		expect(code, 401, m, "wrong password")
 	}
-	code, m, _ = call("POST", "/api/auth/login", `{"password":"correct horse"}`)
+	code, m, _ = call("POST", "/api/auth/login", `{"email":"ops@example.com","password":"correct horse"}`)
 	if code != 429 || m["error"] != "Too many failed attempts. Try again in 15 min." {
 		t.Fatalf("lockout: %d %v", code, m)
 	}
@@ -220,4 +222,145 @@ func TestAPISmoke(t *testing.T) {
 	if code != 404 || m["error"] != "Not found" {
 		t.Fatalf("webhook: %d %v", code, m)
 	}
+}
+
+// Organizations don't see each other; inside one, roles and server assignments decide what people see and do.
+func TestTenancy(t *testing.T) {
+	if err := db.OpenTest(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.DropTest)
+	t.Setenv("FLEETDECK_SECRET", "")
+	if err := sec.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Seed(); err != nil { // the shared library
+		t.Fatal(err)
+	}
+	srv := New(fstest.MapFS{"index.html": {Data: []byte("<!doctype html>")}}, false)
+	token := srv.SetupToken()
+	call := func(cookie *string, method, path, body string) (int, map[string]any, any) {
+		t.Helper()
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		if body != "" {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		r.Header.Set("Cookie", *cookie)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		var v any
+		_ = json.Unmarshal(w.Body.Bytes(), &v)
+		if sc := w.Header().Get("Set-Cookie"); strings.HasPrefix(sc, "fd_session=") {
+			*cookie = strings.SplitN(sc, ";", 2)[0]
+		}
+		m, _ := v.(map[string]any)
+		return w.Code, m, v
+	}
+	must := func(code, want int, m map[string]any, what string) {
+		t.Helper()
+		if code != want {
+			t.Fatalf("%s: %d %v, want %d", what, code, m, want)
+		}
+	}
+	// accept follows an invite link as a new person; returns their session.
+	accept := func(link, name string) string {
+		t.Helper()
+		tok := link[strings.LastIndex(link, "/")+1:]
+		s := ""
+		code, m, _ := call(&s, "POST", "/api/invites/"+tok+"/accept", `{"name":"`+name+`","password":"long enough pw"}`)
+		must(code, 200, m, "accept invite")
+		if code, _, _ := call(&s, "POST", "/api/invites/"+tok+"/accept", `{"name":"x","password":"long enough pw"}`); code != 404 {
+			t.Fatalf("invite used twice: %d", code)
+		}
+		return s
+	}
+
+	boss := ""
+	code, m, _ := call(&boss, "POST", "/api/auth/setup", `{"token":"`+token+`","email":"boss@msp.example","name":"Boss","organization":"MSP"}`)
+	must(code, 400, m, "setup without password")
+	code, m, _ = call(&boss, "POST", "/api/auth/setup", `{"token":"`+token+`","email":"boss@msp.example","name":"Boss","organization":"MSP","password":"correct horse"}`)
+	must(code, 200, m, "setup")
+	code, a, _ := call(&boss, "POST", "/api/servers", `{"name":"msp-web","host":"192.0.2.1","paused":true}`)
+	must(code, 200, a, "add server in MSP")
+
+	// A customer organization with its own admin.
+	code, m, _ = call(&boss, "POST", "/api/instance/tenants", `{"name":"Acme GmbH","admin_email":"it@acme.example"}`)
+	must(code, 200, m, "create organization")
+	if m["tenant"].(map[string]any)["slug"] != "acme-gmbh" {
+		t.Fatalf("slug: %v", m)
+	}
+	acme := accept(m["invite_url"].(string), "Acme IT")
+	_, _, list := call(&acme, "GET", "/api/servers", "")
+	if len(list.([]any)) != 0 {
+		t.Fatalf("Acme sees MSP's servers: %v", list)
+	}
+	code, m, _ = call(&acme, "GET", "/api/servers/"+a["id"].(string), "")
+	must(code, 404, m, "Acme opens MSP's server")
+	code, m, _ = call(&acme, "POST", "/api/alerts/rules", `{"metric":"cpu","threshold":90,"server_id":"`+a["id"].(string)+`"}`)
+	must(code, 400, m, "Acme alert rule on MSP's server")
+	code, m, _ = call(&acme, "GET", "/api/instance", "")
+	must(code, 403, m, "Acme admin is no super admin")
+	_, _, list = call(&acme, "GET", "/api/scripts", "")
+	if sc := list.([]any); len(sc) == 0 || sc[0].(map[string]any)["shared"] != true {
+		t.Fatalf("shared library missing: %v", sc)
+	}
+	code, m, _ = call(&acme, "PUT", "/api/scripts/update", `{"name":"mine now","body":"true"}`)
+	must(code, 403, m, "Acme edits a shared script")
+	code, m, _ = call(&acme, "POST", "/api/scripts/update/copy", "")
+	if code != 200 || m["shared"] != false || m["name"] != "Update packages (copy)" {
+		t.Fatalf("copy shared script: %d %v", code, m)
+	}
+
+	// Inside MSP: an operator sees only the servers assigned to them.
+	code, m, _ = call(&boss, "POST", "/api/members/invites", `{"email":"op@msp.example","role":"operator"}`)
+	must(code, 200, m, "invite operator")
+	op := accept(m["url"].(string), "Op")
+	_, _, list = call(&op, "GET", "/api/servers", "")
+	if len(list.([]any)) != 0 {
+		t.Fatalf("operator sees unassigned servers: %v", list)
+	}
+	_, mem, _ := call(&boss, "GET", "/api/members", "")
+	var opID string
+	for _, x := range mem["members"].([]any) {
+		if u := x.(map[string]any); u["email"] == "op@msp.example" {
+			opID = u["id"].(string)
+		}
+	}
+	code, m, _ = call(&boss, "PUT", "/api/servers/"+a["id"].(string)+"/members", `{"user_ids":["`+opID+`"]}`)
+	must(code, 200, m, "assign server")
+	_, _, list = call(&op, "GET", "/api/servers", "")
+	if len(list.([]any)) != 1 {
+		t.Fatalf("operator doesn't see the assigned server: %v", list)
+	}
+	code, m, _ = call(&op, "PUT", "/api/servers/"+a["id"].(string), `{"name":"renamed"}`)
+	must(code, 403, m, "operator edits a server")
+	code, m, _ = call(&op, "GET", "/api/variables", "")
+	must(code, 403, m, "operator opens variables")
+	code, m, _ = call(&op, "POST", "/api/servers", `{"name":"x","host":"192.0.2.9","paused":true}`)
+	must(code, 403, m, "operator adds a server")
+
+	code, m, _ = call(&boss, "PUT", "/api/members/"+opID, `{"role":"viewer"}`)
+	must(code, 200, m, "make viewer")
+	code, m, _ = call(&op, "POST", "/api/jobs", `{"body":"id","targets":{"all":true}}`)
+	must(code, 403, m, "viewer starts a job")
+
+	// The last admin stays; the super admin can step into any organization.
+	_, me, _ := call(&boss, "GET", "/api/me", "")
+	bossID := me["user"].(map[string]any)["id"].(string)
+	code, m, _ = call(&boss, "PUT", "/api/members/"+bossID, `{"role":"viewer"}`)
+	must(code, 409, m, "demote the last admin")
+	var acmeID string
+	for _, x := range me["tenants"].([]any) {
+		if o := x.(map[string]any); o["slug"] == "acme-gmbh" {
+			acmeID = o["id"].(string)
+		}
+	}
+	code, m, _ = call(&boss, "POST", "/api/me/tenant", `{"id":"`+acmeID+`"}`)
+	must(code, 200, m, "super admin enters Acme")
+	_, me, _ = call(&boss, "GET", "/api/me", "")
+	if me["role"] != "admin" || me["tenant"].(map[string]any)["id"] != acmeID {
+		t.Fatalf("after switch: %v", me)
+	}
+	code, m, _ = call(&acme, "POST", "/api/me/tenant", `{"id":"default"}`)
+	must(code, 404, m, "Acme admin enters MSP")
 }

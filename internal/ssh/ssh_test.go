@@ -31,13 +31,14 @@ import (
 
 func TestMain(m *testing.M) {
 	dir, _ := os.MkdirTemp("", "fleetdeck-test-")
-	if err := db.Open(dir); err != nil {
+	if err := db.OpenTest(dir); err != nil {
 		panic(err)
 	}
 	if err := sec.Init(); err != nil {
 		panic(err)
 	}
 	code := m.Run()
+	db.DropTest()
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
@@ -182,7 +183,7 @@ func addServer(t *testing.T, addr string) *db.Server {
 	if _, err := db.Exec(`INSERT INTO keys (id, name, public_key, private_enc, created_at) VALUES (?, 'k', ?, ?, 0)`, kid, pub, sec.Encrypt(priv)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO servers (id, name, host, port, user, key_id, created_at) VALUES (?, 'srv', ?, ?, 'me', ?, 0)`, sid, host, port, kid); err != nil {
+	if _, err := db.Exec(`INSERT INTO servers (id, name, host, port, "user", key_id, created_at) VALUES (?, 'srv', ?, ?, 'me', ?, 0)`, sid, host, port, kid); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := db.GetServer(sid)
@@ -269,8 +270,8 @@ func TestHostKeyPinning(t *testing.T) {
 	pinned := *s.HostKey
 
 	var notes atomic.Int32
-	Notify = func(_, _, _ string) { notes.Add(1) }
-	defer func() { Notify = func(_, _, _ string) {} }()
+	Notify = func(_, _, _, _ string) { notes.Add(1) }
+	defer func() { Notify = func(_, _, _, _ string) {} }()
 	Drop(s.ID)
 	_, port, _ := net.SplitHostPort(b.addr)
 	db.Exec(`UPDATE servers SET port = ? WHERE id = ?`, port, s.ID) // same server id, different host key
