@@ -1,7 +1,9 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"reflect"
@@ -10,6 +12,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"fleetdeck/internal/admin"
 	"fleetdeck/internal/db"
 	"fleetdeck/internal/jobs"
 	"fleetdeck/internal/sec"
@@ -363,4 +366,71 @@ func TestTenancy(t *testing.T) {
 	}
 	code, m, _ = call(&acme, "POST", "/api/me/tenant", `{"id":"default"}`)
 	must(code, 404, m, "Acme admin enters MSP")
+}
+
+func TestLogSearch(t *testing.T) {
+	if err := db.OpenTest(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.DropTest)
+	t.Setenv("FLEETDECK_SECRET", "")
+	if err := sec.Init(); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(fstest.MapFS{"index.html": {Data: []byte("<!doctype html>")}}, false)
+	cookie := ""
+	call := func(path string) (int, map[string]any) {
+		t.Helper()
+		r := httptest.NewRequest("GET", path, nil)
+		if strings.HasPrefix(path, "/api/auth/setup") {
+			r = httptest.NewRequest("POST", "/api/auth/setup", strings.NewReader(`{"token":"`+srv.SetupToken()+`","email":"a@b.example","name":"A","password":"correct horse"}`))
+			r.Header.Set("Content-Type", "application/json")
+		}
+		r.Header.Set("Cookie", cookie)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		if sc := w.Header().Get("Set-Cookie"); strings.HasPrefix(sc, "fd_session=") {
+			cookie = strings.SplitN(sc, ";", 2)[0]
+		}
+		var m map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &m)
+		return w.Code, m
+	}
+	if code, m := call("/api/auth/setup"); code != 200 {
+		t.Fatal(code, m)
+	}
+	if _, err := db.Exec(`INSERT INTO servers (id, tenant_id, name, host, tags, created_at)
+    SELECT id, (SELECT tenant_id FROM memberships LIMIT 1), id, 'h', tags, 0 FROM (VALUES ('web1', 'web'), ('web2', 'web'), ('db1', 'db')) v(id, tags)`); err != nil {
+		t.Fatal(err)
+	}
+	journal = func(_ context.Context, s *db.Server, o admin.LogsOpts) ([]admin.LogEntry, error) {
+		switch s.Name {
+		case "web2":
+			return nil, errors.New("connection refused")
+		case "web1":
+			return []admin.LogEntry{{T: 10, Msg: "a"}, {T: 30, Msg: "c"}}, nil
+		}
+		return []admin.LogEntry{{T: 20, Msg: "b"}}, nil
+	}
+	t.Cleanup(func() { journal = admin.Logs })
+
+	code, m := call("/api/logs?scope=all&since=1h")
+	if code != 200 {
+		t.Fatal(code, m)
+	}
+	var got []string
+	for _, e := range m["entries"].([]any) {
+		e := e.(map[string]any)
+		got = append(got, e["server"].(string)+":"+e["msg"].(string))
+	}
+	errs := m["errors"].([]any)
+	if strings.Join(got, ",") != "web1:a,db1:b,web1:c" || len(errs) != 1 || errs[0].(map[string]any)["server"] != "web2" {
+		t.Fatalf("%v %v", got, errs)
+	}
+	if _, m := call("/api/logs?scope=tag:db"); len(m["entries"].([]any)) != 1 {
+		t.Fatalf("tag scope: %v", m)
+	}
+	if code, m := call("/api/logs?scope=all&priority=9"); code != 400 {
+		t.Fatalf("bad filter: %d %v", code, m)
+	}
 }

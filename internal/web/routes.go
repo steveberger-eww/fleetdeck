@@ -1,6 +1,7 @@
 package web
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -482,6 +483,9 @@ func jobID(c *ctx) (int64, bool) {
 	id, err := strconv.ParseInt(c.param("id"), 10, 64)
 	return id, err == nil
 }
+
+// journal reads a server's journal; a variable so tests can fake the servers.
+var journal = admin.Logs
 
 // localTZ is the IANA name of the host's time zone (daily quiet hours use local time).
 var localTZ = sync.OnceValue(func() string {
@@ -988,6 +992,65 @@ func (s *Server) serverRoutes() {
 			return nil, err
 		}
 		return checkView(ch.ID)
+	})
+
+	// ---- journal search across servers (the Logs tab's scope selector) ----
+	// scope: "all" or "tag:<name>". A server that fails shows as one error row; the rest still answer.
+	s.route("GET /api/logs", func(c *ctx) (any, error) {
+		list, err := c.visibleServers("AND paused = 0")
+		if err != nil {
+			return nil, err
+		}
+		if tag, ok := strings.CutPrefix(c.query("scope"), "tag:"); ok {
+			list = slices.DeleteFunc(list, func(s db.Server) bool { return !slices.Contains(strings.Split(s.Tags, ","), tag) })
+		} else if c.query("scope") != "all" {
+			return nil, httperr.Bad("scope must be all or tag:<name>")
+		}
+		lines := c.query("lines")
+		if n, err := strconv.Atoi(lines); err != nil || n > 500 {
+			lines = "500"
+		}
+		o := admin.LogsOpts{Unit: c.query("unit"), Priority: c.query("priority"), Since: c.query("since"), Lines: lines}
+		if _, err := admin.LogsCommand(o); err != nil { // a bad filter would fail on every server the same way
+			return nil, err
+		}
+		type entry struct {
+			admin.LogEntry
+			ServerID string `json:"server_id"`
+			Server   string `json:"server"`
+		}
+		type failed struct {
+			ServerID string `json:"server_id"`
+			Server   string `json:"server"`
+			Error    string `json:"error"`
+		}
+		entries, errs := []entry{}, []failed{}
+		var mu sync.Mutex
+		sem := make(chan struct{}, 8)
+		var wg sync.WaitGroup
+		for i := range list {
+			srv := &list[i]
+			sem <- struct{}{}
+			wg.Go(func() {
+				defer func() { <-sem }()
+				ctx, cancel := context.WithTimeout(c.r.Context(), 20*time.Second)
+				defer cancel()
+				got, err := journal(ctx, srv, o)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					errs = append(errs, failed{srv.ID, srv.Name, err.Error()})
+					return
+				}
+				for _, e := range got {
+					entries = append(entries, entry{e, srv.ID, srv.Name})
+				}
+			})
+		}
+		wg.Wait()
+		slices.SortStableFunc(entries, func(a, b entry) int { return cmp.Compare(a.T, b.T) })
+		slices.SortFunc(errs, func(a, b failed) int { return strings.Compare(a.Server, b.Server) })
+		return J{"entries": entries, "errors": errs, "servers": len(list)}, nil
 	})
 
 	// ---- authorized_keys across the fleet ----

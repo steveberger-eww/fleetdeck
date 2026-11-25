@@ -472,33 +472,43 @@ function LogsTab({ s }) {
   const [lines, setLines] = useQuery('lines', '500');
   const [q, setQ] = useQuery('q');
   const [follow, setFollow] = useQuery('follow');
+  const [scope, setScope] = useQuery('scope'); // '' = this server, 'all' or 'tag:<name>'
+  const tags = [...new Set((useStore(serversStore) || []).flatMap((x) => x.tags))].sort();
   const [draft, setDraft] = useState(unit);
   const [scrolled, setScrolled] = useState(false);
   useEffect(() => setDraft(unit), [unit]);
   useEffect(() => { if (draft === unit) return; const t = setTimeout(() => setUnit(draft), 400); return () => clearTimeout(t); }, [draft]);
   const qs = new URLSearchParams(Object.entries({ unit, priority, since, lines }).filter(([, v]) => v)).toString();
   // Following pauses while you scroll back through older entries.
-  const logs = useLoad(() => api(`/api/servers/${s.id}/logs?${qs}`), [s.id, qs], { poll: follow ? 5000 : 0, paused: scrolled });
+  // Across servers: each server's newest entries (at most 500), merged by time; a server that fails is one error row.
+  const logs = useLoad(() => (scope ? api(`/api/logs?scope=${encodeURIComponent(scope)}&${qs}`) : api(`/api/servers/${s.id}/logs?${qs}`).then((entries) => ({ entries, errors: [] }))),
+    [s.id, qs, scope], { poll: follow && !scope ? 5000 : 0, paused: scrolled });
   const list = useMemo(() => {
     const n = q.toLowerCase();
-    return (logs.data || []).filter((e) => !n || `${e.id} ${e.msg}`.toLowerCase().includes(n)).reverse();
+    return (logs.data?.entries || []).filter((e) => !n || `${e.server || ''} ${e.id} ${e.msg}`.toLowerCase().includes(n)).reverse();
   }, [logs.data, q]);
+  const failed = logs.data?.errors || [];
   return html`<section class="panel">
     <div class="panel-h">
+      <select value=${scope} onChange=${(e) => setScope(e.target.value)} aria-label="Servers">
+        <option value="">This server</option><option value="all">All servers</option>
+        ${tags.length > 0 && html`<optgroup label="Servers tagged">${tags.map((t) => html`<option value=${`tag:${t}`}>${t}</option>`)}</optgroup>`}</select>
       <input class="mono" placeholder="Unit, e.g. nginx" value=${draft} onInput=${(e) => setDraft(e.target.value)} aria-label="Unit" />
       <select value=${priority} onChange=${(e) => setPriority(e.target.value)} aria-label="Level">${PRIOS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select>
       <select value=${since} onChange=${(e) => setSince(e.target.value)} aria-label="Time range">${[['15m', 'Last 15 min'], ['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last day'], ['7d', 'Last week']].map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select>
       <select value=${lines} onChange=${(e) => setLines(e.target.value)} aria-label="Lines">${['200', '500', '2000', '5000'].map((v) => html`<option value=${v}>${v} lines</option>`)}</select>
       <input type="search" placeholder="Search" value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="Search messages" />
       <div class="row nw right">
-        <div class="seg"><button aria-pressed=${!!follow} onClick=${() => setFollow(follow ? '' : '1')} title="Reload every 5 seconds">${follow && html`<span class=${`lamp ${scrolled ? 'paused' : 'running'}`} aria-hidden="true" />`}${follow && scrolled ? 'Paused' : 'Follow'}</button></div>
+        ${!scope && html`<div class="seg"><button aria-pressed=${!!follow} onClick=${() => setFollow(follow ? '' : '1')} title="Reload every 5 seconds">${follow && html`<span class=${`lamp ${scrolled ? 'paused' : 'running'}`} aria-hidden="true" />`}${follow && scrolled ? 'Paused' : 'Follow'}</button></div>`}
         <${Btn} size="sm" kind="ghost" icon="refresh" onClick=${() => logs.reload()}>Refresh</${Btn}>
       </div>
     </div>
     ${logs.loading && !logs.data ? html`<${Loading} />` : logs.error ? html`<div class="panel-b"><${ErrorNote} error=${logs.error} retry=${logs.reload} /></div>`
-      : !list.length ? html`<${Empty} title="No log entries">Nothing matches these filters. Widen the time range or clear the search.</${Empty}>`
-      : html`<div class="logs" tabindex="0" onScroll=${(e) => setScrolled(e.target.scrollTop > 40)}>${list.map((e) => html`<div class=${`e p${e.p}`}>
-          <span class="muted">${logTime(e.t)}</span><span class=${`p${e.p}`}>${PRIO_NAME[e.p]}</span><span class="trunc ink2" title=${e.unit}>${e.id}</span><span class="m">${e.msg}</span></div>`)}</div>`}
+      : !list.length && !failed.length ? html`<${Empty} title="No log entries">Nothing matches these filters. Widen the time range or clear the search.</${Empty}>`
+      : html`<div class="logs" tabindex="0" onScroll=${(e) => setScrolled(e.target.scrollTop > 40)}>
+          ${failed.map((f) => html`<div class="e p3"><span class="muted">–</span><span class="p3">error</span><span class="trunc ink2">${f.server}</span><span class="m">Couldn't read logs from ${f.server}: ${f.error}</span></div>`)}
+          ${list.map((e) => html`<div class=${`e p${e.p}`}>
+          <span class="muted">${logTime(e.t)}</span><span class=${`p${e.p}`}>${PRIO_NAME[e.p]}</span><span class="trunc ink2" title=${e.server ? `${e.server} · ${e.unit}` : e.unit}>${e.server ? html`<b>${e.server}</b> ` : ''}${e.id}</span><span class="m">${e.msg}</span></div>`)}</div>`}
   </section>`;
 }
 
