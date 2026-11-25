@@ -73,8 +73,8 @@ export function ServerPage({ id, tab }) {
   else if (tab === 'settings') body = can('owner') ? html`<${SettingsTab} s=${s} />` : NOT_ALLOWED;
   else body = html`<${OverviewTab} s=${s} />`;
 
-  // Containers only when Docker is there (the route still works and explains). Terminal from operator, settings from owner up.
-  const tabs = TABS.filter(([k]) => (k !== 'containers' || n?.docker || tab === 'containers') && (k !== 'terminal' || op) && (k !== 'settings' || can('owner')));
+  // Containers only with Docker or Proxmox (the route still works and explains). Terminal from operator, settings from owner up.
+  const tabs = TABS.filter(([k]) => (k !== 'containers' || n?.docker || n?.pve || tab === 'containers') && (k !== 'terminal' || op) && (k !== 'settings' || can('owner')));
   return html`<div class="page">
     <div class="srv-h">
       <div class="id grow">
@@ -529,8 +529,41 @@ function ProcessesTab({ s }) {
   </section>`;
 }
 
-// ---------- containers ----------
+// ---------- containers: Proxmox guests and Docker ----------
 function ContainersTab({ s }) {
+  const n = s.snapshot;
+  return html`<div class="stack">
+    ${n?.pve && html`<${GuestsPanel} s=${s} pve=${n.pve} />`}
+    ${(!n?.pve || n.docker) && html`<${DockerPanel} s=${s} />`}
+  </div>`;
+}
+
+// Read-only, from the per-minute probe. Managing guests stays in Proxmox.
+function GuestsPanel({ s, pve }) {
+  const [hist, setHist] = useState(null);
+  const sort = useSort(pve.guests, 'vmid');
+  const host = s.host.includes(':') ? `[${s.host}]` : s.host;
+  return html`<section class="panel">
+    <div class="panel-h"><h2>Virtual machines & LXC</h2><span class="small muted">${pve.guests.filter((g) => g.status === 'running').length} of ${pve.guests.length} running on node ${pve.node}</span>
+      <a class="btn ghost sm right" href=${`https://${host}:8006`} target="_blank" rel="noopener noreferrer"><${Icon} name="ext" size=${14} />Open Proxmox</a></div>
+    ${pve.error ? html`<${Empty} title="Can't read the guests">${pve.error}</${Empty}>` : !pve.guests.length ? html`<${Empty} title="No guests on this node" />` : html`<div class="table-wrap"><table class="t">
+      <thead><tr><${Th} sort=${sort} k="status">State</${Th}><${Th} sort=${sort} k="vmid" class="num">ID</${Th}><${Th} sort=${sort} k="name">Name</${Th}><${Th} sort=${sort} k="type" class="hide-sm">Type</${Th}><${Th} sort=${sort} k="cpu" class="num" desc>CPU</${Th}><${Th} sort=${sort} k="mem" class="num" desc>Memory</${Th}><${Th} sort=${sort} k="disk" class="num hide-sm" desc>Disk</${Th}><${Th} sort=${sort} k="uptime" class="hide-sm" desc>Up</${Th}><th class="act"></th></tr></thead>
+      <tbody>${sort.rows.map((g) => {
+        const on = g.status === 'running';
+        return html`<tr>
+        <td><span class=${`chip ${on ? 'ok' : g.status === 'stopped' ? '' : 'warn'}`}>${g.status}</span></td>
+        <td class="num mono">${g.vmid}</td><td class="mono">${g.name}</td><td class="ink2 hide-sm">${g.type === 'lxc' ? 'LXC' : 'VM'}</td>
+        <td class="num">${on ? html`<${CellBar} value=${g.cpu}><span title=${`of ${g.maxcpu} cores`}>${pct(g.cpu)}</span></${CellBar}>` : '–'}</td>
+        <td class="num nowrap">${on && g.maxmem ? html`<${CellBar} value=${g.mem / g.maxmem}><span title=${`${bytes(g.mem)} of ${bytes(g.maxmem)}`}>${bytes(g.mem)}</span></${CellBar}>` : html`<span class="ink2">${bytes(g.maxmem)}</span>`}</td>
+        <td class="num ink2 nowrap hide-sm">${g.disk ? `${bytes(g.disk)} of ${bytes(g.maxdisk)}` : bytes(g.maxdisk)}</td>
+        <td class="ink2 nowrap hide-sm">${on ? uptime(g.uptime) : '–'}</td>
+        <td class="act"><${Btn} size="sm" kind="ghost" onClick=${() => setHist(g)}>History</${Btn}></td></tr>`;
+      })}</tbody></table></div>`}
+    ${hist && html`<${Modal} wide title=${`History: ${hist.name}`} onClose=${() => setHist(null)}><${ContainerHistory} s=${s} name=${`pve:${hist.vmid}`} /></${Modal}>`}
+  </section>`;
+}
+
+function DockerPanel({ s }) {
   const [held, bind] = useHold();
   const c = useLoad(() => api(`/api/servers/${s.id}/containers`), [s.id], { poll: 15_000, paused: held });
   const [logs, setLogs] = useState(null);

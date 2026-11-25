@@ -61,6 +61,7 @@ type Snapshot struct {
 	GPU         *float64               `json:"gpu,omitempty"`    // utilization of the busiest GPU, 0-1
 	GPUMem      *float64               `json:"gpuMem,omitempty"` // memory used of that GPU, 0-1
 	Custom      map[string]CustomValue `json:"custom,omitempty"` // custom metric id -> value
+	PVE         *PVE                   `json:"pve,omitempty"`    // Proxmox VE host
 	// Set by the probe loop (rates against the previous probe), not by Parse.
 	Rx *float64 `json:"rx"`
 	Tx *float64 `json:"tx"`
@@ -108,6 +109,50 @@ type Container struct {
 	Health *string  `json:"health"`
 	CPU    *float64 `json:"cpu"`
 	Mem    *float64 `json:"mem"`
+}
+
+// PVE is a Proxmox VE node and its guests.
+type PVE struct {
+	Node   string  `json:"node"`
+	Error  string  `json:"error,omitempty"` // pvesh gave nothing usable (e.g. no root)
+	Guests []Guest `json:"guests"`
+}
+
+// Guest is a VM or LXC container, as pvesh /cluster/resources reports it.
+type Guest struct {
+	VMID    int     `json:"vmid"`
+	Name    string  `json:"name"`
+	Type    string  `json:"type"`   // qemu | lxc
+	Status  string  `json:"status"` // running | stopped | paused…
+	CPU     float64 `json:"cpu"`    // 0-1 of its cores
+	MaxCPU  float64 `json:"maxcpu"`
+	Mem     float64 `json:"mem"`
+	MaxMem  float64 `json:"maxmem"`
+	Disk    float64 `json:"disk"` // 0 for VMs without the guest agent
+	MaxDisk float64 `json:"maxdisk"`
+	NetIn   float64 `json:"netin"`
+	NetOut  float64 `json:"netout"`
+	Uptime  float64 `json:"uptime"`
+	Node    string  `json:"node,omitempty"`
+	Tmpl    int     `json:"template,omitempty"`
+}
+
+// parsePVE keeps this node's guests (a cluster lists all of them on every node), without templates, sorted by id.
+func parsePVE(node, js string) *PVE {
+	p := &PVE{Node: node, Guests: []Guest{}}
+	var all []Guest
+	if err := json.Unmarshal([]byte(js), &all); err != nil {
+		p.Error = "pvesh returned no data (it needs root or passwordless sudo)"
+		return p
+	}
+	for _, g := range all {
+		if g.Node == node && g.Tmpl == 0 {
+			g.Node, g.Tmpl = "", 0
+			p.Guests = append(p.Guests, g)
+		}
+	}
+	slices.SortFunc(p.Guests, func(a, b Guest) int { return a.VMID - b.VMID })
+	return p
 }
 
 type GPU struct {
@@ -562,6 +607,9 @@ func Parse(text string) *Snapshot {
 			}
 		}
 	}
+	if node, ok := kv["pve_node"]; ok {
+		s.PVE = parsePVE(node, kv["pve"])
+	}
 	if kv["docker"] != "" {
 		s.Docker = &Docker{or0(at(dk, 0)), or0(at(dk, 1))}
 		s.Containers = parseContainers(ctrs, cstats)
@@ -763,6 +811,18 @@ func collect(s *db.Server) (snap *Snapshot, err error) {
 	for id, v := range snap.Custom {
 		if v.V != nil {
 			if _, err := db.Exec(`INSERT INTO custom_values (server_id, metric_id, t, v) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`, s.ID, id, t, v.V); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if snap.PVE != nil { // guest history shares the container table, as "pve:<vmid>"
+		// ponytail: shares container_metrics to avoid a new table; split it out if guests need more columns.
+		for _, g := range snap.PVE.Guests {
+			if g.Status != "running" {
+				continue
+			}
+			if _, err := db.Exec(`INSERT INTO container_metrics (server_id, name, t, cpu, mem) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+				s.ID, fmt.Sprintf("pve:%d", g.VMID), t, g.CPU*g.MaxCPU*100, g.Mem); err != nil { // cpu: 100% = one core, like Docker
 				return nil, err
 			}
 		}

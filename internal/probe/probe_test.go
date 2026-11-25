@@ -8,6 +8,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -81,7 +82,7 @@ func eq(t *testing.T, got, want any) {
 func TestScriptsVerbatim(t *testing.T) {
 	// sha256(PROBE + "|" + SMART) of lib/probe.js's strings.
 	h := sha256.Sum256([]byte(PROBE + "|" + SMART))
-	eq(t, hex.EncodeToString(h[:]), "470d50ba49709f8c3011b9ab9a85bb17d71b36a80531719f86c384858992a5bc")
+	eq(t, hex.EncodeToString(h[:]), "eba050623fc917560522985bd278c6ec536544b8423210fbc64ea4abcac28f00")
 }
 
 func TestProbeParser(t *testing.T) {
@@ -323,5 +324,36 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProxmox(t *testing.T) {
+	js, err := os.ReadFile("testdata/pvesh-resources.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := strings.ReplaceAll(string(js), "\n", "") // the probe strips newlines too
+	for _, c := range []struct {
+		node string
+		ids  []int
+	}{{"pve1", []int{100, 101, 200}}, {"pve2", []int{102}}} {
+		s := Parse("pve_node=" + c.node + "\npve=" + one + "\n")
+		var ids []int
+		for _, g := range s.PVE.Guests {
+			ids = append(ids, g.VMID)
+		}
+		if !slices.Equal(ids, c.ids) {
+			t.Errorf("%s: guests %v, want %v", c.node, ids, c.ids)
+		}
+	}
+	g := Parse("pve_node=pve1\npve=" + one).PVE.Guests[1]
+	if g.Name != "backup-test" || g.Status != "stopped" || g.Type != "qemu" || g.MaxMem != 2147483648 {
+		t.Errorf("stopped guest: %+v", g)
+	}
+	if p := Parse("pve_node=pve1\npve=\n").PVE; p.Error == "" || len(p.Guests) != 0 {
+		t.Errorf("no root: %+v", p)
+	}
+	if Parse("hostname=x\n").PVE != nil {
+		t.Error("PVE on a host without pvesh")
 	}
 }
