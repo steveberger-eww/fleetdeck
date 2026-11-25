@@ -1,7 +1,7 @@
 import {
   html, render, useState, useEffect, useRef, useMemo, api, useRoute, go, Icon, Logo, ToastHost, ConfirmHost, useLoad, Btn,
   Lamp, useStore, serversStore, runningStore, refreshServers, refreshRunning, Field, byAttention, attention, isMac, dismissConfirm,
-  meStore, refreshMe, can, ROLES, Empty, toast, switchOrg,
+  meStore, refreshMe, can, ROLES, Empty, toast, switchOrg, passkeysSupported, getPasskey,
 } from './ui.js';
 import { getTheme, setTheme } from './theme.js';
 import { Overview } from './pages/overview.js';
@@ -38,6 +38,14 @@ function Login({ auth, onDone, title, sub, ssoHref = '/api/auth/oidc/start' }) {
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
   const enter = (e) => e.key === 'Enter' && submit();
+  const passkey = async () => {
+    setBusy(true); setErr('');
+    try {
+      const { token, options } = await api('/api/auth/passkey/begin', { method: 'POST' });
+      await api('/api/auth/passkey/finish', { method: 'POST', body: { token, credential: await getPasskey(options) } });
+      onDone();
+    } catch (e) { if (e.name !== 'NotAllowedError') setErr(e.message); } finally { setBusy(false); } // NotAllowedError: the user closed the prompt
+  };
   const org = auth.org;
   const orgBtn = org?.sso && !needCode && html`<a class="btn primary" href=${`/api/auth/oidc/start?org=${encodeURIComponent(org.slug)}`}>Sign in with ${org.name}</a>`;
   const sso = auth.sso && !needCode && html`<a class=${`btn ${orgBtn ? '' : 'primary'}`} href=${ssoHref}>Sign in with ${auth.sso}</a>`;
@@ -48,6 +56,7 @@ function Login({ auth, onDone, title, sub, ssoHref = '/api/auth/oidc/start' }) {
     ${needCode && html`<${Field} label="Authentication code"><input inputmode="numeric" autocomplete="one-time-code" autofocus maxlength="6" value=${f.code} onInput=${set('code')} onKeyDown=${enter} /></${Field}>`}
     ${err && html`<p class="err" role="alert">${err}</p>`}
     <button class=${`btn ${orgBtn || sso ? '' : 'primary'}`} type="submit" disabled=${busy || (!needCode && (!f.email || !f.password))} onClick=${submit}>${busy ? 'Signing in…' : 'Sign in'}</button>
+    ${!needCode && passkeysSupported() && html`<button class="btn" type="button" disabled=${busy} onClick=${passkey}>Sign in with a passkey</button>`}
   </${AuthFrame}>`;
 }
 

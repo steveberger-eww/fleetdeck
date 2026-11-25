@@ -41,11 +41,12 @@ type Server struct {
 	static     fs.FS
 	mux        *http.ServeMux
 
-	mu          sync.Mutex // guards the fields below
-	setupToken  string
-	failures    map[string]*failure // per-IP login failures
-	pendingTOTP map[string]string   // session hash -> secret awaiting confirmation
-	oidcPending map[string]oidcFlow // OIDC state -> flow in progress
+	mu             sync.Mutex // guards the fields below
+	setupToken     string
+	failures       map[string]*failure    // per-IP login failures
+	pendingTOTP    map[string]string      // session hash -> secret awaiting confirmation
+	oidcPending    map[string]oidcFlow    // OIDC state -> flow in progress
+	passkeyPending map[string]passkeyFlow // WebAuthn ceremonies in progress
 
 	totpMu sync.Mutex // makes checkTOTP's read-compare-write of totp_last atomic
 }
@@ -62,7 +63,8 @@ var roleLevel = map[string]int{"viewer": roleViewer, "operator": roleOperator, "
 
 // New returns the handler. static holds the UI (index.html at its root); trustProxy honours X-Forwarded-*.
 func New(static fs.FS, trustProxy bool) *Server {
-	s := &Server{trustProxy: trustProxy, static: static, mux: http.NewServeMux(), failures: map[string]*failure{}, pendingTOTP: map[string]string{}, oidcPending: map[string]oidcFlow{}}
+	s := &Server{trustProxy: trustProxy, static: static, mux: http.NewServeMux(), failures: map[string]*failure{}, pendingTOTP: map[string]string{}, oidcPending: map[string]oidcFlow{},
+		passkeyPending: map[string]passkeyFlow{}}
 	s.mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 404, errBody("Not found")) })
 	s.routes()
 	return s
