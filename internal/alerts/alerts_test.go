@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -168,7 +169,7 @@ func TestQuietHours(t *testing.T) {
 func TestMetricsAndTypesJSON(t *testing.T) {
 	b, err := json.Marshal(Metrics)
 	must(t, err)
-	eq(t, string(b), `{"down":{"label":"Unreachable","unit":"min","hint":"Fires when the server cannot be reached for N minutes"},"cpu":{"label":"CPU usage","unit":"%","col":"cpu","scale":100,"def":90},"mem":{"label":"Memory usage","unit":"%","col":"mem","scale":100,"def":90},"swap":{"label":"Swap usage","unit":"%","col":"swap","scale":100,"def":50},"disk":{"label":"Disk usage (fullest mount)","unit":"%","def":90},"inodes":{"label":"Inode usage (fullest mount)","unit":"%","def":90},"load":{"label":"Load per CPU core","unit":"","col":"load1","scale":1,"def":1.5},"temp":{"label":"Temperature","unit":"°C","col":"temp","scale":1,"def":80},"updates":{"label":"Pending updates","unit":"","def":0},"security":{"label":"Pending security updates","unit":"","def":0},"failed":{"label":"Failed systemd units","unit":"","def":0},"reboot":{"label":"Reboot required","unit":""},"smart":{"label":"Disks with S.M.A.R.T. problems","unit":"","def":0},"unhealthy":{"label":"Unhealthy or restarting containers","unit":"","def":0},"net":{"label":"Network traffic (in + out)","unit":" MB/s","col":"rx + tx","scale":0.000001,"def":50},"gpu":{"label":"GPU usage (busiest GPU)","unit":"%","col":"gpu","scale":100,"def":90},"custom":{"label":"Custom metric","unit":"","hint":"One of your custom metrics, from a server's Metrics panel"}}`)
+	eq(t, string(b), `{"down":{"label":"Unreachable","unit":"min","hint":"Fires when the server cannot be reached for N minutes"},"cpu":{"label":"CPU usage","unit":"%","col":"cpu","scale":100,"def":90},"mem":{"label":"Memory usage","unit":"%","col":"mem","scale":100,"def":90},"swap":{"label":"Swap usage","unit":"%","col":"swap","scale":100,"def":50},"disk":{"label":"Disk usage (fullest mount)","unit":"%","def":90},"inodes":{"label":"Inode usage (fullest mount)","unit":"%","def":90},"load":{"label":"Load per CPU core","unit":"","col":"load1","scale":1,"def":1.5},"temp":{"label":"Temperature","unit":"°C","col":"temp","scale":1,"def":80},"updates":{"label":"Pending updates","unit":"","def":0},"security":{"label":"Pending security updates","unit":"","def":0},"failed":{"label":"Failed systemd units","unit":"","def":0},"reboot":{"label":"Reboot required","unit":""},"smart":{"label":"Disks with S.M.A.R.T. problems","unit":"","def":0},"unhealthy":{"label":"Unhealthy or restarting containers","unit":"","def":0},"net":{"label":"Network traffic (in + out)","unit":" MB/s","col":"rx + tx","scale":0.000001,"def":50},"gpu":{"label":"GPU usage (busiest GPU)","unit":"%","col":"gpu","scale":100,"def":90},"custom":{"label":"Custom metric","unit":"","hint":"One of your custom metrics, from a server's Metrics panel"},"check":{"label":"Endpoint check failing","unit":"min","hint":"Fires when one of the server's endpoint checks (Network tab) fails for N minutes"},"tls_days":{"label":"TLS certificate days left","unit":" days","hint":"The soonest-expiring certificate of the server's HTTPS checks","def":14,"below":true}}`)
 	b, err = json.Marshal(Types)
 	must(t, err)
 	eq(t, string(b), `{"webhook":{"label":"Webhook (JSON POST)","fields":[{"key":"url","label":"URL","secret":true}]},"ntfy":{"label":"ntfy","fields":[{"key":"url","label":"Topic URL (https://ntfy.sh/my-topic)"},{"key":"token","label":"Access token (optional)","secret":true,"optional":true}]},"discord":{"label":"Discord","fields":[{"key":"url","label":"Webhook URL","secret":true}]},"slack":{"label":"Slack","fields":[{"key":"url","label":"Incoming webhook URL","secret":true}]},"telegram":{"label":"Telegram","fields":[{"key":"token","label":"Bot token","secret":true},{"key":"chat_id","label":"Chat ID"}]},"pushover":{"label":"Pushover","fields":[{"key":"token","label":"Application API token","secret":true},{"key":"user","label":"User or group key","secret":true},{"key":"device","label":"Device (optional, all devices if empty)","optional":true}]},"gotify":{"label":"Gotify","fields":[{"key":"url","label":"Server URL"},{"key":"token","label":"App token","secret":true}]}}`)
@@ -282,4 +283,40 @@ func TestCustomAlert(t *testing.T) {
 		t.Fatal("empty command accepted")
 	}
 	eq(t, []string{UnitSuffix("%"), UnitSuffix("°C"), UnitSuffix("GB"), UnitSuffix("")}, []string{"%", "°C", " GB", ""})
+}
+
+func TestEndpointCheckAlerts(t *testing.T) {
+	exec(t, `INSERT INTO servers (id, name, host, created_at) VALUES ('e1', 'site', 'h', 0)`)
+	exec(t, `INSERT INTO checks (id, server_id, name, kind, target, created_at) VALUES ('c1', 'e1', 'shop', 'http', 'https://shop.example', 0)`)
+	exec(t, `INSERT INTO alert_rules (id, metric, threshold, minutes, server_id, created_at) VALUES ('rc', 'check', 0, 3, 'e1', 0), ('rt', 'tls_days', 14, 0, 'e1', 0)`)
+	firing := func(rule string) bool {
+		n, err := db.Get[int](`SELECT 1 FROM alert_state WHERE rule_id = ?`, rule)
+		must(t, err)
+		return n != nil
+	}
+	set := func(failingFor time.Duration, days float64) {
+		var since any
+		if failingFor > 0 {
+			since = db.Now() - failingFor.Milliseconds()
+		}
+		exec(t, `UPDATE checks SET failing_since = ?, last_error = 'connection refused', tls_days = ? WHERE id = 'c1'`, since, days)
+	}
+	set(time.Minute, 30)
+	Evaluate(srv(t, "e1"), &probe.Snapshot{}, nil)
+	if firing("rc") || firing("rt") {
+		t.Fatal("fired too early")
+	}
+	set(4*time.Minute, 10)
+	Evaluate(srv(t, "e1"), nil, errors.New("ssh down")) // checks don't need the server's SSH
+	if m := message(t, "rc"); !strings.Contains(m, "shop (connection refused, for 4 min)") {
+		t.Fatal(m)
+	}
+	if m := message(t, "rt"); !strings.Contains(m, "expires in 10 days (alert below 14 days)") {
+		t.Fatal(m)
+	}
+	set(0, 60) // the service is back and the certificate renewed
+	Evaluate(srv(t, "e1"), &probe.Snapshot{}, nil)
+	if firing("rc") || firing("rt") {
+		t.Fatal("did not resolve")
+	}
 }

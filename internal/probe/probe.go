@@ -1004,7 +1004,7 @@ func prune() {
 		return
 	}
 	cutoff := db.Now() - int64(days*864e5)
-	for _, q := range []string{`DELETE FROM metrics WHERE t < ?`, `DELETE FROM container_metrics WHERE t < ?`, `DELETE FROM custom_values WHERE t < ?`} {
+	for _, q := range []string{`DELETE FROM metrics WHERE t < ?`, `DELETE FROM container_metrics WHERE t < ?`, `DELETE FROM custom_values WHERE t < ?`, `DELETE FROM check_results WHERE t < ?`} {
 		if _, err := db.Exec(q, cutoff); err != nil {
 			log.Printf("probe retention: %v", err)
 		}

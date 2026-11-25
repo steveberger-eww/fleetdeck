@@ -30,6 +30,7 @@ type Metric struct {
 	Col   string   `json:"col,omitempty"` // metrics column (expression) for N-minute averages
 	Scale float64  `json:"scale,omitempty"`
 	Def   *float64 `json:"def,omitempty"`
+	Below bool     `json:"below,omitempty"` // fires when the value drops below the threshold
 }
 
 // MetricList marshals as a JSON object in list order: the UI's metric picker shows them in that order.
@@ -68,6 +69,8 @@ var Metrics = MetricList{
 	{Key: "net", Label: "Network traffic (in + out)", Unit: " MB/s", Col: "rx + tx", Scale: 1e-6, Def: def(50)},
 	{Key: "gpu", Label: "GPU usage (busiest GPU)", Unit: "%", Col: "gpu", Scale: 100, Def: def(90)},
 	{Key: "custom", Label: "Custom metric", Unit: "", Hint: "One of your custom metrics, from a server's Metrics panel"},
+	{Key: "check", Label: "Endpoint check failing", Unit: "min", Hint: "Fires when one of the server's endpoint checks (Network tab) fails for N minutes"},
+	{Key: "tls_days", Label: "TLS certificate days left", Unit: " days", Def: def(14), Below: true, Hint: "The soonest-expiring certificate of the server's HTTPS checks"},
 }
 
 // ordered writes a JSON object with keys in slice order (Go maps would sort them).
@@ -557,7 +560,11 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 		}
 		var firing bool
 		var msg string
-		if r.Metric == "down" {
+		if r.Metric == "check" || r.Metric == "tls_days" { // run from Fleetdeck: known even while the server is unreachable
+			if firing, msg, err = checkState(r, m, s); err != nil {
+				return err
+			}
+		} else if r.Metric == "down" {
 			msg = s.Name + " is unreachable"
 			if perr != nil {
 				since := db.Now()
@@ -576,7 +583,7 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 			if err != nil {
 				return err
 			}
-			firing = v != nil && *v > r.Threshold
+			firing = v != nil && (*v > r.Threshold && !m.Below || *v < r.Threshold && m.Below)
 			if r.Metric == "reboot" {
 				msg = s.Name + " needs a reboot"
 			} else {
@@ -637,6 +644,40 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 		}
 	}
 	return nil
+}
+
+// checkState evaluates the check and tls_days rules from the latest results of the server's endpoint checks.
+func checkState(r *Rule, m *Metric, s *db.Server) (bool, string, error) {
+	type row struct {
+		Name         string   `db:"name"`
+		LastError    string   `db:"last_error"`
+		FailingSince *int64   `db:"failing_since"`
+		TLSDays      *float64 `db:"tls_days"`
+	}
+	list, err := db.Select[row](`SELECT name, last_error, failing_since, tls_days FROM checks WHERE server_id = ? AND enabled = 1 ORDER BY name`, s.ID)
+	if err != nil {
+		return false, "", err
+	}
+	if r.Metric == "check" {
+		var bad []string
+		for _, c := range list {
+			if c.FailingSince != nil && db.Now()-*c.FailingSince >= r.Minutes*60e3 {
+				bad = append(bad, fmt.Sprintf("%s (%s, for %d min)", c.Name, c.LastError, (db.Now()-*c.FailingSince)/60e3))
+			}
+		}
+		return len(bad) > 0, s.Name + ": endpoint check failing: " + strings.Join(bad, "; "), nil
+	}
+	var low *row
+	for i, c := range list {
+		if c.TLSDays != nil && (low == nil || *c.TLSDays < *low.TLSDays) {
+			low = &list[i]
+		}
+	}
+	if low == nil {
+		return false, "", nil
+	}
+	return *low.TLSDays < r.Threshold, fmt.Sprintf("%s: the TLS certificate of %s expires in %s%s (alert below %s%s)",
+		s.Name, low.Name, fmtNum(math.Floor(*low.TLSDays)), m.Unit, fmtNum(r.Threshold), m.Unit), nil
 }
 
 // FiringAlert is a currently firing alert, for the alerts page.

@@ -67,7 +67,7 @@ export function ServerPage({ id, tab }) {
   else if (tab === 'logs') body = html`<${LogsTab} s=${s} />`;
   else if (tab === 'processes') body = html`<${ProcessesTab} s=${s} />`;
   else if (tab === 'containers') body = html`<${ContainersTab} s=${s} />`;
-  else if (tab === 'network') body = html`<${NetworkTab} s=${s} />`;
+  else if (tab === 'network') body = html`<div class="stack"><${NetworkTab} s=${s} /><${ChecksPanel} s=${s} /></div>`;
   else if (tab === 'terminal') body = op ? html`<${TerminalTab} s=${s} />` : NOT_ALLOWED;
   else if (tab === 'jobs') body = html`<div class="stack">${can('admin') && html`<${ScheduledPanel} s=${s} />`}<section class="panel"><${JobsTable} serverId=${s.id} /></section></div>`;
   else if (tab === 'settings') body = can('owner') ? html`<${SettingsTab} s=${s} />` : NOT_ALLOWED;
@@ -687,6 +687,70 @@ function NetworkTab({ s }) {
     </div>
     ${ufwDocker && html`<${UfwDockerDialog} s=${s} ports=${n.ports.filter((p) => p.docker)} onClose=${() => setUfwDocker(false)} />`}
   </div>`;
+}
+
+// ---------- endpoint checks (run from the Fleetdeck host, not over SSH) ----------
+function ChecksPanel({ s }) {
+  const list = useLoad(() => api(`/api/servers/${s.id}/checks`), [s.id], { poll: 60_000 });
+  const [edit, setEdit] = useState(null);
+  const owner = can('owner');
+  const runNow = async (c) => { await api(`/api/servers/${s.id}/checks/${c.id}/run`, { method: 'POST' }); list.reload(true); };
+  const del = async (c) => {
+    if (!await confirmBox({ title: `Remove the check "${c.name}"?`, body: 'Its history goes with it.', confirm: 'Remove check', danger: true })) return;
+    await api(`/api/servers/${s.id}/checks/${c.id}`, { method: 'DELETE' });
+    list.reload(true);
+  };
+  const tls = (d) => (d == null ? '–' : html`<span class=${`chip ${d < 7 ? 'bad' : d < 21 ? 'warn' : ''}`} title="Days until the certificate expires">${d < 0 ? 'expired' : `${Math.floor(d)} d`}</span>`);
+  return html`<section class="panel">
+    <div class="panel-h"><h2>Endpoint checks</h2><span class="small muted">HTTP(S) and TCP checks from the Fleetdeck host, every minute.</span>
+      ${owner && html`<${Btn} size="sm" icon="plus" class="right" onClick=${() => setEdit({})}>Add check</${Btn}>`}</div>
+    ${list.loading && !list.data ? html`<${Loading} />` : list.error ? html`<div class="panel-b"><${ErrorNote} error=${list.error} retry=${list.reload} /></div>`
+      : !list.data.length ? html`<${Empty} title="No checks">Is the website up, and when does its certificate expire? Add a check, then an "Endpoint check failing" or "TLS certificate" rule under Alerts.</${Empty}>`
+      : html`<div class="table-wrap"><table class="t"><thead><tr><th>Status</th><th>Check</th><th class="num">Response</th><th>TLS</th><th class="num hide-sm">24 h</th><th class="act"></th></tr></thead>
+      <tbody>${list.data.map((c) => html`<tr>
+        <td>${!c.enabled ? html`<span class="chip">off</span>` : c.last_ok == null ? html`<span class="chip">pending</span>`
+          : c.last_ok ? html`<span class="chip ok">up</span>` : html`<span class="chip bad" title=${c.failing_since ? `Since ${when(c.failing_since)}` : ''}>failing</span>`}</td>
+        <td><b>${c.name}</b>${c.name !== c.target && html` <span class="mono small ink2">${c.target}</span>`}${c.last_error && html`<div class="small err">${c.last_error}</div>`}</td>
+        <td class="num ink2 nowrap">${c.last_ms != null ? `${c.last_ms} ms` : '–'}</td>
+        <td>${c.kind === 'http' && c.target.startsWith('https:') ? tls(c.tls_days) : html`<span class="muted">–</span>`}</td>
+        <td class="num ink2 hide-sm">${pct(c.uptime, c.uptime < 1 ? 1 : 0)}</td>
+        <td class="act"><div class="row nw">
+          ${can('operator') && html`<${Btn} size="sm" kind="ghost" onClick=${() => runNow(c)}>Check now</${Btn}>`}
+          ${owner && html`<${Btn} size="sm" kind="ghost" icon="edit" title="Edit" onClick=${() => setEdit(c)} /><${Btn} size="sm" kind="ghost" icon="trash" title="Remove" onClick=${() => del(c)} />`}
+        </div></td></tr>`)}</tbody></table></div>`}
+    ${edit && html`<${CheckDialog} s=${s} check=${edit} onClose=${() => setEdit(null)} onSaved=${() => { setEdit(null); list.reload(true); }} />`}
+  </section>`;
+}
+
+function CheckDialog({ s, check, onClose, onSaved }) {
+  const [v, setV] = useState({ kind: 'http', target: '', name: '', contains: '', enabled: true, ...check, expect_status: check.expect_status ?? '' });
+  const dirty = useDirty(v);
+  const [err, setErr] = useState('');
+  const http = v.kind === 'http';
+  const set = (k) => (e) => setV({ ...v, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+  const save = async () => {
+    setErr('');
+    try {
+      const body = { ...v, name: v.name === v.target ? '' : v.name, expect_status: Number(v.expect_status) || 0 };
+      await api(check.id ? `/api/servers/${s.id}/checks/${check.id}` : `/api/servers/${s.id}/checks`, { method: check.id ? 'PUT' : 'POST', body });
+      toast('Check saved', 'ok');
+      onSaved();
+    } catch (e) { setErr(e.message); }
+  };
+  return html`<${Modal} title=${check.id ? 'Edit check' : 'Add check'} onClose=${onClose} dirty=${dirty}
+    footer=${html`<${Footer} onClose=${onClose} onSave=${save} label="Save check" disabled=${!v.target} />`}>
+    <div class="seg" role="group" aria-label="Check type">
+      <button aria-pressed=${http} onClick=${() => setV({ ...v, kind: 'http' })}>HTTP(S)</button>
+      <button aria-pressed=${!http} onClick=${() => setV({ ...v, kind: 'tcp' })}>TCP port</button></div>
+    <${Field} label=${http ? 'URL' : 'Host and port'} hint=${http ? 'Redirects are not followed: a 301 counts as up.' : null}>
+      <input class="mono" value=${v.target} onInput=${set('target')} placeholder=${http ? 'https://example.com/health' : `${s.host}:5432`} autofocus /></${Field}>
+    ${http && html`<div class="cols">
+      <${Field} label="Expected status" hint="Empty: anything below 400"><input type="number" min="100" max="599" value=${v.expect_status} onInput=${set('expect_status')} /></${Field}>
+      <${Field} label="Page must contain (optional)"><input value=${v.contains} onInput=${set('contains')} /></${Field}></div>`}
+    <${Field} label="Name (optional)"><input value=${v.name === v.target ? '' : v.name} onInput=${set('name')} placeholder=${v.target} /></${Field}>
+    <label class="check"><input type="checkbox" class="switch" role="switch" checked=${v.enabled} onChange=${set('enabled')} />Enabled</label>
+    ${err && html`<p class="err">${err}</p>`}
+  </${Modal}>`;
 }
 
 function FirewallPanel({ n, onUfwDocker }) {
