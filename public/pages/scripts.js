@@ -56,7 +56,7 @@ export function ScriptsPage() {
 const NEXT_WHEN = { success: 'when it succeeds', failure: 'when it fails', always: 'always' };
 
 function ScriptDialog({ script, onClose, onSaved }) {
-  const [v, setV] = useState({ name: '', description: '', body: '#!/bin/sh\nset -e\n\n', as_root: true, params: [], vars: [], kind: 'shell', repo_id: '', playbook: '', next_script_id: '', next_when: 'success', next_ok_only: false, ...script });
+  const [v, setV] = useState({ name: '', description: '', body: '#!/bin/sh\nset -e\n\n', as_root: true, params: [], vars: [], kind: 'shell', repo_id: '', playbook: '', next_script_id: '', next_when: 'success', next_ok_only: false, retries: 0, retry_delay: 5, ...script });
   const all = useLoad(() => api('/api/scripts'));
   // A shared script can only run another shared one next.
   const nextChoices = (all.data || []).filter((x) => x.id !== script.id && (!(script.shared || v.shared) || x.shared));
@@ -120,6 +120,15 @@ function ScriptDialog({ script, onClose, onSaved }) {
         onClick=${() => setV({ ...v, vars: v.vars.includes(x.name) ? v.vars.filter((n) => n !== x.name) : [...v.vars, x.name] })}>${x.name}</button>`)}</div>`
         : html`<span class="small muted">None yet. Add tokens and passwords under <a href="#/variables" onClick=${onClose}>Variables</a>.</span>`}
       <span class="hint">Ticked variables are passed ${ansible ? 'as extra vars' : 'as environment variables'}. Secret values are masked in the output.</span>
+    </div>
+    <div class="field"><span>If it fails</span>
+      <div class="row nw">
+        <select value=${v.retries} onChange=${(e) => setV({ ...v, retries: Number(e.target.value) })} class="grow" aria-label="Retries">
+          ${[0, 1, 2, 3, 4, 5].map((n) => html`<option value=${n}>${n ? `Retry ${n === 1 ? 'once' : `up to ${n} times`}` : "Don't retry"}</option>`)}</select>
+        ${v.retries > 0 && html`<select value=${v.retry_delay} onChange=${(e) => setV({ ...v, retry_delay: Number(e.target.value) })} aria-label="Wait between attempts" style="width:auto;flex:none">
+          ${[1, 2, 5, 10, 15, 30, 60].map((m) => html`<option value=${m}>after ${m} min</option>`)}</select>`}
+      </div>
+      ${v.retries > 0 && html`<span class="hint">Only the servers that failed run again. Chains and "job failed" notifications wait for the last attempt. Dry runs don't retry.</span>`}
     </div>
     <div class="field"><span>After this script finishes, run</span>
       <div class="row nw">

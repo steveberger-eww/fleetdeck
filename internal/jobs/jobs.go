@@ -195,6 +195,8 @@ type Script struct {
 	NextScript  *string `db:"next_script_id" json:"next_script_id"` // chain: run this script next
 	NextWhen    string  `db:"next_when" json:"next_when"`           // success | failure | always
 	NextOKOnly  bool    `db:"next_ok_only" json:"next_ok_only"`     // only on the servers where this one succeeded
+	Retries     int     `db:"retries" json:"retries"`               // run failed jobs again on their failed servers, up to this many times
+	RetryDelay  int     `db:"retry_delay" json:"retry_delay"`       // minutes between attempts
 }
 
 // GetScript loads a script (nil, nil if missing).
@@ -221,6 +223,8 @@ type ScriptInput struct {
 	NextScript  string   `json:"next_script_id"`
 	NextWhen    string   `json:"next_when"`
 	NextOKOnly  bool     `json:"next_ok_only"`
+	Retries     int      `json:"retries"`
+	RetryDelay  int      `json:"retry_delay"`
 	Self        string   `json:"-"` // the script's own id when editing: it can't chain to itself
 }
 
@@ -237,6 +241,8 @@ type ScriptFields struct {
 	NextScript  *string
 	NextWhen    string
 	NextOKOnly  int
+	Retries     int
+	RetryDelay  int
 }
 
 var identRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
@@ -295,7 +301,14 @@ func ValidateScript(tenant string, b ScriptInput) (*ScriptFields, error) {
 			return nil, httperr.Bad(fmt.Sprintf("\"%s\" is both a parameter and a shared variable", p.Name))
 		}
 	}
-	out := &ScriptFields{Vars: vars, Name: name, Body: body, Kind: kind, Description: truncate(b.Description, 500), AsRoot: 1, Params: Params{}, NextWhen: "success"}
+	out := &ScriptFields{Vars: vars, Name: name, Body: body, Kind: kind, Description: truncate(b.Description, 500), AsRoot: 1, Params: Params{}, NextWhen: "success",
+		Retries: b.Retries, RetryDelay: cmp.Or(b.RetryDelay, 5)}
+	if out.Retries < 0 || out.Retries > 5 {
+		return nil, httperr.Bad("Retries must be 0-5")
+	}
+	if out.RetryDelay < 1 || out.RetryDelay > 60 {
+		return nil, httperr.Bad("The wait between attempts must be 1-60 minutes")
+	}
 	if b.NextScript != "" {
 		if b.NextScript == b.Self {
 			return nil, httperr.Bad("A script can't run itself next")
@@ -491,6 +504,8 @@ type Spec struct {
 	TenantID string // the organization the job runs in; targets resolve within it
 	Member   string // a user who sees only their assigned servers; "" = every server of the organization
 	Parent   int64  // the job whose chain started this one (0 = none)
+	RetryOf  int64  // the failed attempt this job retries (0 = none)
+	Attempt  int    // 1 for the first run (0 counts as 1)
 }
 
 // SpecFromScript is everything needed to start a job from a saved script (Targets and Actor still to set).
@@ -715,20 +730,24 @@ func insertJob(sp Spec, servers []db.Server, ansible bool) (int64, error) {
 	var id int64
 	err := db.Tx(func(tx db.Txn) error {
 		var err error
-		var parent any
+		var parent, retryOf any
 		if sp.Parent != 0 {
 			parent = sp.Parent
 		}
+		if sp.RetryOf != 0 {
+			retryOf = sp.RetryOf
+		}
+		attempt := max(sp.Attempt, 1)
 		asRoot := 0
 		if sp.AsRoot {
 			asRoot = 1
 		}
 		if ansible {
-			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at, kind, repo_id, options, parent_job) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now(), "ansible", nullable(sp.RepoID), sp.Options, parent)
+			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at, kind, repo_id, options, parent_job, retry_of, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now(), "ansible", nullable(sp.RepoID), sp.Options, parent, retryOf, attempt)
 		} else {
-			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at, parent_job) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now(), parent)
+			err = tx.Get(&id, `INSERT INTO jobs (tenant_id, script_id, name, body, as_root, params, status, actor, created_at, parent_job, retry_of, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+				sp.TenantID, nullable(sp.ScriptID), sp.Name, sp.Body, asRoot, sp.Params, "running", nullable(sp.Actor), db.Now(), parent, retryOf, attempt)
 		}
 		if err != nil {
 			return err
@@ -793,9 +812,19 @@ func finishJob(jobID int64, j *liveJob, sp Spec) {
 	}
 	j.emit(Msg{"type": "job", "status": status})
 	delete(live, jobID)
-	fns := slices.Clone(doneListeners)
 	mu.Unlock()
 	j.cancel()
+	// A failed attempt that will be retried isn't done yet: chains and "job failed" notifications wait for the last one.
+	if status == "failed" && retryLater(jobID, sp, j.order, statuses) {
+		return
+	}
+	jobDone(sp, jobID, status, statuses)
+}
+
+func jobDone(sp Spec, jobID int64, status string, statuses []string) {
+	mu.Lock()
+	fns := slices.Clone(doneListeners)
+	mu.Unlock()
 	for _, fn := range fns {
 		func() {
 			defer guard("job done listener")
@@ -803,6 +832,70 @@ func finishJob(jobID int64, j *liveJob, sp Spec) {
 		}()
 	}
 }
+
+// pending retries by the id of the failed attempt, so they can be cancelled while they wait.
+var pending = map[int64]pendingRetry{}
+
+type pendingRetry struct {
+	timer    *time.Timer
+	sp       Spec
+	statuses []string
+}
+
+// retryLater schedules another attempt on the servers that failed, if the job's script asks for retries
+// (dry runs and ad-hoc commands never retry). It reports whether it did.
+// ponytail: the wait lives in memory; a restart during it drops the retry (Start clears retry_at).
+func retryLater(jobID int64, sp Spec, order, statuses []string) bool {
+	if sp.ScriptID == "" || sp.Options.Check != nil && *sp.Options.Check {
+		return false
+	}
+	sc, err := ScriptFor(sp.TenantID, sp.ScriptID) // as it is now: turning retries off stops the next attempt
+	attempt := max(sp.Attempt, 1)
+	if err != nil || sc == nil || attempt > sc.Retries {
+		return false
+	}
+	var failed, all []string
+	for i, id := range order {
+		if id == Ansible {
+			continue
+		}
+		all = append(all, id)
+		if statuses[i] != "success" && statuses[i] != "skipped" {
+			failed = append(failed, id)
+		}
+	}
+	if len(failed) == 0 { // only the playbook run itself failed (syntax error, checkout): try every host again
+		failed = all
+	}
+	next := sp
+	next.Targets, next.RetryOf, next.Attempt = Targets{Servers: failed, Tags: []string{}}, jobID, attempt+1
+	delay := time.Duration(sc.RetryDelay) * time.Minute
+	if _, err := db.Exec(`UPDATE jobs SET retry_at = ? WHERE id = ?`, db.Now()+delay.Milliseconds(), jobID); err != nil {
+		log.Printf("job #%d: retry: %v", jobID, err)
+		return false
+	}
+	db.Event("job", fmt.Sprintf("Job #%d failed on %d server(s); attempt %d of %d starts in %d min", jobID, len(failed), attempt+1, sc.Retries+1, sc.RetryDelay),
+		db.EventOpts{Level: "warn", TenantID: sp.TenantID})
+	mu.Lock()
+	pending[jobID] = pendingRetry{time.AfterFunc(retryWait(delay), func() {
+		defer guard("job retry")
+		mu.Lock()
+		delete(pending, jobID)
+		mu.Unlock()
+		if _, err := db.Exec(`UPDATE jobs SET retry_at = NULL WHERE id = ?`, jobID); err != nil {
+			log.Printf("job #%d: retry: %v", jobID, err)
+		}
+		if _, err := StartJob(next); err != nil {
+			db.Event("job", fmt.Sprintf("Job #%d: retry not started: %s", jobID, err), db.EventOpts{Level: "error", TenantID: sp.TenantID})
+			jobDone(sp, jobID, "failed", statuses)
+		}
+	}), sp, statuses}
+	mu.Unlock()
+	return true
+}
+
+// retryWait is the delay before a retry starts; tests shorten it.
+var retryWait = func(d time.Duration) time.Duration { return d }
 
 func startAnsibleJob(sp Spec, servers []db.Server, plain map[string]string, mask func(string) string) (int64, error) {
 	vars, err := ansibleVars(sp.ScriptID, plain)
@@ -1022,7 +1115,11 @@ type Job struct {
 	Options    Options `db:"options" json:"options"`
 	CommitSHA  *string `db:"commit_sha" json:"commit_sha"`
 	ParentJob  *int64  `db:"parent_job" json:"parent_job"`
-	NextJob    *int64  `db:"-" json:"next_job"` // the job this one's chain started
+	RetryOf    *int64  `db:"retry_of" json:"retry_of"`
+	Attempt    int     `db:"attempt" json:"attempt"`
+	RetryAt    *int64  `db:"retry_at" json:"retry_at"` // when the next attempt starts, while it waits
+	RetryJob   *int64  `db:"-" json:"retry_job"`       // the attempt that retried this one
+	NextJob    *int64  `db:"-" json:"next_job"`        // the job this one's chain started
 	Runs       []Run   `db:"-" json:"runs"`
 }
 
@@ -1034,7 +1131,10 @@ func loadJob(id int64) (*Job, error) {
 	if j.Runs, err = db.Select[Run](`SELECT * FROM job_runs WHERE job_id = ? ORDER BY server_name`, id); err != nil {
 		return nil, err
 	}
-	if j.NextJob, err = db.Get[int64](`SELECT id FROM jobs WHERE parent_job = ? ORDER BY id LIMIT 1`, id); err != nil {
+	if j.NextJob, err = db.Get[int64](`SELECT id FROM jobs WHERE parent_job = ? AND retry_of IS NULL ORDER BY id LIMIT 1`, id); err != nil {
+		return nil, err
+	}
+	if j.RetryJob, err = db.Get[int64](`SELECT id FROM jobs WHERE retry_of = ? ORDER BY id LIMIT 1`, id); err != nil {
 		return nil, err
 	}
 	if j.Params == nil {
@@ -1163,9 +1263,18 @@ func Subscribe(id int64, fn func(Msg)) (unsub func(), ok bool) {
 	}, true
 }
 
-// CancelJob stops a running job; false when it isn't running.
+// CancelJob stops a running job, or the retry a failed one is waiting for; false when there's neither.
 func CancelJob(id int64) bool {
 	mu.Lock()
+	if p, ok := pending[id]; ok && p.timer.Stop() {
+		delete(pending, id)
+		mu.Unlock()
+		if _, err := db.Exec(`UPDATE jobs SET retry_at = NULL WHERE id = ?`, id); err != nil {
+			log.Printf("job #%d: cancel retry: %v", id, err)
+		}
+		jobDone(p.sp, id, "failed", p.statuses) // this attempt is now the last one
+		return true
+	}
 	defer mu.Unlock()
 	l := live[id]
 	if l == nil {
@@ -1232,10 +1341,27 @@ func chain(tenant string, id int64, _, status, _ string, _ []string) {
 		fail(err)
 		return
 	}
+	// After retries, every server of the first attempt counts, with its status from the last attempt it ran in.
+	latest, order := map[string]string{}, []string{}
+	for a := j; a != nil; {
+		for _, r := range a.Runs {
+			if _, seen := latest[r.ServerID]; !seen && r.ServerID != Ansible {
+				latest[r.ServerID] = r.Status
+				order = append(order, r.ServerID)
+			}
+		}
+		if a.RetryOf == nil {
+			break
+		}
+		if a, err = loadJob(*a.RetryOf); err != nil {
+			fail(err)
+			return
+		}
+	}
 	servers := []string{}
-	for _, r := range j.Runs {
-		if r.ServerID != Ansible && (!sc.NextOKOnly || r.Status == "success") {
-			servers = append(servers, r.ServerID)
+	for _, id := range order {
+		if !sc.NextOKOnly || latest[id] == "success" {
+			servers = append(servers, id)
 		}
 	}
 	if len(servers) == 0 {
@@ -1548,6 +1674,9 @@ func Start() error {
 		return err
 	}
 	if _, err := db.Exec(`UPDATE jobs SET status = 'interrupted', finished_at = ? WHERE status = 'running'`, db.Now()); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE jobs SET retry_at = NULL WHERE retry_at IS NOT NULL`); err != nil { // waits don't survive a restart
 		return err
 	}
 	go func() {

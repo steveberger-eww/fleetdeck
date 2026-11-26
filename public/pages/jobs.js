@@ -186,6 +186,12 @@ export function JobPage({ id }) {
     return () => es.close();
   }, [id]);
   const now = useNow(job?.status === 'running');
+  // A waiting retry: reload when it should have started, to link the next attempt.
+  useEffect(() => {
+    if (!job?.retry_at) return;
+    const t = setTimeout(() => api(`/api/jobs/${id}`).then(setJob, () => {}), Math.max(0, job.retry_at - Date.now()) + 3000);
+    return () => clearTimeout(t);
+  }, [id, job?.retry_at]);
 
   const runs = (job?.runs || []).slice().sort((a, b) => (b.server_id === '__ansible__') - (a.server_id === '__ansible__'));
   const hosts = runs.filter((r) => r.server_id !== '__ansible__');
@@ -202,6 +208,11 @@ export function JobPage({ id }) {
     const r = await api(`/api/jobs/${id}/rerun`, { method: 'POST', body: { failed_only: failedOnly } });
     go(`/jobs/${r.id}`);
   };
+  const cancelRetry = async () => {
+    await api(`/api/jobs/${id}/cancel`, { method: 'POST' });
+    setJob(await api(`/api/jobs/${id}`));
+    toast('Retry cancelled');
+  };
   const cancel = async () => {
     if (!await confirmBox({ title: 'Cancel this job?', body: 'Output stops immediately. A command already running on a server may still finish there.', confirm: 'Cancel job', danger: true })) return;
     await api(`/api/jobs/${id}/cancel`, { method: 'POST' });
@@ -212,9 +223,10 @@ export function JobPage({ id }) {
   return html`<div class="page">
     <div class="page-h">
       <div><div class="row"><h1>${job.name}</h1><${JobChip} status=${job.status} /></div>
-        <p class="sub">Job #${job.id}, started by ${job.parent_job ? html`<a href=${`#/jobs/${job.parent_job}`}>#${job.parent_job}</a>` : job.actor} ${ago(job.created_at)}, ${job.finished_at ? 'took' : 'running for'} ${dur(took)}${job.options?.check ? '. Dry run, nothing was changed' : ''}${job.next_job && html` · Then ran <a href=${`#/jobs/${job.next_job}`}>#${job.next_job}</a>`}</p></div>
+        <p class="sub">Job #${job.id}, started by ${job.parent_job ? html`<a href=${`#/jobs/${job.parent_job}`}>#${job.parent_job}</a>` : job.actor} ${ago(job.created_at)}, ${job.finished_at ? 'took' : 'running for'} ${dur(took)}${job.options?.check ? '. Dry run, nothing was changed' : ''}${job.next_job && html` · Then ran <a href=${`#/jobs/${job.next_job}`}>#${job.next_job}</a>`}${job.retry_of && html` · Attempt ${job.attempt}, retrying <a href=${`#/jobs/${job.retry_of}`}>#${job.retry_of}</a>`}${job.retry_job && html` · Retried as <a href=${`#/jobs/${job.retry_job}`}>#${job.retry_job}</a>`}${job.retry_at && html` · Attempt ${job.attempt + 1} starts ${when(job.retry_at)}`}</p></div>
       ${can('operator') && html`<div class="row right">
         ${job.status === 'running' && html`<${Btn} kind="danger" icon="stop" onClick=${cancel}>Cancel</${Btn}>`}
+        ${job.retry_at && html`<${Btn} icon="stop" onClick=${cancelRetry}>Cancel retry</${Btn}>`}
         ${job.status !== 'running' && failed.length > 0 && failed.length < hosts.length && html`<${Btn} onClick=${() => rerun(true)}>Re-run failed</${Btn}>`}
         ${job.status !== 'running' && html`<${Btn} icon="refresh" onClick=${() => rerun(false)}>Re-run</${Btn}>`}
       </div>`}

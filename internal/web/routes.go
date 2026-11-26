@@ -149,6 +149,16 @@ func sudoField(b obj) (enc *string, keep bool, err error) {
 func scriptInput(b obj) jobs.ScriptInput {
 	in := jobs.ScriptInput{Name: b.str("name"), Description: b.str("description"), Body: b.str("body"), RepoID: b.str("repo_id"), Playbook: b.str("playbook"),
 		NextScript: b.str("next_script_id"), NextWhen: b.strOr("next_when", "success"), NextOKOnly: b.truthy("next_ok_only")}
+	whole := func(k string) int { // missing = 0; not a whole number = -1, which validation rejects
+		if !b.has(k) || b[k] == nil {
+			return 0
+		}
+		if f := b.num(k); f == math.Trunc(f) && f >= 0 && f <= 1e6 {
+			return int(f)
+		}
+		return -1
+	}
+	in.Retries, in.RetryDelay = whole("retries"), whole("retry_delay")
 	if b["kind"] == "ansible" {
 		in.Kind = "ansible"
 	}
@@ -783,6 +793,9 @@ func (s *Server) serverRoutes() {
 		})
 	}
 	onServer("GET /api/servers/{id}/metrics", func(c *ctx, srv *db.Server) (any, error) { return probe.Series(srv.ID, c.query("range")) })
+	onServer("GET /api/servers/{id}/smart", func(c *ctx, srv *db.Server) (any, error) { // one disk's S.M.A.R.T. history
+		return probe.SmartSeries(srv.ID, c.query("disk"), c.query("range"))
+	})
 	onServer("GET /api/servers/{id}/custom", func(c *ctx, srv *db.Server) (any, error) {
 		list, err := probe.CustomFor(srv)
 		if err != nil {
@@ -1262,9 +1275,9 @@ func (s *Server) libraryRoutes() {
 			return nil, err
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars, next_script_id, next_when, next_ok_only)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, scope, v.Name, v.Description, v.Body, v.AsRoot, v.Params, db.Now(), v.Kind, v.RepoID, v.Playbook, v.Vars, v.NextScript, v.NextWhen, v.NextOKOnly); err != nil {
+		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars, next_script_id, next_when, next_ok_only, retries, retry_delay)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, scope, v.Name, v.Description, v.Body, v.AsRoot, v.Params, db.Now(), v.Kind, v.RepoID, v.Playbook, v.Vars, v.NextScript, v.NextWhen, v.NextOKOnly, v.Retries, v.RetryDelay); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Created script "%s"`, v.Name), "")
@@ -1282,8 +1295,8 @@ func (s *Server) libraryRoutes() {
 			return nil, err
 		}
 		if err := exec(`UPDATE scripts SET name = ?, description = ?, body = ?, as_root = ?, params = ?, kind = ?, repo_id = ?, playbook = ?, vars = ?,
-      next_script_id = ?, next_when = ?, next_ok_only = ? WHERE id = ?`,
-			v.Name, v.Description, v.Body, v.AsRoot, v.Params, v.Kind, v.RepoID, v.Playbook, v.Vars, v.NextScript, v.NextWhen, v.NextOKOnly, sc.ID); err != nil {
+      next_script_id = ?, next_when = ?, next_ok_only = ?, retries = ?, retry_delay = ? WHERE id = ?`,
+			v.Name, v.Description, v.Body, v.AsRoot, v.Params, v.Kind, v.RepoID, v.Playbook, v.Vars, v.NextScript, v.NextWhen, v.NextOKOnly, v.Retries, v.RetryDelay, sc.ID); err != nil {
 			return nil, err
 		}
 		c.audit(fmt.Sprintf(`Edited script "%s"`, v.Name), "")
@@ -1295,8 +1308,8 @@ func (s *Server) libraryRoutes() {
 			return nil, cmpErr(err, notFound("Script"))
 		}
 		id := db.NewID()
-		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars, next_script_id, next_when, next_ok_only)
-      SELECT ?, ?, left(name || ' (copy)', 100), description, body, as_root, params, 0, ?, kind, repo_id, playbook, vars, next_script_id, next_when, next_ok_only FROM scripts WHERE id = ?`,
+		if err := exec(`INSERT INTO scripts (id, tenant_id, name, description, body, as_root, params, builtin, created_at, kind, repo_id, playbook, vars, next_script_id, next_when, next_ok_only, retries, retry_delay)
+      SELECT ?, ?, left(name || ' (copy)', 100), description, body, as_root, params, 0, ?, kind, repo_id, playbook, vars, next_script_id, next_when, next_ok_only, retries, retry_delay FROM scripts WHERE id = ?`,
 			id, c.tenant, db.Now(), sc.ID); err != nil {
 			return nil, err
 		}

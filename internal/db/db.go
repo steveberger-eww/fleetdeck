@@ -217,6 +217,22 @@ CREATE TABLE IF NOT EXISTS passkeys (
   name TEXT NOT NULL, credential TEXT NOT NULL, created_at BIGINT NOT NULL, last_used BIGINT);
 
 ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS process TEXT; -- metric 'process': the process name to watch
+
+-- Automatic retries: a failed job of the script runs again on its failed servers, up to retries times,
+-- retry_delay minutes apart. jobs.retry_of: the attempt this one retries; retry_at: when the next attempt starts.
+ALTER TABLE scripts ADD COLUMN IF NOT EXISTS retries INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE scripts ADD COLUMN IF NOT EXISTS retry_delay INTEGER NOT NULL DEFAULT 5;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_of BIGINT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_at BIGINT;
+CREATE INDEX IF NOT EXISTS jobs_retry_of ON jobs(retry_of);
+
+-- S.M.A.R.T. readings per disk (serial number, or device when there is none), every 30 minutes.
+CREATE TABLE IF NOT EXISTS smart_history (
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE, disk TEXT NOT NULL, t BIGINT NOT NULL,
+  temp DOUBLE PRECISION, realloc DOUBLE PRECISION, bad DOUBLE PRECISION, wear DOUBLE PRECISION,
+  PRIMARY KEY (server_id, disk, t));
+CREATE INDEX IF NOT EXISTS smart_history_t ON smart_history(t);
 `
 
 // Open opens the Postgres database at url and creates or updates the schema. dataDir (created 0700) holds the files.

@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -767,6 +768,11 @@ func collect(s *db.Server) (snap *Snapshot, err error) {
 		return nil, errors.New(msg)
 	}
 	snap = Parse(r.Out)
+	if snap.Smart != nil && snap.Smart.Status == "ok" { // a fresh S.M.A.R.T. run (between runs, the cache fills in below)
+		if err := saveSmart(s.ID, snap.Smart); err != nil {
+			return nil, err
+		}
+	}
 	mu.Lock()
 	if snap.Smart != nil {
 		smartCache[s.ID] = smartSample{time.Now(), snap.Smart}
@@ -929,6 +935,57 @@ func CustomSeries(id, metricID, rangeStr string) (*SeriesOf[CustomPoint], error)
 	return &SeriesOf[CustomPoint]{bucket, now - sp, now, pts}, nil
 }
 
+// DiskKey names a disk across reboots: its serial number, or its device when it has none.
+func DiskKey(d *SmartDisk) string { return cmp.Or(d.Serial, d.Dev) }
+
+// bad is a disk's sectors at risk: pending + uncorrectable (SATA) or media errors (NVMe); nil when it reports neither.
+func (d *SmartDisk) bad() *float64 {
+	if d.Pending == nil && d.Uncorrectable == nil {
+		return d.MediaErrors
+	}
+	return ptr(or0(deref(d.Pending)) + or0(deref(d.Uncorrectable)))
+}
+
+func deref(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func saveSmart(serverID string, sm *Smart) error {
+	t := db.Now()
+	for i := range sm.Disks {
+		d := &sm.Disks[i]
+		if _, err := db.Exec(`INSERT INTO smart_history (server_id, disk, t, temp, realloc, bad, wear) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+			serverID, DiskKey(d), t, d.Temp, d.Realloc, d.bad(), d.Wear); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type SmartPoint struct {
+	T       int64    `db:"t" json:"t"`
+	Temp    *float64 `db:"temp" json:"temp"`
+	Realloc *float64 `db:"realloc" json:"realloc"`
+	Bad     *float64 `db:"bad" json:"bad"`
+	Wear    *float64 `db:"wear" json:"wear"`
+}
+
+// SmartSeries is the S.M.A.R.T. history of one disk of a server (key from DiskKey): hottest temperature and
+// highest counters per bucket.
+func SmartSeries(id, disk, rangeStr string) (*SeriesOf[SmartPoint], error) {
+	sp, bucket := span(rangeStr)
+	now := db.Now()
+	pts, err := db.Select[SmartPoint](`SELECT (t / ?) * ? AS t, MAX(temp) temp, MAX(realloc) realloc, MAX(bad) bad, MAX(wear) wear FROM smart_history
+    WHERE server_id = ? AND disk = ? AND t >= ? GROUP BY 1 ORDER BY 1`, bucket, bucket, id, disk, now-sp)
+	if err != nil {
+		return nil, err
+	}
+	return &SeriesOf[SmartPoint]{bucket, now - sp, now, pts}, nil
+}
+
 // Sparks is the last hour of [t, cpu, mem] per server id, for the overview's sparklines.
 func Sparks() (map[string][][3]any, error) {
 	rows, err := db.Select[struct {
@@ -1013,7 +1070,7 @@ func prune() {
 		return
 	}
 	cutoff := db.Now() - int64(days*864e5)
-	for _, q := range []string{`DELETE FROM metrics WHERE t < ?`, `DELETE FROM container_metrics WHERE t < ?`, `DELETE FROM custom_values WHERE t < ?`, `DELETE FROM check_results WHERE t < ?`} {
+	for _, q := range []string{`DELETE FROM metrics WHERE t < ?`, `DELETE FROM container_metrics WHERE t < ?`, `DELETE FROM custom_values WHERE t < ?`, `DELETE FROM check_results WHERE t < ?`, `DELETE FROM smart_history WHERE t < ?`} {
 		if _, err := db.Exec(q, cutoff); err != nil {
 			log.Printf("probe retention: %v", err)
 		}

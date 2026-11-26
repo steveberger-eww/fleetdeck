@@ -357,3 +357,25 @@ func TestProxmox(t *testing.T) {
 		t.Error("PVE on a host without pvesh")
 	}
 }
+
+func TestSmartHistory(t *testing.T) {
+	if _, err := db.Exec(`INSERT INTO servers (id, name, host, created_at) VALUES ('sh', 'nas', 'h', 0)`); err != nil {
+		t.Fatal(err)
+	}
+	p := func(v float64) *float64 { return &v }
+	sm := &Smart{Status: "ok", Disks: []SmartDisk{
+		{Dev: "/dev/sda", Serial: "WD-1", Temp: p(41), Realloc: p(8), Pending: p(1), Uncorrectable: p(2)},
+		{Dev: "/dev/nvme0", Wear: p(3), MediaErrors: p(0)},
+	}}
+	if err := saveSmart("sh", sm); err != nil {
+		t.Fatal(err)
+	}
+	s, err := SmartSeries("sh", "WD-1", "30d")
+	if err != nil || len(s.Points) != 1 || *s.Points[0].Temp != 41 || *s.Points[0].Realloc != 8 || *s.Points[0].Bad != 3 || s.Points[0].Wear != nil {
+		t.Fatalf("sata: %+v %v", s, err)
+	}
+	s, err = SmartSeries("sh", "/dev/nvme0", "30d") // no serial: keyed by device
+	if err != nil || len(s.Points) != 1 || *s.Points[0].Wear != 3 || *s.Points[0].Bad != 0 {
+		t.Fatalf("nvme: %+v %v", s, err)
+	}
+}
