@@ -11,7 +11,7 @@ import { ScriptsPage, SchedulesPage } from './pages/scripts.js';
 import { AlertsPage } from './pages/alerts.js';
 import { KeysPage, VariablesPage } from './pages/keys.js';
 import { ReposPage } from './pages/repos.js';
-import { SettingsPage, SsoPage, OrgSsoPage, AuditPage } from './pages/settings.js';
+import { SettingsPage, settingsPages, AuditPage } from './pages/settings.js';
 
 // ---------- sign in / first-run setup / invites ----------
 function AuthFrame({ title, sub, children }) {
@@ -170,6 +170,7 @@ function Palette({ onClose }) {
         can('operator') && { group: 'Actions', label: `Update: ${s.name}`, hint: s.host, icon: 'refresh', run: () => openRun({ targets: { servers: [s.id] }, scriptId: 'update' }) },
       ]) : []),
       ...navFor().flatMap(([, items]) => items).map(([label, path, icon]) => ({ group: 'Pages', label, icon, run: () => go(path) })),
+      ...(n ? settingsPages().map(([label, path, group]) => ({ group: 'Settings', label: `${group} › ${label}`, icon: 'gear', run: () => go(path) })) : []),
     ].filter(Boolean);
     return (n ? all.filter((x) => `${x.label} ${x.hint || ''}`.toLowerCase().includes(n)) : all).slice(0, 40);
   }, [q, servers]);
@@ -220,10 +221,9 @@ function Crumbs({ parts, servers }) {
     return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/">Fleet</a><span>/</span>
       ${parts[2] ? html`<a href=${`#/servers/${parts[1]}`}>${s?.name || 'Server'}</a><span>/</span><b>${TAB_LABEL[parts[2]] || parts[2]}</b>` : html`<b>${s?.name || 'Server'}</b>`}</nav>`;
   }
-  if (parts[0] === 'settings' && parts[1]) {
-    const sub = { sso: 'Single sign-on', org: 'Organization', instance: 'Instance' }[parts[1]] || parts[1];
-    return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/settings">Settings</a><span>/</span>
-      ${parts[2] === 'sso' ? html`<a href=${`#/settings/${parts[1]}`}>${sub}</a><span>/</span><b>Single sign-on</b>` : html`<b>${sub}</b>`}</nav>`;
+  if (parts[0] === 'settings') {
+    const [label, , group] = settingsPages().find(([, p]) => p === `/${parts.join('/')}`) || ['Profile', '', 'Your account'];
+    return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/settings">Settings</a><span>/</span><span>${group}</span><span>/</span><b>${label}</b></nav>`;
   }
   if (parts[0] === 'jobs' && parts[1]) return html`<nav class="crumbs" aria-label="Breadcrumb"><a href="#/jobs">Jobs</a><span>/</span><b>#${parts[1]}</b></nav>`;
   return html`<span class="crumbs" />`;
@@ -282,9 +282,7 @@ function Shell() {
   else if (section === 'variables') page = html`<${VariablesPage} />`;
   else if (section === 'repos') page = html`<${ReposPage} />`;
   else if (section === 'audit') page = html`<${AuditPage} />`;
-  else if (section === 'settings' && parts[1] === 'sso') page = html`<${SsoPage} />`;
-  else if (section === 'settings' && parts[1] === 'org' && parts[2] === 'sso') page = html`<${OrgSsoPage} />`;
-  else if (section === 'settings') page = html`<${SettingsPage} key=${parts[1] || ''} tab=${parts[1] || ''} />`;
+  else if (section === 'settings') page = html`<${SettingsPage} sub=${parts.slice(1).join('/')} />`;
   else page = html`<div class="page"><h1>Page not found</h1><a href="#/">Back to the fleet</a></div>`;
 
   const badge = (label) => {

@@ -4,39 +4,73 @@ import {
 } from '../ui.js';
 import { getTheme, setTheme } from '../theme.js';
 
-// #/settings (your account), #/settings/org (admins), #/settings/instance (super admins)
-export function SettingsPage({ tab }) {
-  const tabs = [['', 'Account'], can('admin') && ['org', 'Organization'], isSuper() && ['instance', 'Instance']].filter(Boolean);
-  const cur = tabs.some(([k]) => k === tab) ? tab : '';
-  return html`<div class="page">
-    <div class="page-h"><div><h1>Settings</h1></div>
-      ${tabs.length > 1 && html`<div class="seg" role="group" aria-label="Settings">${tabs.map(([k, l]) => html`<button aria-pressed=${cur === k} onClick=${() => go(`/settings${k ? `/${k}` : ''}`)}>${l}</button>`)}</div>`}</div>
-    ${cur === 'org' ? html`<${OrgSettings} />` : cur === 'instance' ? html`<${InstanceSettings} />` : html`<${AccountSettings} />`}
+// ---------- layout: a sub-navigation grouped by who a setting affects, one section per URL ----------
+// [path under #/settings, label, group]. Group decides who sees it: account = everyone, org = admins, instance = super admins.
+const SECTIONS = [
+  ['', 'Profile', 'account'], ['security', 'Sign-in & security', 'account'], ['preferences', 'Preferences', 'account'],
+  ['org', 'General', 'org'], ['org/people', 'People', 'org'], ['org/sso', 'Single sign-on', 'org'],
+  ['instance', 'General', 'instance'], ['instance/orgs', 'Organizations', 'instance'], ['instance/accounts', 'Accounts', 'instance'], ['sso', 'Single sign-on', 'instance'],
+];
+const GROUPS = [['account', 'Your account'], ['org', 'Organization'], ['instance', 'Instance']];
+const visible = (g) => g === 'account' || (g === 'org' ? can('admin') : isSuper());
+// For the palette and breadcrumbs: [label, path, group label] of every section you can open.
+export const settingsPages = () => SECTIONS.filter(([, , g]) => visible(g)).map(([p, l, g]) => [l, `/settings${p ? `/${p}` : ''}`, GROUPS.find(([k]) => k === g)[1]]);
+
+const PAGES = {
+  '': () => html`<${AccountSection} part="profile" />`, security: () => html`<${AccountSection} part="security" />`, preferences: () => html`<${Preferences} />`,
+  org: () => html`<${OrgGeneral} />`, 'org/people': () => html`<${PeoplePage} />`, 'org/sso': () => html`<${OrgSsoPage} />`,
+  instance: () => html`<${InstanceSection} part="general" />`, 'instance/orgs': () => html`<${InstanceSection} part="orgs" />`, 'instance/accounts': () => html`<${InstanceSection} part="accounts" />`,
+  sso: () => html`<${SsoPage} />`,
+};
+
+export function SettingsPage({ sub }) {
+  useStore(meStore); // re-render when your role changes
+  const mine = SECTIONS.filter(([, , g]) => visible(g));
+  // #/settings/sso is also where anyone connects their own account; without instance rights it belongs to "Sign-in & security".
+  const cur = mine.some(([p]) => p === sub) ? sub : sub === 'sso' ? 'security' : '';
+  const page = sub === 'sso' ? 'sso' : cur;
+  const href = (p) => `#/settings${p ? `/${p}` : ''}`;
+  const groups = GROUPS.map(([g, l]) => [l, mine.filter(([, , x]) => x === g)]).filter(([, items]) => items.length);
+  return html`<div class="page settings">
+    <nav class="subnav hide-sm" aria-label="Settings">${groups.map(([l, items]) => html`<div class="side-h">${l}</div>
+      <div class="nav">${items.map(([p, label]) => html`<a href=${href(p)} aria-current=${p === cur ? 'page' : undefined}>${label}</a>`)}</div>`)}</nav>
+    <select class="show-sm" value=${cur} aria-label="Settings section" onChange=${(e) => go(`/settings${e.target.value ? `/${e.target.value}` : ''}`)}>
+      ${groups.map(([l, items]) => html`<optgroup label=${l}>${items.map(([p, label]) => html`<option value=${p}>${label}</option>`)}</optgroup>`)}</select>
+    <div class="stack" key=${page}>${PAGES[page]()}</div>
   </div>`;
 }
 
+const Head = ({ title, sub, children }) => html`<div class="page-h"><div><h1>${title}</h1>${sub && html`<p class="sub">${sub}</p>`}</div>${children}</div>`;
+// One setting: what it is and what it does on the left, the control on the right.
+const Setting = ({ label, desc, children }) => html`<div class="set"><div><b>${label}</b>${desc && html`<p>${desc}</p>`}</div><div class="set-c">${children}</div></div>`;
+// Panel footer: a note on the left, Save on the right (primary only once something changed).
+const SaveBar = ({ note, changed, disabled, onSave, label = 'Save' }) => html`<div class="panel-f"><span class="small muted grow">${note}</span>
+  <${Btn} kind=${changed ? 'primary' : ''} disabled=${!changed || disabled} onClick=${onSave}>${label}</${Btn}></div>`;
+
 // ---------- your account ----------
-function AccountSettings() {
+function AccountSection({ part }) {
   const acct = useLoad(() => api('/api/account'));
   const me = useStore(meStore);
   if (acct.error) return html`<${ErrorNote} error=${acct.error} retry=${acct.reload} />`;
   if (!acct.data) return html`<${Loading} />`;
   const a = acct.data;
   const reload = () => acct.reload(true);
-  return html`<div class="grid-2">
-    <div class="stack">
-      ${a.locked ? html`<section class="panel"><div class="panel-h"><h2>${a.name || a.email}</h2></div><div class="panel-b stack sm">
-          <p class="small">${a.email}</p>
-          <p class="small ink2">You signed in through the single sign-on of ${me.tenant.name}, so this session can't change your profile, password or two-factor sign-in, or open other organizations. Sign in with your password to do that.</p></div></section>`
-        : html`<${ProfilePanel} a=${a} onChange=${reload} />
-          <${PasswordPanel} has=${a.has_password} onChange=${reload} />
-          <${TotpPanel} enabled=${a.totp} onChange=${reload} />
-          <${PasskeysPanel} list=${a.passkeys} onChange=${reload} />
-          <${SsoSummary} />`}
-      <${ThemePanel} />
-    </div>
-    <div class="stack"><${SessionsPanel} sessions=${a.sessions} onChange=${reload} /></div>
-  </div>`;
+  const locked = a.locked && html`<div class="alert-bar info"><span class="grow">You signed in through the single sign-on of ${me.tenant.name}, so this session can't change your profile, password or two-factor sign-in, or open other organizations. Sign in with your password to do that.</span></div>`;
+  if (part === 'profile') {
+    return html`<${Head} title="Profile" sub="How you appear to others and the email you sign in with." />
+      ${locked || html`<${ProfilePanel} a=${a} onChange=${reload} />`}
+      ${locked && html`<section class="panel"><${Setting} label="Name">${a.name || '–'}</${Setting}><${Setting} label="Email">${a.email}</${Setting}></section>`}
+      <${MembershipsPanel} me=${me} />`;
+  }
+  const weak = !a.locked && !a.totp && !a.passkeys.length;
+  return html`<${Head} title="Sign-in & security" sub="How you prove it's you, and where you're signed in right now." />
+    ${locked}
+    ${weak && html`<div class="alert-bar warn"><span class="grow">Only a password protects your account. Add a passkey or turn on two-factor sign-in.</span></div>`}
+    ${!a.locked && html`<${PasskeysPanel} list=${a.passkeys} onChange=${reload} />
+      <${TotpPanel} enabled=${a.totp} onChange=${reload} />
+      <${PasswordPanel} has=${a.has_password} onChange=${reload} />
+      <${SsoSummary} />`}
+    <${SessionsPanel} sessions=${a.sessions} onChange=${reload} />`;
 }
 
 function ProfilePanel({ a, onChange }) {
@@ -44,10 +78,18 @@ function ProfilePanel({ a, onChange }) {
   const changed = v.name !== a.name || v.email !== a.email;
   const save = async () => { await api('/api/account', { method: 'PUT', body: v }); toast('Profile saved', 'ok'); onChange(); refreshMe(); };
   const set = (k) => (e) => setV({ ...v, [k]: e.target.value });
-  return html`<section class="panel"><div class="panel-h"><h2>Profile</h2></div><div class="panel-b form">
-    <div class="cols"><${Field} label="Name"><input autocomplete="name" value=${v.name} onInput=${set('name')} /></${Field}>
-      <${Field} label="Email" hint="You sign in with it."><input type="email" autocomplete="email" value=${v.email} onInput=${set('email')} /></${Field}></div>
-    <div><${Btn} kind=${changed ? 'primary' : ''} disabled=${!changed || !v.name.trim() || !v.email.trim()} onClick=${save}>Save</${Btn}></div></div></section>`;
+  return html`<section class="panel">
+    <${Setting} label="Name" desc="Shown in the audit log and the people list."><input autocomplete="name" aria-label="Name" value=${v.name} onInput=${set('name')} /></${Setting}>
+    <${Setting} label="Email" desc="You sign in with it, and invites are matched to it."><input type="email" autocomplete="email" aria-label="Email" value=${v.email} onInput=${set('email')} /></${Setting}>
+    <${SaveBar} changed=${changed} disabled=${!v.name.trim() || !v.email.trim()} onSave=${save} /></section>`;
+}
+
+// The organizations you belong to, with a way to switch.
+function MembershipsPanel({ me }) {
+  if (me.tenants.length < 2) return null;
+  return html`<section class="panel"><div class="panel-h"><h2>Organizations</h2><span class="small muted">You're a member of ${me.tenants.length}.</span></div>
+    <table class="t"><tbody>${me.tenants.map((t) => html`<tr><td><b>${t.name}</b>${t.id === me.tenant.id && html` <span class="chip">Current</span>`}</td>
+      <td class="act">${t.id !== me.tenant.id && !me.locked && html`<${Btn} size="sm" kind="ghost" onClick=${() => switchOrg(t.id).catch((x) => toast(x.message, 'bad'))}>Switch</${Btn}>`}</td></tr>`)}</tbody></table></section>`;
 }
 
 function PasswordPanel({ has, onChange }) {
@@ -160,7 +202,7 @@ function ProviderSteps({ d, f, setF, err, onSave, configured, off }) {
   return html`<${Step} n="1" title="Create a provider in authentik" done=${configured} off=${off}>
       <p class="small">In the <b>Admin interface</b>, open <b>Applications → Applications</b> and click <b>Create with provider</b>. Choose <b>OAuth2/OpenID Provider</b>.</p>
       <div class="field"><span>Redirect URI (paste into authentik, matching mode <b>Strict</b>)</span><${Copy} text=${d.redirect_url} /></div>
-      ${insecure && html`<p class="hint err">This starts with http://. If Fleetdeck runs behind a reverse proxy with HTTPS, start it with <span class="mono">FLEETDECK_TRUST_PROXY=1</span> or set the public URL under Settings → Instance, and reload this page.</p>`}
+      ${insecure && html`<p class="hint err">This starts with http://. If Fleetdeck runs behind a reverse proxy with HTTPS, start it with <span class="mono">FLEETDECK_TRUST_PROXY=1</span> or set the public URL under Settings → Instance → General, and reload this page.</p>`}
       <ul class="small ink2 checklist">
         <li>Client type: <b>Confidential</b></li>
         <li>Signing Key: pick one, e.g. <b>authentik Self-signed Certificate</b>. Without it, sign-in fails.</li>
@@ -200,20 +242,18 @@ function useProvider(path) {
   return { sso, f, setF, err, save, remove };
 }
 
-export function SsoPage() {
+function SsoPage() {
   const { sso, f, setF, err, save, remove } = useProvider('/api/sso');
-  if (sso.error) return html`<div class="page"><${ErrorNote} error=${sso.error} retry=${sso.reload} /></div>`;
-  if (!sso.data || !f) return html`<div class="page"><${Loading} /></div>`;
+  if (sso.error) return html`<${ErrorNote} error=${sso.error} retry=${sso.reload} />`;
+  if (!sso.data || !f) return html`<${Loading} />`;
   const d = sso.data;
   const admin = d.can_configure;
   const configured = d.configured;
-  if (!admin && !configured) return html`<div class="page narrow"><${Empty} title="Single sign-on isn't set up" action=${html`<a class="btn" href="#/settings">Back to settings</a>`}>A super admin can set it up for this Fleetdeck.</${Empty}></div>`;
+  if (!admin && !configured) return html`<section class="panel"><${Empty} title="Single sign-on isn't set up" action=${html`<a class="btn" href="#/settings/security">Back to sign-in & security</a>`}>A super admin can set it up for this Fleetdeck.</${Empty}></section>`;
   const setPw = async (enabled) => { await api('/api/sso/password-login', { method: 'PUT', body: { enabled } }); sso.reload(true); };
   const n = admin ? 2 : 0; // people who can't configure it only see the steps for their own account
-  return html`<div class="page narrow">
-    <div class="page-h"><div><h1>Single sign-on</h1>
-      <p class="sub">${admin ? 'Sign in to this Fleetdeck with authentik or any OpenID Connect provider (Keycloak, Authelia, Zitadel…). The steps use authentik\'s names.'
-        : 'Sign in with your company account instead of a password.'}</p></div></div>
+  return html`<${Head} title="Single sign-on" sub=${admin ? 'One provider for every organization on this Fleetdeck: authentik or any OpenID Connect provider (Keycloak, Authelia, Zitadel…). Accounts are matched by email; new people still need an invite. The steps use authentik\'s names.'
+      : 'Sign in with your company account instead of a password.'} />
     <div class="stack">
       ${admin && html`<${ProviderSteps} d=${d} f=${f} setF=${setF} err=${err} onSave=${save} configured=${configured} />`}
 
@@ -234,26 +274,23 @@ export function SsoPage() {
           <button aria-pressed=${!d.password_login} disabled=${!d.linked || d.password_forced} onClick=${() => setPw(false)}>Off</button></div>
       </${Step}>
 
-      ${admin && (d.issuer || d.client_id) && html`<div><${Btn} kind="quiet-danger" onClick=${() => remove('Everyone signs in with their password again. Connected accounts are forgotten.')}>Remove single sign-on</${Btn}></div>`}
-    </div>
-  </div>`;
+      ${admin && (d.issuer || d.client_id) && html`<${DangerZone} title="Remove single sign-on" body="Everyone signs in with their password again. Connected accounts are forgotten."
+        action=${html`<${Btn} kind="danger" onClick=${() => remove('Everyone signs in with their password again. Connected accounts are forgotten.')}>Remove single sign-on</${Btn}>`} />`}
+    </div>`;
 }
 
 const JOIN_ROLES = [['', 'Only people who are already members'], ['viewer', 'Anyone from the provider, as viewer'], ['operator', 'Anyone from the provider, as operator'], ['owner', 'Anyone from the provider, as owner']];
 
-export function OrgSsoPage() {
+function OrgSsoPage() {
   const me = useStore(meStore);
   const { sso, f, setF, err, save, remove } = useProvider('/api/tenant/sso');
-  if (!can('admin')) return html`<div class="page"><${Empty} title="Not available with your role" /></div>`;
-  if (sso.error) return html`<div class="page"><${ErrorNote} error=${sso.error} retry=${sso.reload} /></div>`;
-  if (!sso.data || !f) return html`<div class="page"><${Loading} /></div>`;
+  if (sso.error) return html`<${ErrorNote} error=${sso.error} retry=${sso.reload} />`;
+  if (!sso.data || !f) return html`<${Loading} />`;
   const d = sso.data;
   const configured = !!(d.issuer && d.client_id && d.has_secret);
   const off = !d.licensed;
   const setRole = async (role) => { await api('/api/tenant/sso', { method: 'PUT', body: { role } }); sso.reload(true); toast('Saved', 'ok'); };
-  return html`<div class="page narrow">
-    <div class="page-h"><div><h1>Single sign-on for ${me.tenant.name}</h1>
-      <p class="sub">Your people sign in with your organization's own authentik or other OpenID Connect provider (Keycloak, Authelia, Zitadel…). The steps use authentik's names.</p></div></div>
+  return html`<${Head} title="Single sign-on" sub=${`People of ${me.tenant.name} sign in with your organization's own authentik or other OpenID Connect provider (Keycloak, Authelia, Zitadel…). The steps use authentik's names.`} />
     <div class="stack">
       ${off && html`<div class="alert-bar info"><span class="grow">An organization's own single sign-on needs a <b>business license</b>.</span></div>`}
       <${ProviderSteps} d=${d} f=${f} setF=${setF} err=${err} onSave=${save} configured=${configured} off=${off} />
@@ -270,17 +307,20 @@ export function OrgSsoPage() {
         <p class="small ink2">Sign-ins through this link open ${me.tenant.name} only. Switching organizations or changing a password or 2FA needs a normal sign-in.</p>
       </${Step}>
 
-      ${(d.issuer || d.client_id) && html`<div><${Btn} kind="quiet-danger" onClick=${() => remove(`People of ${me.tenant.name} sign in with their password or invite again.`)}>Remove single sign-on</${Btn}></div>`}
-    </div>
-  </div>`;
+      ${(d.issuer || d.client_id) && html`<${DangerZone} title="Remove single sign-on" body=${`People of ${me.tenant.name} sign in with their password or invite again.`}
+        action=${html`<${Btn} kind="danger" onClick=${() => remove(`People of ${me.tenant.name} sign in with their password or invite again.`)}>Remove single sign-on</${Btn}>`} />`}
+    </div>`;
 }
 
-function ThemePanel() {
+function Preferences() {
   const [t, setT] = useState(getTheme());
-  return html`<section class="panel"><div class="panel-h"><h2>Appearance</h2></div><div class="panel-b">
-    <div class="seg" role="group" aria-label="Theme">${[['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([k, l]) => html`<button aria-pressed=${t === k} onClick=${() => { setTheme(k); setT(k); }}>${l}</button>`)}</div>
-    <div class="seg" role="group" aria-label="Clock">${[['', 'Clock of this browser'], ['24', '24-hour'], ['12', '12-hour']].map(([k, l]) => html`<button aria-pressed=${getClock() === k} onClick=${() => setClock(k)}>${l}</button>`)}</div>
-  </div></section>`;
+  return html`<${Head} title="Preferences" sub="How Fleetdeck looks in this browser. Saved here only, not on your account." />
+    <section class="panel">
+      <${Setting} label="Theme" desc="Match system follows the light or dark mode of your operating system.">
+        <div class="seg" role="group" aria-label="Theme">${[['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([k, l]) => html`<button aria-pressed=${t === k} onClick=${() => { setTheme(k); setT(k); }}>${l}</button>`)}</div></${Setting}>
+      <${Setting} label="Time format" desc="Used for every time and date. Changing it reloads the page.">
+        <div class="seg" role="group" aria-label="Time format">${[['', 'Browser default'], ['24', '24-hour'], ['12', '12-hour']].map(([k, l]) => html`<button aria-pressed=${getClock() === k} onClick=${() => setClock(k)}>${l}</button>`)}</div></${Setting}>
+    </section>`;
 }
 
 function browserName(ua = '') {
@@ -303,53 +343,45 @@ function SessionsPanel({ sessions, onChange }) {
       <td class="act">${!s.current && html`<${Btn} size="sm" kind="quiet-danger" onClick=${() => revoke(s)}>Sign out</${Btn}>`}</td></tr>`)}</tbody></table></section>`;
 }
 
-const RETENTION = ['retention_metrics_days', 'retention_jobs_days', 'retention_events_days'];
+// Destructive actions sit apart at the bottom, saying what happens.
+const DangerZone = ({ title, body, action }) => html`<section class="panel danger-zone"><div class="set"><div><b>${title}</b><p>${body}</p></div><div class="set-c">${action}</div></div></section>`;
+
+const RETENTION = [
+  ['retention_metrics_days', 'Metrics', 'CPU, memory, disk and network history behind the charts.', 365],
+  ['retention_jobs_days', 'Job output', 'What scripts printed. The job itself stays in the list.', 3650],
+  ['retention_events_days', 'Audit log', 'Changes, sign-ins, alerts and remote actions.', 3650],
+];
 function RetentionPanel({ value }) {
   const [v, setV] = useState(value);
   const [saved, setSaved] = useState(value);
-  const changed = RETENTION.some((k) => v[k] !== saved[k]);
-  const save = async () => { await api('/api/instance', { method: 'PUT', body: Object.fromEntries(RETENTION.map((k) => [k, v[k]])) }); setSaved(v); toast('Retention saved', 'ok'); };
-  const f = (k, label, max) => html`<${Field} label=${label}><input type="number" min="1" max=${max} value=${v[k]} onInput=${(e) => setV({ ...v, [k]: Number(e.target.value) })} /></${Field}>`;
-  return html`<section class="panel"><div class="panel-h"><h2>Keep data for (days)</h2></div><div class="panel-b form">
-    <div class="cols">${f('retention_metrics_days', 'Metrics', 365)}${f('retention_jobs_days', 'Job output', 3650)}${f('retention_events_days', 'Audit log', 3650)}</div>
-    <div><${Btn} kind=${changed ? 'primary' : ''} disabled=${!changed} onClick=${save}>Save</${Btn}></div></div></section>`;
+  const changed = RETENTION.some(([k]) => v[k] !== saved[k]);
+  const save = async () => { await api('/api/instance', { method: 'PUT', body: Object.fromEntries(RETENTION.map(([k]) => [k, v[k]])) }); setSaved(v); toast('Retention saved', 'ok'); };
+  return html`<section class="panel"><div class="panel-h"><h2>Data retention</h2></div>
+    ${RETENTION.map(([k, label, desc, max]) => html`<${Setting} label=${label} desc=${desc}>
+      <div class="row nw"><input type="number" class="w-num" min="1" max=${max} aria-label=${`${label}, days`} value=${v[k]} onInput=${(e) => setV({ ...v, [k]: Number(e.target.value) })} /><span class="muted">days</span></div></${Setting}>`)}
+    <${SaveBar} note="Older data is removed for every organization." changed=${changed} onSave=${save} /></section>`;
 }
 
 // ---------- the organization (admins) ----------
 const roleName = (r) => ROLES.find(([k]) => k === r)?.[1] || r;
 const RoleSelect = ({ value, onChange, label = 'Role' }) => html`<select value=${value} aria-label=${label} onChange=${(e) => onChange(e.target.value, e.target)}>${ROLES.map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select>`;
+const ROLE_HELP = { admin: 'Manages everything, sees every server.', owner: 'Adds servers and manages the ones they have.', operator: 'Runs jobs, services and the terminal on their servers.', viewer: 'Only looks.' };
 
-function OrgSettings() {
-  return html`<div class="stack">
-    <div class="grid-2"><${OrgPanel} /><${OrgSsoSummary} /></div>
-    <${PeoplePanel} />
-  </div>`;
-}
-
-function OrgPanel() {
+function OrgGeneral() {
   const me = useStore(meStore);
   const [v, setV] = useState({ name: me.tenant.name, slug: me.tenant.slug });
   const changed = v.name !== me.tenant.name || v.slug !== me.tenant.slug;
   const save = async () => { const t = await api('/api/tenant', { method: 'PUT', body: v }); setV({ name: t.name, slug: t.slug }); await refreshMe(); toast('Organization saved', 'ok'); };
-  return html`<section class="panel"><div class="panel-h"><h2>Organization</h2></div><div class="panel-b form">
-    <${Field} label="Name"><input value=${v.name} onInput=${(e) => setV({ ...v, name: e.target.value })} /></${Field}>
-    <${Field} label="Short name" hint="Lowercase letters, digits and dashes. Part of your single sign-on link (…/?org=${v.slug || 'short-name'})."><input class="mono" value=${v.slug} onInput=${(e) => setV({ ...v, slug: e.target.value })} /></${Field}>
-    <div><${Btn} kind=${changed ? 'primary' : ''} disabled=${!changed || !v.name.trim()} onClick=${save}>Save</${Btn}></div></div></section>`;
+  return html`<${Head} title="General" sub=${`Applies to everyone in ${me.tenant.name}.`} />
+    <section class="panel">
+      <${Setting} label="Name" desc="Shown in the sidebar and the organization switcher."><input aria-label="Organization name" value=${v.name} onInput=${(e) => setV({ ...v, name: e.target.value })} /></${Setting}>
+      <${Setting} label="Short name" desc=${`Lowercase letters, digits and dashes. Part of your single sign-on link (…/?org=${v.slug || 'short-name'}).`}>
+        <input class="mono" aria-label="Short name" value=${v.slug} onInput=${(e) => setV({ ...v, slug: e.target.value })} /></${Setting}>
+      <${SaveBar} changed=${changed} disabled=${!v.name.trim()} onSave=${save} /></section>`;
 }
 
-function OrgSsoSummary() {
-  const sso = useLoad(() => api('/api/tenant/sso'));
-  const d = sso.data;
-  const on = d && d.issuer && d.client_id && d.has_secret;
-  return html`<section class="panel"><div class="panel-h"><h2>Single sign-on</h2>${d && (!d.licensed ? html`<span class="chip">Business license</span>` : on ? html`<span class="chip ok">On</span>` : html`<span class="chip">Off</span>`)}</div>
-    <div class="panel-b form">
-      ${sso.error ? html`<${ErrorNote} error=${sso.error} retry=${sso.reload} />` : html`<p class="small ink2">${d && !d.licensed ? 'Your own provider for this organization needs a business license.' : on ? html`Your people sign in at <span class="mono wrap-any">${d.login_url}</span>${d.role ? `; newcomers join as ${d.role}` : ''}.`
-        : 'Let your people sign in with your own authentik, Keycloak or other OpenID Connect provider.'}</p>`}
-      <div><a class=${`btn ${on || !d?.licensed ? '' : 'primary'}`} href="#/settings/org/sso">${on ? 'Manage' : 'Set up single sign-on'}</a></div>
-    </div></section>`;
-}
-
-function PeoplePanel() {
+function PeoplePage() {
+  const me = useStore(meStore);
   const m = useLoad(() => api('/api/members'));
   const [inv, setInv] = useState({ email: '', role: 'operator' });
   const [link, setLink] = useState(null); // { email, url } right after creating an invite
@@ -374,9 +406,24 @@ function PeoplePanel() {
     m.reload(true);
   };
   const withdraw = async (x) => { await api(`/api/members/invites/${x.id}`, { method: 'DELETE' }); m.reload(true); };
-  return html`<section class="panel">
-    <div class="panel-h"><h2>People</h2><span class="small muted">Admins see every server. Everyone else sees the servers assigned to them on the server's Settings tab.</span></div>
-    ${m.loading && !m.data ? html`<${Loading} />` : m.error ? html`<div class="panel-b"><${ErrorNote} error=${m.error} retry=${m.reload} /></div>` : html`
+  const head = html`<${Head} title="People" sub=${`Who can open ${me.tenant.name} and what they may do. Admins see every server; everyone else sees the servers assigned to them on the server's Settings tab.`} />`;
+  if (m.error) return html`${head}<${ErrorNote} error=${m.error} retry=${m.reload} />`;
+  if (!m.data) return html`${head}<${Loading} />`;
+  return html`${head}
+    <section class="panel"><div class="panel-h"><h2>Invite someone</h2></div>
+      <div class="panel-b form">
+        <div class="row">
+          <input type="email" class="grow" placeholder="Email address" aria-label="Email address to invite" value=${inv.email} onInput=${(e) => setInv({ ...inv, email: e.target.value })} onKeyDown=${(e) => e.key === 'Enter' && inv.email.trim() && invite()} />
+          <${RoleSelect} value=${inv.role} onChange=${(role) => setInv({ ...inv, role })} />
+          <${Btn} kind="primary" icon="plus" disabled=${!inv.email.trim()} onClick=${invite}>Invite</${Btn}></div>
+        <p class="small ink2"><b>${roleName(inv.role)}:</b> ${ROLE_HELP[inv.role]}</p>
+        ${link && html`<div class="field"><span>Send this link to ${link.email}. It works once.</span><${Copy} text=${link.url} /></div>`}
+      </div></section>
+    ${m.data.invites.length > 0 && html`<section class="panel"><div class="panel-h"><h2>Pending invites</h2><span class="chip">${m.data.invites.length}</span></div>
+      <div class="table-wrap"><table class="t"><tbody>${m.data.invites.map((x) => html`<tr><td>${x.email}<div class="small muted">by ${x.created_by}</div></td><td class="ink2">${roleName(x.role)}</td>
+        <td class="ink2 nowrap hide-sm">expires ${when(x.expires_at)}</td>
+        <td class="act"><${Btn} size="sm" kind="quiet-danger" onClick=${() => withdraw(x)}>Withdraw</${Btn}></td></tr>`)}</tbody></table></div></section>`}
+    <section class="panel"><div class="panel-h"><h2>Members</h2><span class="chip">${m.data.members.length}</span></div>
       <div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="name" get=${(u) => u.name || u.email}>Person</${Th}><${Th} sort=${sort} k="role">Role</${Th}><${Th} sort=${sort} k="servers" desc class="num">Servers</${Th}><th class="hide-sm">Sign-in</th><${Th} sort=${sort} k="created_at" desc class="hide-sm">Joined</${Th}><th class="act"></th></tr></thead>
         <tbody>${sort.rows.map((u) => html`<tr>
           <td><b>${u.name || u.email}</b>${u.id === m.data.me && html` <span class="chip">You</span>`}<div class="small muted">${u.email}</div></td>
@@ -384,60 +431,35 @@ function PeoplePanel() {
           <td class="num ink2">${u.role === 'admin' ? 'All' : u.servers}</td>
           <td class="hide-sm"><div class="row nw">${u.sso && html`<span class="tag">SSO</span>`}${u.totp && html`<span class="tag">2FA</span>`}</div></td>
           <td class="ink2 nowrap hide-sm" title=${when(u.created_at)}>${ago(u.created_at)}</td>
-          <td class="act">${u.id !== m.data.me && html`<${Btn} size="sm" kind="quiet-danger" icon="trash" title=${`Remove ${u.email}`} onClick=${() => remove(u)} />`}</td></tr>`)}</tbody></table></div>
-      <div class="panel-b form b-top">
-        <div class="row">
-          <input type="email" class="grow" placeholder="Email address" aria-label="Email address to invite" value=${inv.email} onInput=${(e) => setInv({ ...inv, email: e.target.value })} />
-          <${RoleSelect} value=${inv.role} onChange=${(role) => setInv({ ...inv, role })} />
-          <${Btn} kind="primary" icon="plus" disabled=${!inv.email.trim()} onClick=${invite}>Invite</${Btn}></div>
-        <p class="small ink2">Admins manage everything. Owners add servers and manage the ones they have. Operators run jobs, services and the terminal on their servers. Viewers only look.</p>
-        ${link && html`<div class="field"><span>Send this link to ${link.email}. It works once.</span><${Copy} text=${link.url} /></div>`}
-      </div>
-      ${m.data.invites.length > 0 && html`<div class="table-wrap b-top"><table class="t"><thead><tr><th>Pending invite</th><th>Role</th><th class="hide-sm">Expires</th><th class="act"></th></tr></thead>
-        <tbody>${m.data.invites.map((x) => html`<tr><td>${x.email}<div class="small muted">by ${x.created_by}</div></td><td class="ink2">${roleName(x.role)}</td>
-          <td class="ink2 nowrap hide-sm">${when(x.expires_at)}</td>
-          <td class="act"><${Btn} size="sm" kind="quiet-danger" onClick=${() => withdraw(x)}>Withdraw</${Btn}></td></tr>`)}</tbody></table></div>`}`}
-  </section>`;
+          <td class="act">${u.id !== m.data.me && html`<${Btn} size="sm" kind="quiet-danger" icon="trash" title=${`Remove ${u.email}`} onClick=${() => remove(u)} />`}</td></tr>`)}</tbody></table></div></section>`;
 }
 
 // ---------- the instance (super admins) ----------
-function InstanceSettings() {
+function InstanceSection({ part }) {
   const d = useLoad(() => api('/api/instance'));
   if (d.error) return html`<${ErrorNote} error=${d.error} retry=${d.reload} />`;
   if (!d.data) return html`<${Loading} />`;
   const x = d.data;
-  return html`<div class="stack">
-    <div class="grid-2">
-      <div class="stack"><${PublicUrlPanel} d=${x} /><${InstanceSsoPanel} /></div>
-      <div class="stack"><${RetentionPanel} value=${x} />
-        <section class="panel"><div class="panel-h"><h2>Encryption</h2></div><div class="panel-b"><p class="small ink2">
-          ${x.secret_from_env
-            ? 'Keys and notification tokens are encrypted with FLEETDECK_SECRET from the environment.'
-            : html`Keys and notification tokens are encrypted with <span class="mono">data/secret.key</span>, stored next to the database. Set <span class="mono">FLEETDECK_SECRET</span> to keep the key out of backups of the data folder.`}</p></div></section></div>
-    </div>
-    <${OrgsPanel} list=${x.tenants} onChange=${() => d.reload(true)} />
-    <${UsersPanel} list=${x.users} me=${x.me} onChange=${() => d.reload(true)} />
-  </div>`;
+  const reload = () => d.reload(true);
+  if (part === 'orgs') return html`<${Head} title="Organizations" sub="Each has its own servers, people, scripts and alerts." /><${OrgsPanel} list=${x.tenants} onChange=${reload} />`;
+  if (part === 'accounts') return html`<${Head} title="Accounts" sub="Everyone who can sign in. Super admins manage this Fleetdeck and act as admin in every organization." /><${UsersPanel} list=${x.users} me=${x.me} onChange=${reload} />`;
+  return html`<${Head} title="General" sub="Applies to this whole Fleetdeck and every organization on it." />
+    <${PublicUrlPanel} d=${x} />
+    <${RetentionPanel} value=${x} />
+    <section class="panel"><${Setting} label="Encryption key" desc=${x.secret_from_env ? 'Keys and notification tokens are encrypted with FLEETDECK_SECRET from the environment.'
+        : html`Keys and notification tokens are encrypted with a key stored next to the database. Set <span class="mono">FLEETDECK_SECRET</span> to keep it out of backups of the data folder.`}>
+      ${x.secret_from_env ? html`<span class="chip ok">From environment</span>` : html`<span class="mono">data/secret.key</span>`}</${Setting}></section>`;
 }
 
 function PublicUrlPanel({ d }) {
   const [v, setV] = useState(d.public_url || '');
   const [saved, setSaved] = useState(d.public_url || '');
   const save = async () => { await api('/api/instance', { method: 'PUT', body: { public_url: v } }); setSaved(v); toast('Public URL saved', 'ok'); };
-  return html`<section class="panel"><div class="panel-h"><h2>Public URL</h2></div><div class="panel-b form">
-    <p class="small ink2">The address people open Fleetdeck at. Single sign-on redirects and invite links use it. Empty: taken from each request, which is fine on localhost for development.</p>
-    ${d.public_url_env ? html`<div class="field"><span>Set by <span class="mono">FLEETDECK_PUBLIC_URL</span></span><span class="mono">${d.public_url_env}</span></div>`
-      : html`<${Field} label="URL"><input class="mono" placeholder="https://fleetdeck.example.com" value=${v} onInput=${(e) => setV(e.target.value)} /></${Field}>
-        <div><${Btn} kind=${v !== saved ? 'primary' : ''} disabled=${v === saved} onClick=${save}>Save</${Btn}></div>`}
-  </div></section>`;
-}
-
-function InstanceSsoPanel() {
-  const sso = useLoad(() => api('/api/sso'));
-  const on = sso.data?.configured;
-  return html`<section class="panel"><div class="panel-h"><h2>Single sign-on for everyone</h2>${sso.data && (on ? html`<span class="chip ok">On</span>` : html`<span class="chip">Off</span>`)}</div>
-    <div class="panel-b form"><p class="small ink2">One provider for every organization. Accounts are matched by email; new people still need an invite. Organizations can add their own provider under Settings → Organization.</p>
-      <div><a class=${`btn ${on ? '' : 'primary'}`} href="#/settings/sso">${on ? 'Manage' : 'Set up single sign-on'}</a></div></div></section>`;
+  return html`<section class="panel">
+    <${Setting} label="Public URL" desc="The address people open Fleetdeck at. Single sign-on redirects and invite links use it. Empty: taken from each request, which is fine on localhost.">
+      ${d.public_url_env ? html`<div class="stack sm"><span class="mono wrap-any">${d.public_url_env}</span><span class="small muted">Set by <span class="mono">FLEETDECK_PUBLIC_URL</span></span></div>`
+        : html`<input class="mono" aria-label="Public URL" placeholder="https://fleetdeck.example.com" value=${v} onInput=${(e) => setV(e.target.value)} />`}</${Setting}>
+    ${!d.public_url_env && html`<${SaveBar} changed=${v !== saved} onSave=${save} />`}</section>`;
 }
 
 function OrgsPanel({ list, onChange }) {
@@ -451,7 +473,7 @@ function OrgsPanel({ list, onChange }) {
     onChange();
   };
   return html`<section class="panel">
-    <div class="panel-h"><h2>Organizations</h2><span class="small muted">Each has its own servers, people, scripts and alerts.</span>
+    <div class="panel-h"><h2>All organizations</h2><span class="chip">${list.length}</span>
       <${Btn} size="sm" icon="plus" class="right" onClick=${() => setEdit({})}>New organization</${Btn}></div>
     <div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="name">Organization</${Th}><${Th} sort=${sort} k="servers" desc class="num">Servers</${Th}><${Th} sort=${sort} k="members" desc class="num">People</${Th}><${Th} sort=${sort} k="created_at" desc class="hide-sm">Created</${Th}><th class="act"></th></tr></thead>
       <tbody>${sort.rows.map((t) => html`<tr>
@@ -510,7 +532,7 @@ function UsersPanel({ list, me, onChange }) {
     onChange();
   };
   return html`<section class="panel">
-    <div class="panel-h"><h2>Accounts</h2><span class="small muted">Everyone who can sign in. Super admins manage this Fleetdeck and act as admin in every organization.</span></div>
+    <div class="panel-h"><h2>All accounts</h2><span class="chip">${list.length}</span></div>
     <div class="table-wrap"><table class="t"><thead><tr><${Th} sort=${sort} k="email">Account</${Th}><${Th} sort=${sort} k="orgs" class="hide-sm">Organizations</${Th}><${Th} sort=${sort} k="super_admin" desc>Super admin</${Th}><${Th} sort=${sort} k="created_at" desc class="hide-sm">Created</${Th}><th class="act"></th></tr></thead>
       <tbody>${sort.rows.map((u) => html`<tr>
         <td><b>${u.name || u.email}</b>${u.id === me && html` <span class="chip">You</span>`}<div class="small muted">${u.email}</div></td>
