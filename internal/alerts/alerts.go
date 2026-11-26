@@ -70,6 +70,7 @@ var Metrics = MetricList{
 	{Key: "gpu", Label: "GPU usage (busiest GPU)", Unit: "%", Col: "gpu", Scale: 100, Def: def(90)},
 	{Key: "custom", Label: "Custom metric", Unit: "", Hint: "One of your custom metrics, from a server's Metrics panel"},
 	{Key: "check", Label: "Endpoint check failing", Unit: "min", Hint: "Fires when one of the server's endpoint checks (Network tab) fails for N minutes"},
+	{Key: "process", Label: "Process not running", Unit: "", Hint: "Fires when no process with this name runs on the server"},
 	{Key: "tls_days", Label: "TLS certificate days left", Unit: " days", Def: def(14), Below: true, Hint: "The soonest-expiring certificate of the server's HTTPS checks"},
 }
 
@@ -225,17 +226,34 @@ type Rule struct {
 	Tag       *string `db:"tag" json:"tag"`
 	Mount     *string `db:"mount" json:"mount"`         // disk and inodes only; nil = the fullest mount
 	CustomID  *string `db:"custom_id" json:"custom_id"` // metric "custom" only
+	Process   *string `db:"process" json:"process"`     // metric "process" only
 }
 
 // Label names what a rule watches, e.g. "Disk usage on /data" for a mount-specific rule.
 func (r *Rule) Label(m *Metric) string {
+	if r.Process != nil {
+		return "Process " + *r.Process
+	}
 	if r.Mount == nil {
 		return m.Label
 	}
 	return strings.TrimSuffix(m.Label, " (fullest mount)") + " on " + *r.Mount
 }
 
-var mountRe = regexp.MustCompile(`^/[^\x00-\x1f]{0,255}$`)
+var (
+	mountRe   = regexp.MustCompile(`^/[^\x00-\x1f]{0,255}$`)
+	processRe = regexp.MustCompile(`^[\w.@:+/-][\w .@:+/-]{0,63}$`)
+)
+
+// ProcessRunning reports whether a process named name is in procs (ps comm names, cut to 15 characters by the kernel).
+func ProcessRunning(name string, procs []string) bool {
+	for _, p := range procs {
+		if p == name || len(name) > 15 && p == name[:15] {
+			return true
+		}
+	}
+	return false
+}
 
 // ValidateRule checks a rule of the organization tenant from a request body (decoded JSON).
 func ValidateRule(tenant string, b map[string]any) (*Rule, error) {
@@ -273,7 +291,15 @@ func ValidateRule(tenant string, b map[string]any) (*Rule, error) {
 		}
 		customID = &id
 	}
-	return &Rule{Metric: metric, Threshold: threshold, Minutes: int64(minutes), ServerID: serverID, Tag: tag, Mount: mount, CustomID: customID, Enabled: enabled(b)}, nil
+	var process *string
+	if metric == "process" {
+		p := strings.TrimSpace(orEmpty(b["process"]))
+		if !processRe.MatchString(p) {
+			return nil, httperr.Bad("Enter the process name as ps -e shows it, e.g. nginx")
+		}
+		process = &p
+	}
+	return &Rule{Metric: metric, Threshold: threshold, Minutes: int64(minutes), ServerID: serverID, Tag: tag, Mount: mount, CustomID: customID, Process: process, Enabled: enabled(b)}, nil
 }
 
 // ValidateCustom checks a custom metric from a request body. It fills everything but ID and CreatedAt.
@@ -575,6 +601,12 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 				firing = db.Now()-since >= r.Minutes*60e3
 				msg += ": " + perr.Error()
 			}
+		} else if r.Metric == "process" {
+			if snap == nil || len(snap.Processes) == 0 || r.Process == nil {
+				continue // unknown (unreachable, or ps gave nothing); keep the current state
+			}
+			firing = !ProcessRunning(*r.Process, snap.Processes)
+			msg = s.Name + ": " + *r.Process + " is not running"
 		} else {
 			if snap == nil {
 				continue // unknown while unreachable; keep the current state

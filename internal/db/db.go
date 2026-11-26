@@ -215,6 +215,8 @@ CREATE INDEX IF NOT EXISTS check_results_t ON check_results(t);
 CREATE TABLE IF NOT EXISTS passkeys (
   id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL, credential TEXT NOT NULL, created_at BIGINT NOT NULL, last_used BIGINT);
+
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS process TEXT; -- metric 'process': the process name to watch
 `
 
 // Open opens the Postgres database at url and creates or updates the schema. dataDir (created 0700) holds the files.

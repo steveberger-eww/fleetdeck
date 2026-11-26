@@ -211,6 +211,58 @@ func TestAPISmoke(t *testing.T) {
 		t.Fatalf("delete used key: %d %v", code, m)
 	}
 
+	// Prometheus: no token, then a generated one; paused servers are left out.
+	raw := func(path string, hdr ...string) (int, string, string) {
+		t.Helper()
+		r := httptest.NewRequest("GET", path, nil)
+		for i := 0; i+1 < len(hdr); i += 2 {
+			r.Header.Set(hdr[i], hdr[i+1])
+		}
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		return w.Code, w.Header().Get("Content-Type"), w.Body.String()
+	}
+	if code, _, _ := raw("/api/metrics"); code != 401 {
+		t.Fatalf("metrics without a token: %d", code)
+	}
+	code, m, _ = call("POST", "/api/tenant/metrics-token", "")
+	expect(code, 200, m, "metrics token")
+	bearer := "Bearer " + m["token"].(string)
+	if code, _, _ := raw("/api/metrics", "Authorization", "Bearer wrong"); code != 401 {
+		t.Fatalf("metrics with a wrong token: %d", code)
+	}
+	if code, _, body := raw("/api/metrics", "Authorization", bearer); code != 200 || strings.Contains(body, "web1") {
+		t.Fatalf("paused server in metrics: %d %s", code, body)
+	}
+	if _, err := db.Exec(`UPDATE servers SET paused = 0, last_json = ? WHERE id = ?`, `{"cpu":0.25,"disks":[{"mount":"/","size":100,"used":40,"pct":0.4}],"reboot":true,"t":1700000000000}`, server["id"]); err != nil {
+		t.Fatal(err)
+	}
+	code, ctype, body := raw("/api/metrics", "Authorization", bearer)
+	sid := server["id"].(string)
+	for _, want := range []string{"# TYPE fleetdeck_up gauge\nfleetdeck_up{server=\"web1\",server_id=\"" + sid + "\"} 1\n",
+		"fleetdeck_cpu_usage_ratio{server=\"web1\",server_id=\"" + sid + "\"} 0.25\n",
+		"fleetdeck_filesystem_used_bytes{server=\"web1\",server_id=\"" + sid + "\",mount=\"/\"} 40\n",
+		"fleetdeck_reboot_required{server=\"web1\",server_id=\"" + sid + "\"} 1\n"} {
+		if code != 200 || !strings.HasPrefix(ctype, "text/plain; version=0.0.4") || !strings.Contains(body, want) {
+			t.Fatalf("metrics: %d %s, missing %q in:\n%s", code, ctype, want, body)
+		}
+	}
+	code, m, _ = call("DELETE", "/api/tenant/metrics-token", "")
+	expect(code, 200, m, "turn off scraping")
+	if code, _, _ := raw("/api/metrics", "Authorization", bearer); code != 401 {
+		t.Fatalf("metrics after turning it off: %d", code)
+	}
+	if _, err := db.Exec(`UPDATE servers SET paused = 1 WHERE id = ?`, sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO metrics (server_id, t, cpu, mem) VALUES (?, ?, 0.5, NULL)`, sid, db.Now()-60e3); err != nil {
+		t.Fatal(err)
+	}
+	if code, ctype, body := raw("/api/servers/"+sid+"/metrics.csv?range=1h", "Cookie", cookie); code != 200 || ctype != "text/csv; charset=utf-8" ||
+		!strings.HasPrefix(body, "time,cpu_pct,mem_pct,") || !strings.Contains(body, "Z,50,,") {
+		t.Fatalf("csv: %d %s %s", code, ctype, body)
+	}
+
 	// Lockout: the bad setup token above plus 4 wrong passwords make 5 failures; then 429 even for the right one.
 	for i := 0; i < 4; i++ {
 		code, m, _ = call("POST", "/api/auth/login", `{"email":"ops@example.com","password":"wrong password"}`)

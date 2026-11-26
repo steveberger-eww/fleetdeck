@@ -61,6 +61,7 @@ type Snapshot struct {
 	GPU         *float64               `json:"gpu,omitempty"`    // utilization of the busiest GPU, 0-1
 	GPUMem      *float64               `json:"gpuMem,omitempty"` // memory used of that GPU, 0-1
 	Custom      map[string]CustomValue `json:"custom,omitempty"` // custom metric id -> value
+	Processes   []string               `json:"-"`                // running process names (ps comm), for alerts only
 	PVE         *PVE                   `json:"pve,omitempty"`    // Proxmox VE host
 	// Set by the probe loop (rates against the previous probe), not by Parse.
 	Rx *float64 `json:"rx"`
@@ -471,7 +472,7 @@ func Parse(text string) *Snapshot {
 	var disks []Disk
 	diskAt := map[string]int{}
 	inodes := map[string]float64{} // mount -> used/total
-	var smartDevs, ctrs, cstats, nv, amd []string
+	var smartDevs, ctrs, cstats, nv, amd, procs []string
 	ifaces := []Iface{}
 	var custom map[string]CustomValue
 	for _, line := range strings.Split(text, "\n") {
@@ -483,6 +484,8 @@ func Parse(text string) *Snapshot {
 		switch k {
 		case "smartdev":
 			smartDevs = append(smartDevs, v)
+		case "proc":
+			procs = append(procs, v)
 		case "ctr":
 			ctrs = append(ctrs, v)
 		case "cst":
@@ -546,7 +549,7 @@ func Parse(text string) *Snapshot {
 		Counters: Counters{or0(at(net, 0)), or0(at(net, 1)), or0(at(dio, 0)), or0(at(dio, 1))},
 		Ifaces:   ifaces, Pkg: kv["pkg"], Updates: n(kv["updates"]), Security: n(kv["security"]),
 		Reboot: kv["reboot"] == "1", Failed: or0(num(kv["failed"])), Cockpit: kv["cockpit"] == "active",
-		ProbeUser: kv["probe_user"], Smart: parseSmart(kv["smart"], smartDevs), Custom: custom,
+		ProbeUser: kv["probe_user"], Smart: parseSmart(kv["smart"], smartDevs), Custom: custom, Processes: procs,
 	}
 	if s.Disks == nil {
 		s.Disks = []Disk{}
@@ -736,9 +739,9 @@ func collect(s *db.Server) (snap *Snapshot, err error) {
 	sc, hasSC := smartCache[s.ID]
 	mu.Unlock()
 	withSmart := !hasSC || sc.smart.Status != "ok" || time.Since(sc.t) > 30*time.Minute // re-check often until it works
-	script, timeout := PROBE, 30*time.Second
+	script, timeout := PROBE+PROCS, 30*time.Second
 	if withSmart {
-		script, timeout = PROBE+SMART, 90*time.Second
+		script, timeout = PROBE+PROCS+SMART, 90*time.Second
 	}
 	customs, err := CustomFor(s)
 	if err != nil {
@@ -889,6 +892,12 @@ func Series(id, rangeStr string) (*SeriesOf[Point], error) {
 		return nil, err
 	}
 	return &SeriesOf[Point]{bucket, now - sp, now, pts}, nil
+}
+
+// Raw is a server's metric rows for a range (like Series), one per probe, oldest first.
+func Raw(id, rangeStr string) ([]Point, error) {
+	sp, _ := span(rangeStr)
+	return db.Select[Point](`SELECT t, cpu, mem, swap, disk, load1, rx, tx, dr, dw, temp, gpu, gpu_mem FROM metrics WHERE server_id = ? AND t >= ? ORDER BY t`, id, db.Now()-sp)
 }
 
 // ContainerSeries is Series for one container (by name: compose recreates containers with new ids).

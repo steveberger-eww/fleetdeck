@@ -377,7 +377,33 @@ function OrgGeneral() {
       <${Setting} label="Name" desc="Shown in the sidebar and the organization switcher."><input aria-label="Organization name" value=${v.name} onInput=${(e) => setV({ ...v, name: e.target.value })} /></${Setting}>
       <${Setting} label="Short name" desc=${`Lowercase letters, digits and dashes. Part of your single sign-on link (…/?org=${v.slug || 'short-name'}).`}>
         <input class="mono" aria-label="Short name" value=${v.slug} onInput=${(e) => setV({ ...v, slug: e.target.value })} /></${Setting}>
-      <${SaveBar} changed=${changed} disabled=${!v.name.trim()} onSave=${save} /></section>`;
+      <${SaveBar} changed=${changed} disabled=${!v.name.trim()} onSave=${save} /></section>
+    <${Prometheus} />`;
+}
+
+// Scrape token for /api/metrics: only its hash is stored, so the token is shown once, right after generating it.
+function Prometheus() {
+  const t = useLoad(() => api('/api/tenant/metrics-token'));
+  const [fresh, setFresh] = useState(null);
+  if (t.error) return html`<${ErrorNote} error=${t.error} retry=${t.reload} />`;
+  if (!t.data) return html`<${Loading} />`;
+  const generate = async () => {
+    if (t.data.enabled && !await confirmBox({ title: 'Generate a new token?', body: 'The current token stops working. Update your Prometheus config with the new one.', confirm: 'Generate new token', danger: true })) return;
+    setFresh((await api('/api/tenant/metrics-token', { method: 'POST' })).token);
+    t.reload(true);
+  };
+  const off = async () => {
+    if (!await confirmBox({ title: 'Turn off Prometheus scraping?', body: 'The token stops working and scrapes get 401.', confirm: 'Turn off', danger: true })) return;
+    await api('/api/tenant/metrics-token', { method: 'DELETE' });
+    setFresh(null);
+    t.reload(true);
+  };
+  const config = fresh && `scrape_configs:\n  - job_name: fleetdeck\n    scheme: ${t.data.url.split(':')[0]}\n    metrics_path: /api/metrics\n    authorization:\n      credentials: ${fresh}\n    static_configs:\n      - targets: ['${t.data.url.split('/')[2]}']`;
+  return html`<section class="panel"><div class="panel-h"><h2>Prometheus</h2><span class=${`chip ${t.data.enabled ? 'ok' : ''}`}>${t.data.enabled ? 'On' : 'Off'}</span></div>
+    <${Setting} label="Scrape endpoint" desc="The latest state of every server in this organization (paused ones left out), with a bearer token."><code class="mono small">${t.data.url}</code></${Setting}>
+    ${fresh && html`<div class="panel-b stack"><p class="small">Copy the token now. It isn't shown again.</p><${Copy} text=${fresh} /><pre class="small">${config}</pre></div>`}
+    <div class="panel-f"><span class="small muted grow">${t.data.enabled ? 'Anyone with the token can read your servers\' metrics, names and mounts.' : 'Generate a token to let Prometheus scrape Fleetdeck.'}</span>
+      ${t.data.enabled && html`<${Btn} onClick=${off}>Turn off</${Btn}>`}<${Btn} kind=${t.data.enabled ? '' : 'primary'} onClick=${generate}>${t.data.enabled ? 'New token' : 'Generate token'}</${Btn}></div></section>`;
 }
 
 function PeoplePage() {

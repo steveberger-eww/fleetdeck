@@ -119,7 +119,7 @@ function OverviewTab({ s }) {
   const custom = useLoad(() => api(`/api/servers/${s.id}/custom?range=${range}`), [s.id, range], { poll: 60_000 });
   const [edit, setEdit] = useState(null); // custom metric being added ({}) or edited
   return html`<div class="stack">
-    <div class="row"><h2>Metrics</h2><div class="row right">${can('admin') && html`<${Btn} size="sm" icon="plus" onClick=${() => setEdit({})}>Add custom metric</${Btn}>`}<${RangePicker} value=${range} onChange=${setRange} /></div></div>
+    <div class="row"><h2>Metrics</h2><div class="row right">${can('admin') && html`<${Btn} size="sm" icon="plus" onClick=${() => setEdit({})}>Add custom metric</${Btn}>`}<a class="btn sm" href=${`/api/servers/${s.id}/metrics.csv?range=${range}`} download title=${`Every reading of the last ${range} as CSV`}>CSV</a><${RangePicker} value=${range} onChange=${setRange} /></div></div>
     ${m.error && html`<${ErrorNote} error=${m.error} retry=${m.reload} />`}
     ${custom.error && html`<${ErrorNote} error=${custom.error} retry=${custom.reload} />`}
     <div class="charts">

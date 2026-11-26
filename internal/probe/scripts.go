@@ -88,6 +88,11 @@ echo "probe_user=$(id -un)"
 true
 `
 
+// PROCS lists the names of running processes (comm, at most 15 characters), one per line, for "process not running" alerts.
+const PROCS = `
+ps -eo comm= 2>/dev/null | sort -u | sed 's/^/proc=/'
+`
+
 // Disk health, appended to the probe every 30 minutes (smartctl is slow-ish). -n standby: never spin up a sleeping disk.
 const SMART = `
 if ! command -v smartctl >/dev/null 2>&1; then echo "smart=none"
