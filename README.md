@@ -45,7 +45,7 @@ Run the tests with `go test ./...`. Each package works in its own throwaway sche
 
 Versions before Postgres kept everything in `DATA_DIR/fleetdeck.db`. When Fleetdeck starts with an empty Postgres database and finds that file, it imports it first (one transaction, row counts checked per table), so just stop the old version and start the new one with `DATABASE_URL` set. Keep `DATA_DIR`: its `secret.key` (or your `FLEETDECK_SECRET`) decrypts the imported keys and tokens.
 
-Everything lands in one organization. The former single owner becomes a super admin who signs in as **`admin`** with the old password (and 2FA); change the sign-in email under **Settings → Account**. Built-in scripts become the shared library.
+Everything lands in one organization. The former single owner becomes a super admin who signs in as **`admin`** with the old password (and 2FA); change the sign-in email under **Settings → Profile**. Built-in scripts become the shared library.
 
 ### Docker
 
@@ -70,13 +70,13 @@ On first start, the console prints a **setup token**. Open the page, enter the t
 | `DATA_DIR` | `./data` | `secret.key`, Git checkouts and temporary files |
 | `FLEETDECK_SECRET` | – | Master key for encrypting SSH keys and tokens. Without it, a random key is written to `DATA_DIR/secret.key`. |
 | `FLEETDECK_TRUST_PROXY` | – | `1` trusts `X-Forwarded-*` headers (client IP, HTTPS detection for secure cookies) |
-| `FLEETDECK_PUBLIC_URL` | – | Fleetdeck's address, e.g. `https://fleetdeck.example.com`, for single sign-on redirects and invite links. Can also be set under **Settings → Instance**. Without it, the address the browser used counts (fine for `localhost`). |
+| `FLEETDECK_PUBLIC_URL` | – | Fleetdeck's address, e.g. `https://fleetdeck.example.com`, for single sign-on redirects and invite links. Can also be set under **Settings → Instance → General**. Without it, the address the browser used counts (fine for `localhost`). |
 | `FLEETDECK_PASSWORD_LOGIN` | – | `1` allows password sign-in for accounts that turned it off in favour of single sign-on (for when your provider is down) |
 
 Single sign-on (authentik, Keycloak, any OpenID Connect provider) works at two levels, both set up step by step in the app. All providers use the same redirect URI.
 
-- **Instance** (**Settings → Instance**, super admins): e.g. your company's authentik. It signs in existing accounts (matched by connected identity or email) and can accept invites.
-- **Organization** (**Settings → Organization**, its admins): the organization's own provider, used from `https://…/?org=<short name>`. It signs in that organization's members only and can add new people with a default role. These sessions stay in that organization and can't change the account's password, 2FA or email, so an organization's provider can't take over accounts elsewhere. This is the feature meant for a business license later (`licensed()` in `internal/web/tenancy.go`).
+- **Instance** (**Settings → Instance → Single sign-on**, super admins): e.g. your company's authentik. It signs in existing accounts (matched by connected identity or email) and can accept invites.
+- **Organization** (**Settings → Organization → Single sign-on**, its admins): the organization's own provider, used from `https://…/?org=<short name>`. It signs in that organization's members only and can add new people with a default role. These sessions stay in that organization and can't change the account's password, 2FA or email, so an organization's provider can't take over accounts elsewhere. This is the feature meant for a business license later (`licensed()` in `internal/web/tenancy.go`).
 
 ## Adding a server
 
@@ -138,7 +138,7 @@ Each run pulls the latest commit (recorded on the job), installs `collections/re
 Anyone with access to Fleetdeck has root on every server in it, so the defaults are strict:
 
 - **Sign-in:** scrypt-hashed password, optional TOTP, 5-attempt lockout per IP. First-run setup needs the console token.
-- **Passkeys (optional):** register them under Settings → Account, then use **Sign in with a passkey**. A passkey must verify the user (PIN or biometrics), so it replaces both password and code. Failed attempts count toward the same lockout, and a passkey whose signature counter goes backwards (a sign of a cloned authenticator) is refused and logged. Passkeys need HTTPS or `localhost`, and are tied to the host name in the address bar (not an IP address): behind a reverse proxy, set `FLEETDECK_TRUST_PROXY=1` so Fleetdeck sees the real host. Accounts limited to single sign-on can't use them.
+- **Passkeys (optional):** register them under Settings → Sign-in & security, then use **Sign in with a passkey**. A passkey must verify the user (PIN or biometrics), so it replaces both password and code. Failed attempts count toward the same lockout, and a passkey whose signature counter goes backwards (a sign of a cloned authenticator) is refused and logged. Passkeys need HTTPS or `localhost`, and are tied to the host name in the address bar (not an IP address): behind a reverse proxy, set `FLEETDECK_TRUST_PROXY=1` so Fleetdeck sees the real host. Accounts limited to single sign-on can't use them.
 - **Single sign-on (optional):** OpenID Connect with PKCE, state bound to the browser, nonce and signed ID token checked. An organization's own provider only reaches that organization (see above). Each account can turn off its password once single sign-on is connected.
 - **Organizations:** every query is scoped to the session's organization; people below admin only see servers assigned to them, and viewers can't change anything. Invite links are single-use and expire after 7 days. Every organization needs at least one admin, the instance at least one super admin.
 - **Sessions:** random tokens stored hashed; `HttpOnly`, `SameSite=Strict`, `Secure` behind HTTPS cookies; 7-day idle expiry; revocable in Settings.

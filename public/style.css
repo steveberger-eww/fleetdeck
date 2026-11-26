@@ -439,3 +439,26 @@ dialog.palette[open] { animation: pop .14s ease-out; }
 .eol.bad { color: var(--bad); }
 .pkgs { list-style: none; margin: 6px 0 0; padding: 0; font-size: var(--fs-sm); }
 .param-row { display: grid; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+
+/* ---------- settings: sub-navigation + one column of setting rows ---------- */
+.page.settings { grid-template-columns: 208px minmax(0, 760px); justify-content: center; column-gap: 40px; align-items: start; }
+.page.settings > .stack { gap: 20px; }
+.subnav { position: sticky; top: 84px; display: grid; align-content: start; }
+.subnav .side-h { padding: 14px 12px 6px; }
+.subnav .side-h:first-child { padding-top: 0; }
+.subnav .nav { padding: 0; }
+.set { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 8px 28px; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.set:last-child { border-bottom: 0; }
+.set b { font-weight: 600; }
+.set p { margin-top: 2px; font-size: var(--fs-sm); color: var(--muted); }
+.set-c { display: flex; justify-content: flex-end; align-items: center; gap: 8px; min-width: 0; }
+.set-c > input:not([type="checkbox"]), .set-c > select { width: 100%; }
+.w-num { width: 96px; text-align: right; }
+.panel-f { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--panel-2); border-radius: 0 0 var(--r-lg) var(--r-lg); }
+.set + .panel-f { border-top: 0; }
+.page.settings > select { width: 100%; }
+@media (max-width: 700px) {
+  .page.settings { grid-template-columns: minmax(0, 1fr); }
+  .set { grid-template-columns: minmax(0, 1fr); }
+  .set-c { justify-content: flex-start; }
+}

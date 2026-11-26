@@ -927,7 +927,7 @@ function AccessPanel({ s }) {
   return html`<section class="panel"><div class="panel-h"><h2>Access</h2></div><div class="panel-b stack">
     <p class="ink2 small">Admins always see every server. Pick who else sees ${s.name}; what they can do depends on their role.</p>
     ${m.error ? html`<${ErrorNote} error=${m.error} retry=${m.reload} />` : !sel ? html`<${Loading} />`
-      : !m.data.length ? html`<p class="small muted">Nobody else is in this organization yet.${can('admin') ? html` Invite people under <a href="#/settings/org">Settings → Organization</a>.` : ''}</p>`
+      : !m.data.length ? html`<p class="small muted">Nobody else is in this organization yet.${can('admin') ? html` Invite people under <a href="#/settings/org/people">Settings → People</a>.` : ''}</p>`
       : html`<div>${m.data.map((u) => html`<label class="check list"><input type="checkbox" checked=${sel.has(u.id)} onChange=${() => flip(u.id)} />
           <span>${u.name || u.email}</span><span class="small muted">${u.role}${u.name ? `, ${u.email}` : ''}</span></label>`)}</div>
         <div><${Btn} kind=${changed ? 'primary' : ''} disabled=${!changed} onClick=${save}>Save access</${Btn}></div>`}
