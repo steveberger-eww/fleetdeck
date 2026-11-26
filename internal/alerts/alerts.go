@@ -65,6 +65,9 @@ var Metrics = MetricList{
 	{Key: "failed", Label: "Failed systemd units", Unit: "", Def: def(0)},
 	{Key: "reboot", Label: "Reboot required", Unit: ""},
 	{Key: "smart", Label: "Disks with S.M.A.R.T. problems", Unit: "", Def: def(0)},
+	{Key: "smart_realloc", Label: "Reallocated sectors (worst disk)", Unit: "", Def: def(10), Hint: "A rising count means the disk is wearing out; a few on an old disk can be stable"},
+	{Key: "smart_wear", Label: "SSD wear (most worn disk)", Unit: "%", Def: def(80), Hint: "NVMe: share of the rated write endurance used"},
+	{Key: "smart_temp", Label: "Disk temperature (hottest disk)", Unit: "°C", Def: def(55)},
 	{Key: "unhealthy", Label: "Unhealthy or restarting containers", Unit: "", Def: def(0)},
 	{Key: "net", Label: "Network traffic (in + out)", Unit: " MB/s", Col: "rx + tx", Scale: 1e-6, Def: def(50)},
 	{Key: "gpu", Label: "GPU usage (busiest GPU)", Unit: "%", Col: "gpu", Scale: 100, Def: def(90)},
@@ -405,6 +408,18 @@ func currentValue(r *Rule, m *Metric, s *db.Server, snap *probe.Snapshot) (*floa
 			return ptr(1), nil
 		}
 		return ptr(0), nil
+	case "smart_realloc", "smart_wear", "smart_temp":
+		if snap.Smart == nil || snap.Smart.Status != "ok" {
+			return nil, nil
+		}
+		var hi *float64
+		for _, d := range snap.Smart.Disks {
+			v := map[string]*float64{"smart_realloc": d.Realloc, "smart_wear": d.Wear, "smart_temp": d.Temp}[r.Metric]
+			if v != nil && (hi == nil || *v > *hi) {
+				hi = v
+			}
+		}
+		return hi, nil
 	case "smart":
 		if snap.Smart == nil || snap.Smart.Status != "ok" {
 			return nil, nil

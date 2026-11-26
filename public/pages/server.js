@@ -213,22 +213,41 @@ function CustomMetricDialog({ s, metric, onClose, onSaved }) {
 
 // S.M.A.R.T. from the probe (every 30 min). Virtual machines have no SMART, so stay quiet there.
 function DiskHealth({ s }) {
+  const [open, setOpen] = useState(null); // disk whose history is shown
   const sm = s.snapshot.smart;
   if (!sm || (s.snapshot.virt && !sm.disks.length)) return null;
   if (sm.status === 'none') return can('operator') ? html`<div class="alert-bar info"><span class="grow">Install smartmontools to watch the health of this server's disks (S.M.A.R.T.).</span><${Btn} size="sm" onClick=${() => startJob(s, 'smartmontools')}>Install smartmontools</${Btn}></div>` : null;
   if (sm.status === 'noroot') return null; // smartctl needs root; the System panel already says sudo is missing
   if (!sm.disks.length) return null;
   const n = (v) => (v == null ? '–' : v);
+  const key = (d) => d.serial || d.dev;
   return html`<section class="panel"><div class="panel-h"><h2>Disk health</h2><span class="small muted">S.M.A.R.T., checked every 30 minutes. Sleeping disks are skipped.</span></div>
-    <div class="table-wrap"><table class="t"><thead><tr><th>Health</th><th>Disk</th><th class="num">Temp</th><th class="num hide-sm">Powered on</th><th class="num hide-sm" title="Reallocated sectors">Realloc.</th><th class="num" title="Pending + uncorrectable sectors">Bad sectors</th><th class="num" title="NVMe: percentage of rated endurance used">Wear</th></tr></thead>
-    <tbody>${sm.disks.map((d) => html`<tr>
+    <div class="table-wrap"><table class="t"><thead><tr><th>Health</th><th>Disk</th><th class="num">Temp</th><th class="num hide-sm">Powered on</th><th class="num hide-sm" title="Reallocated sectors">Realloc.</th><th class="num" title="Pending + uncorrectable sectors">Bad sectors</th><th class="num" title="NVMe: percentage of rated endurance used">Wear</th><th class="act"></th></tr></thead>
+    <tbody>${sm.disks.map((d) => [html`<tr key=${key(d)}>
       <td><span class=${`chip ${!d.passed ? 'bad' : d.problem ? 'warn' : 'ok'}`}>${!d.passed ? 'Failing' : d.problem ? 'Warning' : 'OK'}</span></td>
       <td><span class="mono">${d.dev}</span><div class="small muted">${d.model}${d.serial ? ` · ${d.serial}` : ''}</div></td>
       <td class="num">${d.temp == null ? '–' : `${d.temp} °C`}</td>
       <td class="num ink2 hide-sm">${d.hours == null ? '–' : dur(d.hours * 3600e3)}</td>
       <td class="num hide-sm">${n(d.realloc)}</td>
       <td class=${`num ${d.pending > 0 || d.uncorrectable > 0 ? 'err' : ''}`}>${d.pending == null && d.uncorrectable == null ? (d.mediaErrors == null ? '–' : `${d.mediaErrors} media err.`) : (d.pending || 0) + (d.uncorrectable || 0)}</td>
-      <td class="num">${d.wear == null ? '–' : `${d.wear}%`}</td></tr>`)}</tbody></table></div></section>`;
+      <td class="num">${d.wear == null ? '–' : `${d.wear}%`}</td>
+      <td class="act"><${Btn} size="sm" kind="ghost" aria-expanded=${open === key(d)} onClick=${() => setOpen(open === key(d) ? null : key(d))}>${open === key(d) ? 'Hide' : 'History'}</${Btn}></td></tr>`,
+      open === key(d) && html`<tr key=${`${key(d)}-h`}><td colspan="8"><${SmartHistory} s=${s} d=${d} disk=${key(d)} /></td></tr>`])}</tbody></table></div></section>`;
+}
+
+// The last 30 days of one disk: temperature, and wear (NVMe) or sector counts (SATA).
+function SmartHistory({ s, d, disk }) {
+  const h = useLoad(() => api(`/api/servers/${s.id}/smart?disk=${encodeURIComponent(disk)}&range=30d`), [s.id, disk]);
+  if (h.error) return html`<${ErrorNote} error=${h.error} retry=${h.reload} />`;
+  if (!h.data) return html`<${Loading} />`;
+  if (!h.data.points.length) return html`<p class="small muted">No history yet. It builds up with every check, every 30 minutes.</p>`;
+  const int = (v) => String(Math.round(v));
+  return html`<div class="charts">
+    <${LineChart} title="Temperature, 30 days" data=${h.data} fmt=${(v) => `${int(v)} °C`} series=${[{ key: 'temp', label: 'Temperature', color: 'var(--s1)' }]} />
+    ${d.wear != null
+      ? html`<${LineChart} title="Wear, 30 days" data=${h.data} yMax=${100} fmt=${(v) => `${int(v)}%`} series=${[{ key: 'wear', label: 'Wear', color: 'var(--s1)' }]} />`
+      : html`<${LineChart} title="Sectors, 30 days" data=${h.data} fmt=${int} series=${[{ key: 'realloc', label: 'Reallocated', color: 'var(--s1)' }, { key: 'bad', label: 'Pending + uncorrectable', color: 'var(--s2)' }]} />`}
+  </div>`;
 }
 
 // ---------- updates ----------

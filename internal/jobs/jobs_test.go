@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -269,5 +270,83 @@ func TestChain(t *testing.T) {
 	}
 	if _, err := ValidateScript("default", ScriptInput{Name: "x", Body: "true", NextScript: "step1", NextWhen: "sometimes"}); err == nil {
 		t.Error("bad next_when")
+	}
+}
+
+// Retries run on the same refusing server, so every attempt fails.
+func TestRetry(t *testing.T) {
+	if _, err := db.Exec(`INSERT INTO servers (id, name, host, port, created_at) VALUES ('dead2', 'dead2', '127.0.0.1', 1, 0) ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO scripts (id, tenant_id, name, body, retries, retry_delay, created_at) VALUES ('flaky', 'default', 'flaky', 'true', 2, 1, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	old := retryWait
+	t.Cleanup(func() { retryWait = old })
+	retryWait = func(time.Duration) time.Duration { return 10 * time.Millisecond }
+	var doneMu sync.Mutex
+	var done []int64
+	OnJobDone(func(_ string, id int64, name, _, _ string, _ []string) {
+		if name == "flaky" {
+			doneMu.Lock()
+			done = append(done, id)
+			doneMu.Unlock()
+		}
+	})
+	waitDone := func(n int) []int64 {
+		t.Helper()
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+			doneMu.Lock()
+			got := slices.Clone(done)
+			doneMu.Unlock()
+			if len(got) >= n {
+				return got
+			}
+		}
+		t.Fatalf("job done listener not called %d times", n)
+		return nil
+	}
+	sc, _ := GetScript("flaky")
+	sp := SpecFromScript(sc, Values{}, false)
+	sp.Targets, sp.TenantID, sp.Actor = Targets{Servers: []string{"dead2"}}, "default", "test"
+	first, err := StartJob(sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Three attempts; only the last one counts as done (chains, notifications).
+	last := waitDone(1)[0]
+	j, _ := GetJob(last)
+	if j.Attempt != 3 || j.RetryOf == nil || j.RetryJob != nil || j.RetryAt != nil {
+		t.Fatalf("last attempt: %+v", j)
+	}
+	mid, _ := GetJob(*j.RetryOf)
+	if mid.Attempt != 2 || *mid.RetryOf != first || *mid.RetryJob != last || *mid.Actor != "test" {
+		t.Fatalf("second attempt: %+v", mid)
+	}
+
+	// A waiting retry can be cancelled; that attempt then is the last one.
+	retryWait = func(time.Duration) time.Duration { return time.Hour }
+	second, err := StartJob(sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		if j, _ := GetJob(second); j.RetryAt != nil {
+			break
+		}
+	}
+	if !CancelJob(second) {
+		t.Fatal("pending retry not cancelled")
+	}
+	eq(t, waitDone(2)[1], second)
+	if j, _ := GetJob(second); j.RetryAt != nil || j.RetryJob != nil {
+		t.Fatalf("after cancel: %+v", j)
+	}
+
+	if _, err := ValidateScript("default", ScriptInput{Name: "x", Body: "true", Retries: 6}); err == nil {
+		t.Error("6 retries accepted")
+	}
+	if _, err := ValidateScript("default", ScriptInput{Name: "x", Body: "true", Retries: 1, RetryDelay: 61}); err == nil {
+		t.Error("61-minute wait accepted")
 	}
 }
