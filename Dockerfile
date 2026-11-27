@@ -1,16 +1,18 @@
-FROM node:22-alpine AS ui
+# The UI and the Go binary are built on the build machine and cross-compiled; only the last stage runs per platform.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS ui
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci
 COPY ui/ ./
 RUN npm run build
 
-FROM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /fleetdeck .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /fleetdeck .
 
 FROM alpine:3.22
 # git + ansible for playbooks from repositories; openssh-client is what ansible connects with
