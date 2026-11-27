@@ -1,12 +1,11 @@
 <script setup>
-// Icon rail: every page with a short label, badges for what needs you, and you (organization, theme, sign out).
-import { ref, computed } from 'vue';
+// Icon rail: every page with a short label and badges for what needs you.
+import { computed } from 'vue';
 import { useRoute } from 'vue-router';
-import { Icon, Logo, Menu } from '@/components';
-import { me, servers, running, switchOrg, signOut, roleName, toast } from '@/lib/store.js';
+import { Icon, Logo } from '@/components';
+import { servers, running } from '@/lib/store.js';
 import { navFor } from '@/lib/nav.js';
 import { containerProblem } from '@/lib/status.js';
-import { getTheme, setTheme } from '@/lib/theme.js';
 
 const route = useRoute();
 const section = computed(() => route.path.split('/')[1] || '');
@@ -22,12 +21,6 @@ const badge = (label) => {
   if (label === 'Jobs' && running.value) return { n: running.value, cls: 'info', aria: `${running.value} running` };
   return null;
 };
-
-const theme = ref(getTheme());
-const THEMES = [['dark', 'moon', 'Dark'], ['light', 'sun', 'Light'], ['system', 'monitor', 'System']];
-const pickTheme = (t) => { setTheme(t); theme.value = t; };
-const pickOrg = (id) => switchOrg(id).catch((x) => toast(x.message, 'bad'));
-const initial = computed(() => (me.value.user.name || me.value.user.email).slice(0, 1).toUpperCase());
 </script>
 <template>
   <nav class="rail" aria-label="Main">
@@ -40,27 +33,6 @@ const initial = computed(() => (me.value.user.name || me.value.user.email).slice
           <span class="lb">{{ SHORT[label] || label }}</span>
         </RouterLink>
       </template>
-    </div>
-    <div class="rail-foot">
-      <Menu label="Account and organization" btn-class="rail-me">
-        <template #trigger><span class="avatar sm">{{ initial }}</span></template>
-        <div class="me-card">
-          <div class="avatar" aria-hidden="true">{{ initial }}</div>
-          <div class="grow"><div class="strong trunc">{{ me.user.name || me.user.email }}</div><div class="xs muted trunc">{{ me.user.email }}</div></div>
-        </div>
-        <div class="mh">Organization · {{ roleName(me.role) }}{{ me.user.super_admin ? ', super admin' : '' }}</div>
-        <template v-if="!me.locked && me.tenants.length > 1">
-          <button v-for="t in me.tenants" :key="t.id" type="button" class="mi" :aria-current="t.id === me.tenant.id || undefined" @click="t.id !== me.tenant.id && pickOrg(t.id)">
-            <Icon :name="t.id === me.tenant.id ? 'check' : t.personal ? 'user' : 'building'" :size="15" />{{ t.name }}</button>
-        </template>
-        <div v-else class="mi static"><Icon name="building" :size="15" />{{ me.tenant.name }}</div>
-        <hr />
-        <div class="mh">Theme</div>
-        <button v-for="[t, icon, label] in THEMES" :key="t" type="button" class="mi" @click="pickTheme(t)"><Icon :name="theme === t ? 'check' : icon" :size="15" />{{ label }}</button>
-        <hr />
-        <RouterLink class="mi" to="/settings"><Icon name="user" :size="15" />Profile and security</RouterLink>
-        <button type="button" class="mi" @click="signOut"><Icon name="out" :size="15" />Sign out</button>
-      </Menu>
     </div>
   </nav>
 </template>
@@ -78,15 +50,4 @@ const initial = computed(() => (me.value.user.name || me.value.user.email).slice
 .rail-nav a[aria-current="page"] { color: var(--ink); }
 .rail-nav a[aria-current="page"] .ic { background: var(--accent-soft); color: var(--accent); }
 .rail-nav .count { position: absolute; top: -5px; right: -7px; min-width: 16px; line-height: 15px; padding: 0 4px; font-size: 10px; border: 2px solid var(--rail); box-sizing: content-box; }
-.rail-foot { position: relative; display: grid; place-items: center; padding: 10px 0 12px; border-top: 1px solid var(--line); }
-.rail-me { all: unset; cursor: pointer; border-radius: 50%; }
-.rail-me:hover .avatar { box-shadow: 0 0 0 2px var(--line-2); }
-.rail-me:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.avatar { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; flex: none; background: var(--accent-soft); color: var(--accent); font-weight: 600; font-size: var(--fs-sm); }
-.avatar.sm { width: 32px; height: 32px; }
-.me-card { display: flex; align-items: center; gap: 10px; padding: 8px 10px 10px; min-width: 240px; }
-.menu .mi.static { cursor: default; }
-.menu .mi.static:hover { background: transparent; }
-.menu .mi[aria-current="true"] { font-weight: 600; }
-.menu .mi[aria-current="true"] svg { color: var(--accent); }
 </style>

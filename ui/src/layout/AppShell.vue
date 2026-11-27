@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent 
 import { useRoute } from 'vue-router';
 import { Icon, Empty } from '@/components';
 import Rail from './Rail.vue';
+import AccountMenu from './AccountMenu.vue';
 import FleetList from './FleetList.vue';
 import Palette from './Palette.vue';
 import { me, servers, can, openRun, closeRun, runRequest, dismissConfirm, refreshServers, refreshRunning } from '@/lib/store.js';
@@ -65,6 +66,7 @@ const runHere = () => openRun(parts.value[0] === 'servers' && parts.value[1] ? {
         <div class="top-r">
           <button type="button" class="search-btn" @click="palette = true"><Icon name="search" /><span class="trunc">Search servers, pages, actions</span><span class="kbd">{{ isMac ? '⌘K' : 'Ctrl K' }}</span></button>
           <button v-if="can('operator')" type="button" class="btn primary" aria-label="Run script" @click="runHere"><Icon name="play" /><span class="hide-sm">Run script</span></button>
+          <AccountMenu />
         </div>
       </header>
       <main>
