@@ -12,7 +12,7 @@ Monitoring, one-click maintenance and day-to-day administration in one place. Ev
 ![Postgres](https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
 
-[Features](#features) · [Getting started](#getting-started) · [Adding a server](#adding-a-server) · [Monitoring](#monitoring-and-alerts) · [Automation](#scripts-and-automation) · [Security](#security-model) · [How it works](#how-it-works)
+[Features](#features) · [Comparison](#how-fleetdeck-compares) · [Getting started](#getting-started) · [Adding a server](#adding-a-server) · [Monitoring](#monitoring-and-alerts) · [Automation](#scripts-and-automation) · [Security](#security-model) · [How it works](#how-it-works)
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="assets/screenshots/overview-light.png">
@@ -20,6 +20,16 @@ Monitoring, one-click maintenance and day-to-day administration in one place. Ev
 </picture>
 
 </div>
+
+## Quick start
+
+Fleetdeck and its own PostgreSQL, with nothing to configure:
+
+```sh
+curl -fsSLo compose.yaml https://raw.githubusercontent.com/steveberger-eww/fleetdeck/main/deploy/compose.yaml && docker compose up -d --wait && docker compose logs fleetdeck
+```
+
+Open http://127.0.0.1:8080 and enter the setup token from the logs. [Getting started](#getting-started) covers the options.
 
 ## Features
 
@@ -42,6 +52,39 @@ Fleetdeck combines the core ideas of [Beszel](https://github.com/henrygd/beszel)
     <td align="center"><sub>Jobs keep each server's output and exit code</sub></td>
   </tr>
 </table>
+
+## How Fleetdeck compares
+
+Most teams end up running several tools: one to watch servers, one to run playbooks, one to log in and fix things. Fleetdeck puts that loop in one place:
+
+- **Nothing to install on the servers.** Fleetdeck uses the SSH access you already have. There's no agent or exporter to deploy and keep updated, and removing a server leaves nothing behind.
+- **See it and fix it on the same page.** The server that needs security updates has an **Update** button next to it. A failed service sits next to its journal and a terminal. After a job runs, the server is probed again, so you see the result right away.
+- **The whole fleet by default.** Install updates on a tag, search the journal of every server at once, or find an SSH key on any machine and remove it in one click.
+- **Built for service providers.** One instance serves several customers. Each one gets its own organization, roles, assigned servers and single sign-on.
+- **Small to run.** One container and PostgreSQL. There's no time-series database, message queue or agent fleet to look after.
+
+| | Fleetdeck | [Beszel](https://github.com/henrygd/beszel) | [Semaphore](https://github.com/semaphoreui/semaphore) | [Cockpit](https://cockpit-project.org) | [Grafana](https://grafana.com/oss/grafana/) + Prometheus |
+|---|---|---|---|---|---|
+| **On each server** | Nothing (SSH) | Agent | Nothing (SSH) | Cockpit package | node_exporter or Alloy |
+| **Fleet overview** | ✅ | ✅ | – | – | ✅ dashboards |
+| **Metric history** | ✅ 30 days | ✅ | – | With PCP | ✅ any retention |
+| **Container metrics** | ✅ Docker | ✅ Docker, Podman | – | Podman | With cAdvisor |
+| **Alerts** | ✅ | ✅ | Failed tasks only | – | ✅ |
+| **Scripts on many servers** | ✅ | – | ✅ | – | – |
+| **Ansible playbooks** | ✅ from Git | – | ✅ | – | – |
+| **Terraform / OpenTofu** | – | – | ✅ | – | – |
+| **Schedules and webhooks** | ✅ | – | ✅ | – | – |
+| **Package updates** | ✅ fleet-wide | – | Through playbooks | ✅ one server | – |
+| **Services, journal, processes** | ✅ | – | – | ✅ | Logs with Loki |
+| **Web terminal** | ✅ | – | – | ✅ | – |
+| **Storage, networking, VMs** | – | – | – | ✅ | – |
+| **Custom dashboards, other data sources** | – | – | – | – | ✅ |
+| **Separate organizations** | ✅ | Shared systems | Projects | – | ✅ |
+| **Single sign-on** | ✅ OIDC | ✅ OAuth/OIDC | ✅ OIDC, LDAP | PAM, Kerberos | ✅ |
+
+<sub>Based on each project's documentation as of November 2026. Corrections are welcome.</sub>
+
+**When something else fits better:** Grafana for custom dashboards, long-term metrics and data beyond servers. Semaphore for Terraform and large Ansible setups. Cockpit for storage, network and VM configuration on a single machine. Beszel for the lightest possible monitoring, or for Intel GPUs. Fleetdeck exports Prometheus metrics, so it also runs well next to Grafana.
 
 ## Getting started
 
