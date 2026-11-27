@@ -418,6 +418,44 @@ func TestTenancy(t *testing.T) {
 	}
 	code, m, _ = call(&acme, "POST", "/api/me/tenant", `{"id":"default"}`)
 	must(code, 404, m, "Acme admin enters MSP")
+
+	// A personal organization: the viewer's own servers, which nobody else sees, super admins included.
+	code, m, _ = call(&op, "POST", "/api/me/personal", "")
+	must(code, 200, m, "create personal organization")
+	code, m, _ = call(&op, "POST", "/api/me/personal", "")
+	must(code, 409, m, "second personal organization")
+	_, me, _ = call(&op, "GET", "/api/me", "")
+	mine := me["tenant"].(map[string]any)
+	if me["role"] != "admin" || mine["personal"] != true || len(me["tenants"].([]any)) != 2 {
+		t.Fatalf("personal organization: %v", me)
+	}
+	code, p, _ := call(&op, "POST", "/api/servers", `{"name":"home-nas","host":"192.0.2.50","paused":true}`)
+	must(code, 200, p, "add server in personal organization")
+	code, m, _ = call(&op, "POST", "/api/members/invites", `{"email":"friend@example.com","role":"viewer"}`)
+	must(code, 409, m, "invite into personal organization")
+	code, m, _ = call(&op, "PUT", "/api/tenant/sso", `{"issuer":"https://idp.example.com","client_id":"x","secret":"y"}`)
+	must(code, 409, m, "single sign-on for personal organization")
+	_, me, _ = call(&boss, "GET", "/api/me", "")
+	for _, x := range me["tenants"].([]any) {
+		if x.(map[string]any)["id"] == mine["id"] {
+			t.Fatalf("super admin lists the personal organization: %v", me["tenants"])
+		}
+	}
+	code, m, _ = call(&boss, "POST", "/api/me/tenant", `{"id":"`+mine["id"].(string)+`"}`)
+	must(code, 404, m, "super admin enters a personal organization")
+	code, m, _ = call(&boss, "GET", "/api/servers/"+p["id"].(string), "")
+	must(code, 404, m, "super admin opens a personal server")
+	code, m, _ = call(&op, "POST", "/api/me/tenant", `{"id":"default"}`)
+	must(code, 200, m, "back to MSP")
+	_, me, _ = call(&op, "GET", "/api/me", "")
+	if me["role"] != "viewer" {
+		t.Fatalf("role in MSP after going personal: %v", me)
+	}
+	code, m, _ = call(&boss, "DELETE", "/api/instance/users/"+opID, "")
+	must(code, 200, m, "delete an account with a personal organization")
+	if n, err := db.Get[int](`SELECT COUNT(*) FROM tenants WHERE id = ?`, mine["id"]); err != nil || *n != 0 {
+		t.Fatalf("personal organization outlived its person: %v %v", n, err)
+	}
 }
 
 func TestLogSearch(t *testing.T) {

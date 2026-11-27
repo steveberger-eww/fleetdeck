@@ -51,7 +51,7 @@ const initial = computed(() => (me.value.user.name || me.value.user.email).slice
         <div class="mh">Organization · {{ roleName(me.role) }}{{ me.user.super_admin ? ', super admin' : '' }}</div>
         <template v-if="!me.locked && me.tenants.length > 1">
           <button v-for="t in me.tenants" :key="t.id" type="button" class="mi" :aria-current="t.id === me.tenant.id || undefined" @click="t.id !== me.tenant.id && pickOrg(t.id)">
-            <Icon :name="t.id === me.tenant.id ? 'check' : 'building'" :size="15" />{{ t.name }}</button>
+            <Icon :name="t.id === me.tenant.id ? 'check' : t.personal ? 'user' : 'building'" :size="15" />{{ t.name }}</button>
         </template>
         <div v-else class="mi static"><Icon name="building" :size="15" />{{ me.tenant.name }}</div>
         <hr />

@@ -4,7 +4,7 @@ import { reactive, computed, watch } from 'vue';
 import { Btn, Callout, Loading, ErrorNote } from '@/components';
 import { api } from '@/lib/api.js';
 import { useLoad } from '@/lib/use.js';
-import { me, refreshMe, switchOrg, toast } from '@/lib/store.js';
+import { me, refreshMe, switchOrg, createPersonal, toast } from '@/lib/store.js';
 import SettingRow from './SettingRow.vue';
 import SaveBar from './SaveBar.vue';
 import PasskeysPanel from './PasskeysPanel.vue';
@@ -31,6 +31,7 @@ async function save() {
   reload();
   refreshMe();
 }
+const hasPersonal = computed(() => me.value.tenants.some((t) => t.personal));
 const weak = computed(() => a.value && !a.value.locked && !a.value.totp && !a.value.passkeys.length);
 </script>
 <template>
@@ -53,11 +54,12 @@ const weak = computed(() => a.value && !a.value.locked && !a.value.totp && !a.va
         </template>
       </section>
 
-      <section v-if="me.tenants.length > 1" class="panel">
-        <div class="panel-h"><h2>Organizations</h2><span class="sub">You're a member of {{ me.tenants.length }}.</span></div>
+      <section v-if="me.tenants.length > 1 || (!me.locked && !hasPersonal)" class="panel">
+        <div class="panel-h"><h2>Organizations</h2><span class="sub">You're a member of {{ me.tenants.length }}.</span>
+          <Btn v-if="!me.locked && !hasPersonal" size="sm" icon="plus" class="right" title="Your own servers, which nobody else sees" @click="createPersonal().catch((x) => toast(x.message, 'bad'))">Personal organization</Btn></div>
         <div class="table-wrap"><table class="t"><tbody>
           <tr v-for="t in me.tenants" :key="t.id">
-            <td><span class="strong">{{ t.name }}</span> <span v-if="t.id === me.tenant.id" class="chip">Current</span></td>
+            <td><span class="strong">{{ t.name }}</span> <span v-if="t.id === me.tenant.id" class="chip">Current</span><span v-if="t.personal" class="sub">Only you see it</span></td>
             <td class="actions"><Btn v-if="t.id !== me.tenant.id && !me.locked" size="sm" @click="switchOrg(t.id)">Switch</Btn></td>
           </tr>
         </tbody></table></div>

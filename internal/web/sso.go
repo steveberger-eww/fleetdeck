@@ -253,6 +253,9 @@ func (s *Server) ssoRoutes() {
 		if !licensed(c.tenant, "tenant-sso") {
 			return nil, httperr.New(402, "Your organization's own single sign-on needs a business license")
 		}
+		if personal(c.tenant) { // its provider could create accounts on this instance
+			return nil, httperr.New(409, "A personal organization can't have its own single sign-on")
+		}
 		p := tenantSSO(c.tenant)
 		if role := c.body.str("role"); role != "" {
 			if err := validRole(role); err != nil || role == "admin" {

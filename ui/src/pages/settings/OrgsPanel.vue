@@ -12,7 +12,7 @@ const emit = defineEmits(['change']);
 const sort = useSort(() => props.list, 'name');
 const edit = ref(null); // {} for a new one
 async function del(t) {
-  if (!await confirmBox({ title: `Delete ${t.name}?`, body: 'Its scripts, keys, schedules, alert rules and audit log are deleted too.', confirm: 'Delete organization', danger: true, typeToConfirm: t.slug })) return;
+  if (!await confirmBox({ title: `Delete ${t.name}?`, body: `Its ${t.personal_of ? 'servers, ' : ''}scripts, keys, schedules, alert rules and audit log are deleted too.`, confirm: 'Delete organization', danger: true, typeToConfirm: t.slug })) return;
   await api(`/api/instance/tenants/${t.id}`, { method: 'DELETE' });
   toast(`${t.name} deleted`);
   emit('change');
@@ -34,14 +34,14 @@ function saved() {
       </tr></thead>
       <tbody>
         <tr v-for="t in sort.rows" :key="t.id">
-          <td><span class="strong">{{ t.name }}</span> <span v-if="t.id === me.tenant.id" class="chip">Current</span><span class="sub">{{ t.slug }}</span></td>
+          <td><span class="strong">{{ t.name }}</span> <span v-if="t.id === me.tenant.id" class="chip">Current</span><span class="sub">{{ t.personal_of ? `Personal, ${t.personal_of}` : t.slug }}</span></td>
           <td class="num">{{ t.servers }}</td>
           <td class="num">{{ t.members }}</td>
           <td class="ink2 nowrap hide-sm" :title="when(t.created_at)">{{ ago(t.created_at) }}</td>
           <td class="actions"><div class="row">
-            <Btn v-if="t.id !== me.tenant.id && !me.locked" size="sm" kind="ghost" @click="switchOrg(t.id)">Open</Btn>
+            <Btn v-if="t.id !== me.tenant.id && !me.locked && !t.personal_of" size="sm" kind="ghost" @click="switchOrg(t.id)">Open</Btn>
             <Btn size="sm" kind="ghost" icon="edit" :title="`Rename ${t.name}`" @click="edit = t" />
-            <Btn size="sm" kind="ghost" icon="trash" :title="t.servers ? 'Remove its servers first' : `Delete ${t.name}`" :disabled="t.servers > 0 || t.id === me.tenant.id" @click="del(t)" />
+            <Btn size="sm" kind="ghost" icon="trash" :title="t.servers && !t.personal_of ? 'Remove its servers first' : `Delete ${t.name}`" :disabled="(t.servers > 0 && !t.personal_of) || t.id === me.tenant.id" @click="del(t)" />
           </div></td>
         </tr>
       </tbody>

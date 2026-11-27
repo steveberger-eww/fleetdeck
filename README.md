@@ -182,6 +182,8 @@ People sign in once and switch between their organizations. Roles apply per orga
 
 Super admins see every organization on the instance. Invite links are single-use and expire after 7 days.
 
+Anyone can also create one **personal organization** (**Settings → Profile**) for their own servers. Only they see it, super admins included: it takes no invites and no single sign-on of its own, and it's deleted with their account. Super admins see in **Instance → Organizations** that it exists and can delete it.
+
 ## Security model
 
 Anyone with access to Fleetdeck has root on every server in it, so the defaults are strict:

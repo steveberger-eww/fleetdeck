@@ -233,6 +233,11 @@ CREATE TABLE IF NOT EXISTS smart_history (
   temp DOUBLE PRECISION, realloc DOUBLE PRECISION, bad DOUBLE PRECISION, wear DOUBLE PRECISION,
   PRIMARY KEY (server_id, disk, t));
 CREATE INDEX IF NOT EXISTS smart_history_t ON smart_history(t);
+
+-- A personal organization: one person's own servers. Nobody else sees it, super admins included: no invites,
+-- no organization single sign-on. It goes when its person is deleted.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS personal_of TEXT REFERENCES users(id) ON DELETE CASCADE;
+CREATE UNIQUE INDEX IF NOT EXISTS tenants_personal ON tenants(personal_of);
 `
 
 // Open opens the Postgres database at url and creates or updates the schema. dataDir (created 0700) holds the files.
