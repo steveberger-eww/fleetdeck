@@ -45,28 +45,40 @@ Fleetdeck combines the core ideas of [Beszel](https://github.com/henrygd/beszel)
 
 ## Getting started
 
-### Docker
+### Docker Compose (recommended)
 
-Fleetdeck needs a PostgreSQL database. Point `DATABASE_URL` at it:
+One command starts Fleetdeck and its own PostgreSQL, with nothing to configure:
 
 ```sh
-docker build -t fleetdeck .
-docker run -d --name fleetdeck -p 127.0.0.1:8080:8080 -v fleetdeck:/data \
-  -e DATABASE_URL='postgres://…' -e FLEETDECK_SECRET="$(openssl rand -base64 32)" fleetdeck
-docker logs fleetdeck   # shows the setup token
+curl -fsSLo compose.yaml https://raw.githubusercontent.com/steveberger-eww/fleetdeck/main/deploy/compose.yaml && docker compose up -d --wait && docker compose logs fleetdeck
 ```
 
-On first start, the console prints a **setup token**. Open http://127.0.0.1:8080, enter the token, and create the first account (a super admin) and its organization.
+The logs show a **setup token**. Open http://127.0.0.1:8080, enter the token, and create the first account (a super admin) and its organization.
+
+Optional settings go in a `.env` file next to `compose.yaml`; [the file](deploy/compose.yaml) lists them. For example `FLEETDECK_PUBLIC_URL`, `FLEETDECK_TRUST_PROXY=1`, `FLEETDECK_BIND` (default `127.0.0.1:8080`), or `FLEETDECK_VERSION=0.4.0-beta` to pin a release. To update, run `docker compose pull && docker compose up -d`.
 
 > [!IMPORTANT]
 > Fleetdeck listens on localhost by default. To reach it from elsewhere, put it behind a reverse proxy with HTTPS (Caddy, Traefik, nginx) and set `FLEETDECK_TRUST_PROXY=1`, or keep it on a VPN such as Tailscale or WireGuard.
+
+> [!CAUTION]
+> Back up both volumes. `fleetdeck-data` holds `secret.key`, which decrypts the SSH keys and tokens stored in the database. Without it, they can't be recovered.
+
+### Docker image
+
+Images for `linux/amd64` and `linux/arm64` are published to the GitHub Container Registry. `:latest` follows `main`, and each release has its own tag (e.g. `:0.4.0-beta`). With your own PostgreSQL:
+
+```sh
+docker run -d --name fleetdeck -p 127.0.0.1:8080:8080 -v fleetdeck:/data \
+  -e DATABASE_URL='postgres://…' ghcr.io/steveberger-eww/fleetdeck
+docker logs fleetdeck   # shows the setup token
+```
 
 ### Build from source
 
 You need Go 1.26+, Node 22+ and PostgreSQL. The UI is a separate build that the server reads from disk (`ui/dist`, or `FLEETDECK_UI_DIR`); it isn't compiled into the binary.
 
 ```sh
-docker compose up -d   # local Postgres from compose.yaml
+docker compose up -d   # local Postgres for development (compose.yaml)
 export DATABASE_URL='postgres://fleetdeck:fleetdeck@localhost:5432/fleetdeck?sslmode=disable'
 npm --prefix ui ci && npm --prefix ui run build
 go build -o fleetdeck .
