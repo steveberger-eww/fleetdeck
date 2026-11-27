@@ -1,0 +1,42 @@
+# Fleetdeck with its own PostgreSQL. Nothing to configure:
+#   curl -fsSLo compose.yaml https://raw.githubusercontent.com/steveberger-eww/fleetdeck/main/deploy/compose.yaml
+#   docker compose up -d --wait && docker compose logs fleetdeck   # shows the setup token
+#
+# Optional settings go in a .env file next to this one (or the shell environment):
+#   FLEETDECK_BIND=127.0.0.1:8080        where Fleetdeck listens on the host
+#   FLEETDECK_PUBLIC_URL=https://…       for single sign-on redirects and invite links
+#   FLEETDECK_TRUST_PROXY=1              behind a reverse proxy with HTTPS
+#   FLEETDECK_VERSION=0.4.0-beta         pin a release instead of following main
+# Back up both volumes: fleetdeck-data holds secret.key, which decrypts the keys stored in the database.
+services:
+  fleetdeck:
+    image: ghcr.io/steveberger-eww/fleetdeck:${FLEETDECK_VERSION:-latest}
+    ports: ["${FLEETDECK_BIND:-127.0.0.1:8080}:8080"]
+    environment:
+      DATABASE_URL: postgres://fleetdeck:fleetdeck@postgres:5432/fleetdeck?sslmode=disable # Postgres isn't published outside this stack
+      FLEETDECK_PUBLIC_URL: ${FLEETDECK_PUBLIC_URL:-}
+      FLEETDECK_TRUST_PROXY: ${FLEETDECK_TRUST_PROXY:-}
+    volumes: [fleetdeck-data:/data]
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      start_period: 30s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: fleetdeck
+      POSTGRES_PASSWORD: fleetdeck
+      POSTGRES_DB: fleetdeck
+    volumes: [postgres-data:/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "fleetdeck"]
+      interval: 5s
+    restart: unless-stopped
+
+volumes:
+  fleetdeck-data:
+  postgres-data:
