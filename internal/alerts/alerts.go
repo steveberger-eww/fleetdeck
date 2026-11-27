@@ -74,6 +74,7 @@ var Metrics = MetricList{
 	{Key: "custom", Label: "Custom metric", Unit: "", Hint: "One of your custom metrics, from a server's Metrics panel"},
 	{Key: "check", Label: "Endpoint check failing", Unit: "min", Hint: "Fires when one of the server's endpoint checks (Network tab) fails for N minutes"},
 	{Key: "process", Label: "Process not running", Unit: "", Hint: "Fires when no process with this name runs on the server"},
+	{Key: "container", Label: "Container not running", Unit: "", Hint: "Fires when the Docker container with this name is stopped, restarting or gone"},
 	{Key: "tls_days", Label: "TLS certificate days left", Unit: " days", Def: def(14), Below: true, Hint: "The soonest-expiring certificate of the server's HTTPS checks"},
 }
 
@@ -229,12 +230,15 @@ type Rule struct {
 	Tag       *string `db:"tag" json:"tag"`
 	Mount     *string `db:"mount" json:"mount"`         // disk and inodes only; nil = the fullest mount
 	CustomID  *string `db:"custom_id" json:"custom_id"` // metric "custom" only
-	Process   *string `db:"process" json:"process"`     // metric "process" only
+	Process   *string `db:"process" json:"process"`     // metric "process": the process name; "container": the container name
 }
 
 // Label names what a rule watches, e.g. "Disk usage on /data" for a mount-specific rule.
 func (r *Rule) Label(m *Metric) string {
 	if r.Process != nil {
+		if r.Metric == "container" {
+			return "Container " + *r.Process
+		}
 		return "Process " + *r.Process
 	}
 	if r.Mount == nil {
@@ -244,8 +248,9 @@ func (r *Rule) Label(m *Metric) string {
 }
 
 var (
-	mountRe   = regexp.MustCompile(`^/[^\x00-\x1f]{0,255}$`)
-	processRe = regexp.MustCompile(`^[\w.@:+/-][\w .@:+/-]{0,63}$`)
+	mountRe     = regexp.MustCompile(`^/[^\x00-\x1f]{0,255}$`)
+	processRe   = regexp.MustCompile(`^[\w.@:+/-][\w .@:+/-]{0,63}$`)
+	containerRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 )
 
 // ProcessRunning reports whether a process named name is in procs (ps comm names, cut to 15 characters by the kernel).
@@ -299,6 +304,14 @@ func ValidateRule(tenant string, b map[string]any) (*Rule, error) {
 		p := strings.TrimSpace(orEmpty(b["process"]))
 		if !processRe.MatchString(p) {
 			return nil, httperr.Bad("Enter the process name as ps -e shows it, e.g. nginx")
+		}
+		process = &p
+	}
+	// ponytail: the container name shares the process column; give it its own if a rule ever needs both.
+	if metric == "container" {
+		p := strings.TrimSpace(orEmpty(b["process"]))
+		if !containerRe.MatchString(p) {
+			return nil, httperr.Bad("Enter the container name as docker ps shows it, e.g. web-app-1")
 		}
 		process = &p
 	}
@@ -622,6 +635,18 @@ func evaluate(s *db.Server, snap *probe.Snapshot, perr error) error {
 			}
 			firing = !ProcessRunning(*r.Process, snap.Processes)
 			msg = s.Name + ": " + *r.Process + " is not running"
+		} else if r.Metric == "container" {
+			if snap == nil || snap.Containers == nil || r.Process == nil {
+				continue // unknown (unreachable, or no Docker); keep the current state
+			}
+			i := slices.IndexFunc(snap.Containers, func(c probe.Container) bool { return c.Name == *r.Process })
+			firing = i < 0 || snap.Containers[i].State != "running"
+			msg = s.Name + ": container " + *r.Process + " is not running"
+			if i >= 0 {
+				msg += " (" + snap.Containers[i].Status + ")"
+			} else {
+				msg += " (no such container)"
+			}
 		} else {
 			if snap == nil {
 				continue // unknown while unreachable; keep the current state

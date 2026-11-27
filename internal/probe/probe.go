@@ -104,14 +104,17 @@ type Docker struct {
 }
 
 type Container struct {
-	Name   string   `json:"name"`
-	Image  string   `json:"image"`
-	State  string   `json:"state"`
-	Status string   `json:"status"`
-	Health *string  `json:"health"`
-	CPU    *float64 `json:"cpu"`
-	Mem    *float64 `json:"mem"`
+	Name    string   `json:"name"`
+	Image   string   `json:"image"`
+	State   string   `json:"state"`
+	Status  string   `json:"status"`
+	Health  *string  `json:"health"`
+	CPU     *float64 `json:"cpu"`
+	Mem     *float64 `json:"mem"`
+	Project string   `json:"project,omitempty"` // Docker Compose project
 }
+
+var composeProject = regexp.MustCompile(`(?:^|,)com\.docker\.compose\.project=([^,]*)`)
 
 // PVE is a Proxmox VE node and its guests.
 type PVE struct {
@@ -449,7 +452,7 @@ func parseContainers(ps, stats []string) []Container {
 		st[s.Name] = s
 	}
 	out := []Container{}
-	for _, c := range jsonLines[struct{ Names, Image, State, Status string }](ps) {
+	for _, c := range jsonLines[struct{ Names, Image, State, Status, Labels string }](ps) {
 		var health *string
 		for _, h := range [][2]string{{"(unhealthy)", "unhealthy"}, {"(healthy)", "healthy"}, {"health: starting", "starting"}} {
 			if strings.Contains(c.Status, h[0]) {
@@ -458,6 +461,9 @@ func parseContainers(ps, stats []string) []Container {
 			}
 		}
 		ct := Container{Name: c.Names, Image: c.Image, State: c.State, Status: c.Status, Health: health}
+		if m := composeProject.FindStringSubmatch(c.Labels); m != nil {
+			ct.Project = m[1]
+		}
 		if s := st[c.Names]; s != nil {
 			cpu := or0(parseFloat(s.CPUPerc))
 			ct.CPU, ct.Mem = &cpu, bytesOf(s.MemUsage)

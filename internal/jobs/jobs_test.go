@@ -350,3 +350,39 @@ func TestRetry(t *testing.T) {
 		t.Error("61-minute wait accepted")
 	}
 }
+
+// The server is re-probed after its run and before the job counts as done, so the UI sees fresh state at once.
+func TestAfterRunBeforeDone(t *testing.T) {
+	if _, err := db.Exec(`INSERT INTO servers (id, name, host, port, created_at) VALUES ('dead3', 'dead3', '127.0.0.1', 1, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO scripts (id, tenant_id, name, body, created_at) VALUES ('probed', 'default', 'probed', 'true', 0)`); err != nil {
+		t.Fatal(err)
+	}
+	var m sync.Mutex
+	var order []string
+	note := func(s string) { m.Lock(); order = append(order, s); m.Unlock() }
+	AfterRun = func(s *db.Server) { time.Sleep(50 * time.Millisecond); note("probe " + s.ID) }
+	t.Cleanup(func() { AfterRun = nil })
+	got := make(chan struct{})
+	OnJobDone(func(_ string, _ int64, name, _, _ string, _ []string) {
+		if name == "probed" {
+			note("done")
+			close(got)
+		}
+	})
+	sc, _ := GetScript("probed")
+	sp := SpecFromScript(sc, Values{}, false)
+	sp.Targets, sp.TenantID, sp.Actor = Targets{Servers: []string{"dead3"}}, "default", "test"
+	if _, err := StartJob(sp); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-got:
+	case <-time.After(10 * time.Second):
+		t.Fatal("job not done")
+	}
+	m.Lock()
+	defer m.Unlock()
+	eq(t, order, []string{"probe dead3", "done"})
+}

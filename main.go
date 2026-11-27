@@ -3,13 +3,12 @@ package main
 
 import (
 	"cmp"
-	"embed"
 	"fmt"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,9 +24,6 @@ import (
 	"fleetdeck/internal/ssh"
 	"fleetdeck/internal/web"
 )
-
-//go:embed public
-var public embed.FS
 
 func main() {
 	if err := run(); err != nil {
@@ -56,11 +52,12 @@ func run() error {
 	if err := repos.Init(); err != nil {
 		return fmt.Errorf("repos: %w", err)
 	}
-	static, err := fs.Sub(public, "public")
-	if err != nil {
-		return err
+	// The UI is a separate build (ui/, `npm run build`) served from disk, not compiled into the binary.
+	uiDir := cmp.Or(os.Getenv("FLEETDECK_UI_DIR"), filepath.Join("ui", "dist"))
+	if _, err := os.Stat(filepath.Join(uiDir, "index.html")); err != nil {
+		return fmt.Errorf("no UI in %s: build it with `npm --prefix ui ci && npm --prefix ui run build`, or set FLEETDECK_UI_DIR", uiDir)
 	}
-	srv := web.New(static, trustProxy)
+	srv := web.New(os.DirFS(uiDir), trustProxy)
 	if tok := srv.SetupToken(); tok != "" {
 		fmt.Printf("\n  First run: open Fleetdeck and enter this setup token:\n\n    %s\n\n", tok)
 	}
@@ -72,6 +69,11 @@ func run() error {
 	}
 	probe.OnProbe(alerts.Evaluate)
 	jobs.OnJobDone(alerts.OnJobDone)
+	jobs.AfterRun = func(s *db.Server) {
+		if s.Paused == 0 {
+			probe.Probe(s)
+		}
+	}
 	ssh.Notify = alerts.Notify
 	probe.Start()
 	checks.Start()

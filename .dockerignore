@@ -2,3 +2,5 @@
 .claude
 data
 fleetdeck
+ui/node_modules
+ui/dist

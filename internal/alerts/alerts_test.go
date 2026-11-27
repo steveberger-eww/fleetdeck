@@ -175,7 +175,7 @@ func TestQuietHours(t *testing.T) {
 func TestMetricsAndTypesJSON(t *testing.T) {
 	b, err := json.Marshal(Metrics)
 	must(t, err)
-	eq(t, string(b), `{"down":{"label":"Unreachable","unit":"min","hint":"Fires when the server cannot be reached for N minutes"},"cpu":{"label":"CPU usage","unit":"%","col":"cpu","scale":100,"def":90},"mem":{"label":"Memory usage","unit":"%","col":"mem","scale":100,"def":90},"swap":{"label":"Swap usage","unit":"%","col":"swap","scale":100,"def":50},"disk":{"label":"Disk usage (fullest mount)","unit":"%","def":90},"inodes":{"label":"Inode usage (fullest mount)","unit":"%","def":90},"load":{"label":"Load per CPU core","unit":"","col":"load1","scale":1,"def":1.5},"temp":{"label":"Temperature","unit":"°C","col":"temp","scale":1,"def":80},"updates":{"label":"Pending updates","unit":"","def":0},"security":{"label":"Pending security updates","unit":"","def":0},"failed":{"label":"Failed systemd units","unit":"","def":0},"reboot":{"label":"Reboot required","unit":""},"smart":{"label":"Disks with S.M.A.R.T. problems","unit":"","def":0},"smart_realloc":{"label":"Reallocated sectors (worst disk)","unit":"","hint":"A rising count means the disk is wearing out; a few on an old disk can be stable","def":10},"smart_wear":{"label":"SSD wear (most worn disk)","unit":"%","hint":"NVMe: share of the rated write endurance used","def":80},"smart_temp":{"label":"Disk temperature (hottest disk)","unit":"°C","def":55},"unhealthy":{"label":"Unhealthy or restarting containers","unit":"","def":0},"net":{"label":"Network traffic (in + out)","unit":" MB/s","col":"rx + tx","scale":0.000001,"def":50},"gpu":{"label":"GPU usage (busiest GPU)","unit":"%","col":"gpu","scale":100,"def":90},"custom":{"label":"Custom metric","unit":"","hint":"One of your custom metrics, from a server's Metrics panel"},"check":{"label":"Endpoint check failing","unit":"min","hint":"Fires when one of the server's endpoint checks (Network tab) fails for N minutes"},"process":{"label":"Process not running","unit":"","hint":"Fires when no process with this name runs on the server"},"tls_days":{"label":"TLS certificate days left","unit":" days","hint":"The soonest-expiring certificate of the server's HTTPS checks","def":14,"below":true}}`)
+	eq(t, string(b), `{"down":{"label":"Unreachable","unit":"min","hint":"Fires when the server cannot be reached for N minutes"},"cpu":{"label":"CPU usage","unit":"%","col":"cpu","scale":100,"def":90},"mem":{"label":"Memory usage","unit":"%","col":"mem","scale":100,"def":90},"swap":{"label":"Swap usage","unit":"%","col":"swap","scale":100,"def":50},"disk":{"label":"Disk usage (fullest mount)","unit":"%","def":90},"inodes":{"label":"Inode usage (fullest mount)","unit":"%","def":90},"load":{"label":"Load per CPU core","unit":"","col":"load1","scale":1,"def":1.5},"temp":{"label":"Temperature","unit":"°C","col":"temp","scale":1,"def":80},"updates":{"label":"Pending updates","unit":"","def":0},"security":{"label":"Pending security updates","unit":"","def":0},"failed":{"label":"Failed systemd units","unit":"","def":0},"reboot":{"label":"Reboot required","unit":""},"smart":{"label":"Disks with S.M.A.R.T. problems","unit":"","def":0},"smart_realloc":{"label":"Reallocated sectors (worst disk)","unit":"","hint":"A rising count means the disk is wearing out; a few on an old disk can be stable","def":10},"smart_wear":{"label":"SSD wear (most worn disk)","unit":"%","hint":"NVMe: share of the rated write endurance used","def":80},"smart_temp":{"label":"Disk temperature (hottest disk)","unit":"°C","def":55},"unhealthy":{"label":"Unhealthy or restarting containers","unit":"","def":0},"net":{"label":"Network traffic (in + out)","unit":" MB/s","col":"rx + tx","scale":0.000001,"def":50},"gpu":{"label":"GPU usage (busiest GPU)","unit":"%","col":"gpu","scale":100,"def":90},"custom":{"label":"Custom metric","unit":"","hint":"One of your custom metrics, from a server's Metrics panel"},"check":{"label":"Endpoint check failing","unit":"min","hint":"Fires when one of the server's endpoint checks (Network tab) fails for N minutes"},"process":{"label":"Process not running","unit":"","hint":"Fires when no process with this name runs on the server"},"container":{"label":"Container not running","unit":"","hint":"Fires when the Docker container with this name is stopped, restarting or gone"},"tls_days":{"label":"TLS certificate days left","unit":" days","hint":"The soonest-expiring certificate of the server's HTTPS checks","def":14,"below":true}}`)
 	b, err = json.Marshal(Types)
 	must(t, err)
 	eq(t, string(b), `{"webhook":{"label":"Webhook (JSON POST)","fields":[{"key":"url","label":"URL","secret":true}]},"ntfy":{"label":"ntfy","fields":[{"key":"url","label":"Topic URL (https://ntfy.sh/my-topic)"},{"key":"token","label":"Access token (optional)","secret":true,"optional":true}]},"discord":{"label":"Discord","fields":[{"key":"url","label":"Webhook URL","secret":true}]},"slack":{"label":"Slack","fields":[{"key":"url","label":"Incoming webhook URL","secret":true}]},"telegram":{"label":"Telegram","fields":[{"key":"token","label":"Bot token","secret":true},{"key":"chat_id","label":"Chat ID"}]},"pushover":{"label":"Pushover","fields":[{"key":"token","label":"Application API token","secret":true},{"key":"user","label":"User or group key","secret":true},{"key":"device","label":"Device (optional, all devices if empty)","optional":true}]},"gotify":{"label":"Gotify","fields":[{"key":"url","label":"Server URL"},{"key":"token","label":"App token","secret":true}]}}`)
@@ -349,4 +349,27 @@ func TestProcessAlert(t *testing.T) {
 	r, err := ValidateRule("default", map[string]any{"metric": "process", "process": " php-fpm8.2 "})
 	must(t, err)
 	eq(t, *r.Process, "php-fpm8.2")
+}
+
+func TestContainerAlert(t *testing.T) {
+	snap := probe.Parse("docker=1 2\n" +
+		`ctr={"Names":"web-1","Image":"nginx","State":"running","Status":"Up 2 hours"}` + "\n" +
+		`ctr={"Names":"db-1","Image":"postgres","State":"exited","Status":"Exited (1) 5 minutes ago"}`)
+	exec(t, `INSERT INTO servers (id, name, host, created_at) VALUES ('dk1', 'app3', 'h', 0)`)
+	exec(t, `INSERT INTO alert_rules (id, metric, server_id, process, created_at) VALUES ('rc1', 'container', 'dk1', 'web-1', 0), ('rc2', 'container', 'dk1', 'db-1', 0), ('rc3', 'container', 'dk1', 'gone-1', 0)`)
+	Evaluate(srv(t, "dk1"), snap, nil)
+	eq(t, message(t, "rc2"), "app3: container db-1 is not running (Exited (1) 5 minutes ago)")
+	eq(t, message(t, "rc3"), "app3: container gone-1 is not running (no such container)")
+	n, err := db.Get[int](`SELECT COUNT(*) FROM alert_state WHERE rule_id = 'rc1'`)
+	must(t, err)
+	eq(t, *n, 0)
+	Evaluate(srv(t, "dk1"), &probe.Snapshot{}, nil) // no Docker data: keep the state, don't resolve
+	message(t, "rc2")
+
+	if _, err := ValidateRule("default", map[string]any{"metric": "container", "process": "web;reboot"}); err == nil {
+		t.Fatal("a container name with shell characters must be rejected")
+	}
+	r, err := ValidateRule("default", map[string]any{"metric": "container", "process": "app-web-1"})
+	must(t, err)
+	eq(t, r.Label(Metrics.Get("container")), "Container app-web-1")
 }

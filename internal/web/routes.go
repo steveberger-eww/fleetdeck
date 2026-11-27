@@ -893,9 +893,13 @@ func (s *Server) serverRoutes() {
 		return probe.ContainerSeries(srv.ID, c.query("name"), c.query("range"))
 	})
 	onServer("GET /api/servers/{id}/containers/logs", func(c *ctx, srv *db.Server) (any, error) {
-		text, err := admin.ContainerLogs(c.r.Context(), srv, c.query("id"), c.query("lines"))
+		text, err := admin.ContainerLogs(c.r.Context(), srv, c.query("id"), c.query("lines"), c.query("since"))
 		return J{"text": text}, err
 	})
+	onServer("GET /api/servers/{id}/containers/inspect", func(c *ctx, srv *db.Server) (any, error) {
+		return admin.ContainerInspect(c.r.Context(), srv, c.query("id"), c.level() >= roleOperator) // env values can be secrets
+	})
+	onServer("GET /api/servers/{id}/containers/df", func(c *ctx, srv *db.Server) (any, error) { return admin.DockerDiskUse(c.r.Context(), srv) })
 	onServer("POST /api/servers/{id}/containers", func(c *ctx, srv *db.Server) (any, error) {
 		id := c.body.String("id")
 		out, err := admin.ContainerAction(detached(c), srv, id, c.body.String("action"))

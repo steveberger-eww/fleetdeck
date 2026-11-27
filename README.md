@@ -17,7 +17,7 @@ Monitoring, one-click maintenance and day-to-day administration in one place, al
 
 ## Features
 
-Fleetdeck combines the core ideas of three projects in a single binary:
+Fleetdeck combines the core ideas of three projects in one Go server:
 
 | Inspired by | In Fleetdeck |
 |---|---|
@@ -30,14 +30,17 @@ Fleetdeck combines the core ideas of three projects in a single binary:
 
 ### Build from source
 
-You need Go 1.26 or newer and a PostgreSQL database. The result is a single binary with the UI embedded.
+You need Go 1.26 or newer, Node 22 or newer (for the UI) and a PostgreSQL database. The UI is a separate build that the server reads from disk (`ui/dist`, or `FLEETDECK_UI_DIR`); it is not compiled into the binary.
 
 ```sh
 docker compose up -d   # local Postgres from compose.yaml
 export DATABASE_URL='postgres://fleetdeck:fleetdeck@localhost:5432/fleetdeck?sslmode=disable'
+npm --prefix ui ci && npm --prefix ui run build
 go build -o fleetdeck .
 ./fleetdeck            # http://127.0.0.1:8080
 ```
+
+Working on the UI: keep `./fleetdeck` running and start `npm --prefix ui run dev`. Vite serves the UI with hot reload on http://localhost:5173 and forwards `/api` (including the terminal websocket) to the Go server (`FLEETDECK_DEV_BACKEND`, default `http://127.0.0.1:8080`).
 
 Run the tests with `go test ./...`. Each package works in its own throwaway schema of the compose database (or of `FLEETDECK_TEST_DATABASE_URL`).
 
@@ -68,6 +71,7 @@ On first start, the console prints a **setup token**. Open the page, enter the t
 | `HOST` / `PORT` | `127.0.0.1` / `8080` | Listen address |
 | `DATABASE_URL` | – | PostgreSQL connection URL (required) |
 | `DATA_DIR` | `./data` | `secret.key`, Git checkouts and temporary files |
+| `FLEETDECK_UI_DIR` | `./ui/dist` | The built UI (`npm run build` in `ui/`). The Docker image sets it to `/usr/share/fleetdeck/ui`. |
 | `FLEETDECK_SECRET` | – | Master key for encrypting SSH keys and tokens. Without it, a random key is written to `DATA_DIR/secret.key`. |
 | `FLEETDECK_TRUST_PROXY` | – | `1` trusts `X-Forwarded-*` headers (client IP, HTTPS detection for secure cookies) |
 | `FLEETDECK_PUBLIC_URL` | – | Fleetdeck's address, e.g. `https://fleetdeck.example.com`, for single sign-on redirects and invite links. Can also be set under **Settings → Instance → General**. Without it, the address the browser used counts (fine for `localhost`). |
@@ -171,7 +175,7 @@ Anyone with access to Fleetdeck has root on every server in it, so the defaults 
 | `sec` | Encryption, password hashing and TOTP |
 | `db` | PostgreSQL storage and the one-time SQLite import |
 
-The UI in `public/` uses Preact and htm without a build step. Libraries and fonts are vendored and embedded into the binary.
+The UI in `ui/` is a Vue 3 app built with Vite (Vue Router, CodeMirror for scripts, xterm.js for the terminal, hand-written SVG charts, system fonts). `npm run build` writes `ui/dist`, which the server serves as static files next to the JSON API.
 
 ## Out of scope
 

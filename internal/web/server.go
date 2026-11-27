@@ -33,7 +33,7 @@ const SessionTTL = 7 * 24 * time.Hour
 const sessionMS = int64(SessionTTL / time.Millisecond)
 
 var mimeTypes = map[string]string{".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
-	".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".png": "image/png", ".woff2": "font/woff2"}
+	".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".png": "image/png", ".woff2": "font/woff2", ".json": "application/json", ".webp": "image/webp"}
 
 // Server is the HTTP handler.
 type Server struct {
@@ -335,7 +335,11 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) bool {
 		ct = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Cache-Control", "no-cache")
+	if strings.HasPrefix(name, "assets/") { // Vite's content-hashed build output
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	w.WriteHeader(200)
 	_, _ = w.Write(data)
 	return true

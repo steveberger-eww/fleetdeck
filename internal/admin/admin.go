@@ -81,6 +81,11 @@ systemctl list-unit-files --type=service --no-legend --no-pager`, shOpts{})
 	if err != nil {
 		return nil, err
 	}
+	return ParseServices(out), nil
+}
+
+// ParseServices reads list-units, then "---", then list-unit-files.
+func ParseServices(out string) []Service {
 	parts := strings.Split(out, "\n---\n")
 	files := ""
 	if len(parts) > 1 {
@@ -98,9 +103,15 @@ systemctl list-unit-files --type=service --no-legend --no-pager`, shOpts{})
 	}
 	list := map[string]Service{}
 	for _, l := range strings.Split(parts[0], "\n") {
-		if m := unitLine.FindStringSubmatch(strings.TrimSpace(l)); m != nil && strings.HasSuffix(m[1], ".service") {
-			list[m[1]] = Service{m[1], m[2], m[3], m[4], m[5], enabled[m[1]]}
+		m := unitLine.FindStringSubmatch(strings.TrimSpace(l))
+		if m == nil || !strings.HasSuffix(m[1], ".service") {
+			continue
 		}
+		// A removed unit lingers as "not-found" while it's failed or another unit references it; only a still-running one is real.
+		if m[2] == "not-found" && m[3] != "active" {
+			continue
+		}
+		list[m[1]] = Service{m[1], m[2], m[3], m[4], m[5], enabled[m[1]]}
 	}
 	// Installed but never loaded units only show up in list-unit-files.
 	for _, unit := range fileOrder {
@@ -113,7 +124,7 @@ systemctl list-unit-files --type=service --no-legend --no-pager`, shOpts{})
 		res = append(res, v)
 	}
 	slices.SortFunc(res, func(a, b Service) int { return compareNames(a.Unit, b.Unit) })
-	return res, nil
+	return res
 }
 
 var serviceActions = []string{"start", "stop", "restart", "reload", "enable", "disable"}
@@ -1039,6 +1050,10 @@ type Container struct {
 	MemPct  string `json:"memPct"`
 	Net     string `json:"net"`
 	Block   string `json:"block"`
+	// Docker Compose labels; Project "" = not part of a stack. Files: the compose files, comma separated.
+	Project string `json:"project"`
+	Dir     string `json:"dir"`
+	Files   string `json:"files"`
 }
 
 type ContainerList struct {
@@ -1049,6 +1064,24 @@ type ContainerList struct {
 type dockerLine struct {
 	ID, Names, Image, State, Status, Ports, CreatedAt string
 	CPUPerc, MemUsage, MemPerc, NetIO, BlockIO        string
+	Labels                                            string
+}
+
+var labelKey = regexp.MustCompile(`^[A-Za-z0-9][\w.-]*=`)
+
+// labels splits docker ps' "k=v,k=v". Values may contain commas (config_files, depends_on): a piece that
+// doesn't start with a key continues the previous value.
+func labels(s string) map[string]string {
+	out, last := map[string]string{}, ""
+	for _, p := range strings.Split(s, ",") {
+		if labelKey.MatchString(p) {
+			k, v, _ := strings.Cut(p, "=")
+			out[k], last = v, k
+		} else if last != "" {
+			out[last] += "," + p
+		}
+	}
+	return out
 }
 
 func jsonLines(s string) []dockerLine {
@@ -1087,7 +1120,9 @@ func parseContainers(out string) ContainerList {
 		} else if i := slices.IndexFunc(stats, func(x dockerLine) bool { return strings.HasPrefix(c.ID, x.ID) }); i >= 0 {
 			st = stats[i]
 		}
-		res = append(res, Container{c.ID, c.Names, c.Image, c.State, c.Status, c.Ports, c.CreatedAt, st.CPUPerc, st.MemUsage, st.MemPerc, st.NetIO, st.BlockIO})
+		l := labels(c.Labels)
+		res = append(res, Container{c.ID, c.Names, c.Image, c.State, c.Status, c.Ports, c.CreatedAt, st.CPUPerc, st.MemUsage, st.MemPerc, st.NetIO, st.BlockIO,
+			l["com.docker.compose.project"], l["com.docker.compose.project.working_dir"], l["com.docker.compose.project.config_files"]})
 	}
 	return ContainerList{true, res}
 }
@@ -1104,10 +1139,160 @@ func ContainerAction(ctx context.Context, s *db.Server, id, action string) (stri
 	return sh(ctx, s, fmt.Sprintf("docker %s -- %s 2>&1", action, q(id)), shOpts{})
 }
 
-// ContainerLogs returns the last lines (raw query value; "" = 300, clamped to 10..5000).
-func ContainerLogs(ctx context.Context, s *db.Server, id, lines string) (string, error) {
+var sinceRe = regexp.MustCompile(`^[1-9][0-9]{0,3}[smh]$`)
+
+// ContainerLogs returns the last lines (raw query value; "" = 300, clamped to 10..5000), only those of the last since (e.g. 15m, 24h) when given.
+func ContainerLogs(ctx context.Context, s *db.Server, id, lines, since string) (string, error) {
 	if !container.MatchString(id) {
 		return "", httperr.Bad("invalid container id")
 	}
-	return sh(ctx, s, fmt.Sprintf("docker logs --timestamps --tail %s -- %s 2>&1", clampLines(lines), q(id)), shOpts{allowFail: true, maxOutput: 4_000_000})
+	if since != "" && !sinceRe.MatchString(since) {
+		return "", httperr.Bad("invalid since")
+	}
+	opt := ""
+	if since != "" {
+		opt = " --since " + since
+	}
+	return sh(ctx, s, fmt.Sprintf("docker logs --timestamps --tail %s%s -- %s 2>&1", clampLines(lines), opt, q(id)), shOpts{allowFail: true, maxOutput: 4_000_000})
+}
+
+// DiskUse is one line of docker system df.
+type DiskUse struct {
+	Type        string  `json:"type"`
+	Count       string  `json:"count"`
+	Active      string  `json:"active"`
+	Size        string  `json:"size"`
+	Reclaimable string  `json:"reclaimable"`
+	Bytes       float64 `json:"bytes"` // Reclaimable in bytes
+}
+
+var sizeRe = regexp.MustCompile(`^([\d.]+)\s*([kKMGTP]?)B`)
+
+// sizeBytes reads docker's decimal sizes ("18.2GB (67%)", "0B").
+func sizeBytes(v string) float64 {
+	m := sizeRe.FindStringSubmatch(v)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.ParseFloat(m[1], 64)
+	return n * map[string]float64{"": 1, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15}[strings.ToUpper(m[2])]
+}
+
+// DockerDiskUse is docker system df. Slow on big hosts (it sizes volumes), so it's loaded on demand, not polled.
+func DockerDiskUse(ctx context.Context, s *db.Server) ([]DiskUse, error) {
+	out, err := sh(ctx, s, `docker system df --format '{{json .}}'`, shOpts{timeout: 60 * time.Second})
+	if err != nil {
+		return nil, err
+	}
+	res := []DiskUse{}
+	for _, l := range strings.Split(out, "\n") {
+		var d struct{ Type, TotalCount, Active, Size, Reclaimable string }
+		if json.Unmarshal([]byte(l), &d) == nil && d.Type != "" {
+			res = append(res, DiskUse{d.Type, d.TotalCount, d.Active, d.Size, d.Reclaimable, sizeBytes(d.Reclaimable)})
+		}
+	}
+	return res, nil
+}
+
+// Inspect is the part of docker inspect the Containers tab shows.
+type Inspect struct {
+	Created      string   `json:"created"`
+	StartedAt    string   `json:"startedAt"`
+	ExitCode     int      `json:"exitCode"`
+	OOMKilled    bool     `json:"oomKilled"`
+	RestartCount int      `json:"restartCount"`
+	Restart      string   `json:"restart"` // policy, e.g. "unless-stopped", "on-failure:5"
+	Image        string   `json:"image"`   // the image id (sha256:…)
+	Cmd          string   `json:"cmd"`
+	User         string   `json:"user"`
+	Mounts       []Mount  `json:"mounts"`
+	Networks     []CtrNet `json:"networks"`
+	Env          []EnvVar `json:"env"`
+	EnvHidden    bool     `json:"envHidden"` // values withheld: the viewer's role can't see them
+}
+
+type Mount struct {
+	Type   string `json:"type"`
+	Source string `json:"source"` // host path, or the volume name
+	Target string `json:"target"`
+	RW     bool   `json:"rw"`
+}
+
+type CtrNet struct {
+	Name string `json:"name"`
+	IP   string `json:"ip"`
+}
+
+type EnvVar struct {
+	Name  string  `json:"name"`
+	Value *string `json:"value"`
+}
+
+// ContainerInspect reads one container's configuration. Environment values often hold secrets: withValues
+// false returns the names only.
+func ContainerInspect(ctx context.Context, s *db.Server, id string, withValues bool) (*Inspect, error) {
+	if !container.MatchString(id) {
+		return nil, httperr.Bad("invalid container id")
+	}
+	out, err := sh(ctx, s, "docker inspect -- "+q(id), shOpts{})
+	if err != nil {
+		return nil, err
+	}
+	return parseInspect(out, withValues)
+}
+
+func parseInspect(out string, withValues bool) (*Inspect, error) {
+	var raw []struct {
+		Created, Image string
+		RestartCount   int
+		State          struct {
+			StartedAt string
+			ExitCode  int
+			OOMKilled bool
+		}
+		Config struct {
+			Env, Cmd, Entrypoint []string
+			User                 string
+		}
+		HostConfig struct {
+			RestartPolicy struct {
+				Name              string
+				MaximumRetryCount int
+			}
+		}
+		Mounts []struct {
+			Type, Name, Source, Destination string
+			RW                              bool
+		}
+		NetworkSettings struct {
+			Networks map[string]struct{ IPAddress string }
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil || len(raw) == 0 {
+		return nil, httperr.Bad("docker inspect gave nothing usable")
+	}
+	r := raw[0]
+	in := &Inspect{Created: r.Created, StartedAt: r.State.StartedAt, ExitCode: r.State.ExitCode, OOMKilled: r.State.OOMKilled,
+		RestartCount: r.RestartCount, Restart: cmp.Or(r.HostConfig.RestartPolicy.Name, "no"), Image: r.Image,
+		Cmd: strings.Join(append(r.Config.Entrypoint, r.Config.Cmd...), " "), User: r.Config.User,
+		Mounts: []Mount{}, Networks: []CtrNet{}, Env: []EnvVar{}, EnvHidden: !withValues}
+	if n := r.HostConfig.RestartPolicy.MaximumRetryCount; n > 0 {
+		in.Restart += ":" + strconv.Itoa(n)
+	}
+	for _, m := range r.Mounts {
+		in.Mounts = append(in.Mounts, Mount{m.Type, cmp.Or(m.Name, m.Source), m.Destination, m.RW})
+	}
+	for name, n := range r.NetworkSettings.Networks {
+		in.Networks = append(in.Networks, CtrNet{name, n.IPAddress})
+	}
+	slices.SortFunc(in.Networks, func(a, b CtrNet) int { return cmp.Compare(a.Name, b.Name) })
+	for _, e := range r.Config.Env {
+		k, v, _ := strings.Cut(e, "=")
+		ev := EnvVar{Name: k}
+		if withValues {
+			ev.Value = &v
+		}
+		in.Env = append(in.Env, ev)
+	}
+	return in, nil
 }

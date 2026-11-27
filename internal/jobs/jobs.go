@@ -567,6 +567,16 @@ var (
 	doneListeners []func(tenant string, id int64, name, status, actor string, runStatuses []string)
 )
 
+// AfterRun, when set, runs after each server's run and before the job counts as done. main re-probes the
+// server with it, so its updates, reboot flag and alerts are current when the job ends, not a minute later.
+var AfterRun func(*db.Server)
+
+func afterRun(probes *sync.WaitGroup, s *db.Server) {
+	if AfterRun != nil {
+		probes.Go(func() { defer guard("after run on " + s.Name); AfterRun(s) }) // parallel, so a one-at-a-time rollout isn't slowed down
+	}
+}
+
 // OnJobDone registers a listener called after every job finishes. runStatuses include the ansible pseudo-run.
 func OnJobDone(fn func(tenant string, id int64, name, status, actor string, runStatuses []string)) {
 	mu.Lock()
@@ -703,7 +713,7 @@ func startShellJob(sp Spec, servers []db.Server, merged Values, mask func(string
 			queue <- s
 		}
 		close(queue)
-		var wg sync.WaitGroup
+		var wg, probes sync.WaitGroup
 		for range min(parallel, len(servers)) {
 			wg.Go(func() {
 				for s := range queue {
@@ -711,10 +721,12 @@ func startShellJob(sp Spec, servers []db.Server, merged Values, mask func(string
 						defer guard(fmt.Sprintf("job #%d on %s", jobID, s.Name))
 						runOne(jobID, j, &s, prelude.String()+sp.Body, sp.AsRoot)
 					}()
+					afterRun(&probes, &s)
 				}
 			})
 		}
 		wg.Wait()
+		probes.Wait()
 	}()
 	return jobID, nil
 }
@@ -993,6 +1005,11 @@ func startAnsibleJob(sp Spec, servers []db.Server, plain map[string]string, mask
 			status = "cancelled"
 		}
 		j.set(jobID, Ansible, status, code)
+		var probes sync.WaitGroup
+		for i := range servers {
+			afterRun(&probes, &servers[i])
+		}
+		probes.Wait()
 	}()
 	return jobID, nil
 }

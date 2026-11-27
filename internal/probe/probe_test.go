@@ -82,7 +82,7 @@ func eq(t *testing.T, got, want any) {
 func TestScriptsVerbatim(t *testing.T) {
 	// sha256(PROBE + "|" + SMART) of lib/probe.js's strings.
 	h := sha256.Sum256([]byte(PROBE + "|" + SMART))
-	eq(t, hex.EncodeToString(h[:]), "eba050623fc917560522985bd278c6ec536544b8423210fbc64ea4abcac28f00")
+	eq(t, hex.EncodeToString(h[:]), "290527dd6e0b68067cf1b1c99558ad69e7e0745d8abd70764532516806290072")
 }
 
 func TestProbeParser(t *testing.T) {
@@ -223,6 +223,12 @@ func containerFixture() []string {
 	return []string{"docker=2 3", ps("web", "running", "Up 2 hours (healthy)"), ps("db", "running", "Up 1 hour (unhealthy)"), ps("job", "restarting", "Restarting (1) 3 seconds ago"),
 		`cst={"Name":"web","CPUPerc":"150.25%","MemUsage":"12.5MiB / 1.9GiB"}`, `cst={"Name":"db","CPUPerc":"0.00%","MemUsage":"1.5GB / 4GB"}`, "cst={broken",
 		"if=eth0 5000 7000", "if=docker0 300 400", "net=5000 7000"}
+}
+
+func TestContainerProject(t *testing.T) {
+	cs := Parse(`docker=1 1` + "\n" + `ctr={"Names":"app-web-1","State":"running","Labels":"com.docker.compose.depends_on=db:service_started:false,x:y,com.docker.compose.project.working_dir=/srv/app,com.docker.compose.project=app,com.docker.compose.service=web"}`).Containers
+	eq(t, cs[0].Project, "app")
+	eq(t, Parse(`docker=1 1`+"\n"+`ctr={"Names":"solo","State":"running","Labels":"maintainer=me"}`).Containers[0].Project, "")
 }
 
 func TestTraffic(t *testing.T) {

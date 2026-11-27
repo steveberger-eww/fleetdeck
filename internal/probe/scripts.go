@@ -57,7 +57,7 @@ r=0
 [ -f /var/run/reboot-required ] && r=1
 command -v needs-restarting >/dev/null 2>&1 && ! needs-restarting -r >/dev/null 2>&1 && r=1
 echo "reboot=$r"
-echo "failed=$(systemctl --failed --no-legend --plain 2>/dev/null | grep -c .)"
+echo "failed=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '$2 != "not-found"' | grep -c .)"
 echo "cockpit=$(systemctl is-active cockpit.socket 2>/dev/null)"
 if [ -n "$dk" ]; then
   echo "docker=$(docker ps -q | wc -l) $(docker ps -aq | wc -l)"

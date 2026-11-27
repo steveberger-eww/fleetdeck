@@ -38,6 +38,23 @@ func eq(t *testing.T, got, want any) {
 
 func i64(v int64) *int64 { return &v }
 
+func TestParseServicesSkipsRemoved(t *testing.T) {
+	got := ParseServices(strings.Join([]string{
+		"nginx.service loaded active running nginx",
+		"gone.service not-found failed failed gone.service",     // package removed while failed
+		"auditd.service not-found inactive dead auditd.service", // only referenced, never installed
+		"old.service not-found active running old.service",      // removed but still running
+		"---",
+		"nginx.service enabled enabled",
+		"idle.service disabled enabled",
+	}, "\n"))
+	var units []string
+	for _, s := range got {
+		units = append(units, s.Unit)
+	}
+	eq(t, units, []string{"idle.service", "nginx.service", "old.service"})
+}
+
 func TestParsersStaleAndTimers(t *testing.T) {
 	eq(t, ParseStale("nginx.service\ndbus.service\n\nbad name;\n"), []Stale{{"nginx.service", false}, {"dbus.service", true}})
 	ts := ParseTimers(strings.Join([]string{
@@ -157,4 +174,35 @@ func TestAuthorizedKeys(t *testing.T) {
 	if _, err := RevokeKey(ctx, &db.Server{}, "root", blob+"|d;e"); err == nil || err.Error() != "invalid key" {
 		t.Fatal(err)
 	}
+}
+
+func TestDockerParsers(t *testing.T) {
+	// Real docker ps output: depends_on and config_files values contain commas.
+	l := labels("com.docker.compose.depends_on=redis:service_healthy:false,cube:service_healthy:false,com.docker.compose.project.config_files=/srv/a/compose.yml,/srv/a/override.yml,com.docker.compose.project=app")
+	eq(t, l["com.docker.compose.depends_on"], "redis:service_healthy:false,cube:service_healthy:false")
+	eq(t, l["com.docker.compose.project.config_files"], "/srv/a/compose.yml,/srv/a/override.yml")
+	eq(t, l["com.docker.compose.project"], "app")
+
+	eq(t, sizeBytes("18.2GB (67%)"), 18.2e9)
+	eq(t, sizeBytes("2.446MB (92%)"), 2.446e6)
+	eq(t, sizeBytes("12kB"), 12e3)
+	eq(t, sizeBytes("0B"), 0.0)
+
+	in, err := parseInspect(`[{"Created":"2026-11-24T22:22:02Z","Image":"sha256:abc","RestartCount":3,
+		"State":{"StartedAt":"2026-11-26T10:00:00Z","ExitCode":0,"OOMKilled":false},
+		"Config":{"Env":["PGDATA=/var/lib/pg","POSTGRES_PASSWORD=s3cret=x"],"Cmd":["postgres"],"Entrypoint":["docker-entrypoint.sh"],"User":""},
+		"HostConfig":{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":5}},
+		"Mounts":[{"Type":"volume","Name":"app_pgdata","Source":"/var/lib/docker/volumes/app_pgdata/_data","Destination":"/var/lib/pg","RW":true}],
+		"NetworkSettings":{"Networks":{"app_default":{"IPAddress":"172.18.0.2"}}}}]`, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, in.Restart, "on-failure:5")
+	eq(t, in.Cmd, "docker-entrypoint.sh postgres")
+	eq(t, in.Mounts, []Mount{{"volume", "app_pgdata", "/var/lib/pg", true}})
+	eq(t, in.Networks, []CtrNet{{"app_default", "172.18.0.2"}})
+	eq(t, in.Env, []EnvVar{{"PGDATA", nil}, {"POSTGRES_PASSWORD", nil}}) // names only without the role
+	in, _ = parseInspect(`[{"Config":{"Env":["POSTGRES_PASSWORD=s3cret=x"]}}]`, true)
+	eq(t, *in.Env[0].Value, "s3cret=x")
+	eq(t, in.Restart, "no")
 }

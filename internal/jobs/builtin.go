@@ -91,6 +91,21 @@ fi`},
 		Body:   `du -xh --max-depth=2 -- "$PATH_TO_SCAN" 2>/dev/null | sort -rh | head -n 30`},
 	{ID: "docker-prune", Name: "Docker cleanup", Description: "Remove stopped containers, dangling images, unused networks and build cache.",
 		Body: "docker system prune -f && docker system df"},
+	// Compose labels name the project, its directory and files; the Containers tab fills them in.
+	{ID: "compose-update", Name: "Pull and recreate a Compose stack", Description: "docker compose pull, then up -d: containers whose image changed are recreated.",
+		Params: Params{{Name: "PROJECT", Label: "Compose project", Default: "", Required: true},
+			{Name: "DIR", Label: "Project directory", Default: "", Required: true},
+			{Name: "FILES", Label: "Compose files, comma separated (empty: the directory's default)", Default: "", Required: false}},
+		Body: `set -e
+cd -- "$DIR"
+if docker compose version >/dev/null 2>&1; then dc="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then dc=docker-compose
+else echo "Docker Compose is not installed"; exit 1; fi
+set -- -p "$PROJECT"
+IFS=,; for f in $FILES; do set -- "$@" -f "$f"; done; unset IFS
+$dc "$@" pull
+$dc "$@" up -d
+$dc "$@" ps`},
 	{ID: "authorize-key", Name: "Authorize SSH public key", Description: "Append a public key to a user's authorized_keys (e.g. for key rotation).",
 		Params: Params{{Name: "PUBLIC_KEY", Label: "Public key", Default: "", Required: true}, {Name: "TARGET_USER", Label: "User", Default: "root", Required: true}},
 		Body: `set -e
