@@ -77,14 +77,14 @@ Most teams end up running several tools: one to watch servers, one to run playbo
 | **Package updates** | ✅ fleet-wide | – | Through playbooks | ✅ one server | – |
 | **Services, journal, processes** | ✅ | – | – | ✅ | Logs with Loki |
 | **Web terminal** | ✅ | – | – | ✅ | – |
-| **Storage, networking, VMs** | – | – | – | ✅ | – |
+| **Storage, networking, VMs** | Planned | – | – | ✅ | – |
 | **Custom dashboards, other data sources** | – | – | – | – | ✅ |
 | **Separate organizations** | ✅ | Shared systems | Projects | – | ✅ |
 | **Single sign-on** | ✅ OIDC | ✅ OAuth/OIDC | ✅ OIDC, LDAP | PAM, Kerberos | ✅ |
 
 <sub>Based on each project's documentation as of November 2026. Corrections are welcome.</sub>
 
-**When something else fits better:** Grafana for custom dashboards, long-term metrics and data beyond servers. Semaphore for Terraform and large Ansible setups. Cockpit for storage, network and VM configuration on a single machine. Beszel for the lightest possible monitoring, or for Intel GPUs. Fleetdeck exports Prometheus metrics, so it also runs well next to Grafana.
+**When something else fits better:** Grafana for custom dashboards, long-term metrics and data beyond servers. Semaphore for Terraform and large Ansible setups. Cockpit for storage, network and VM configuration on a single machine (planned for Fleetdeck). Beszel for the lightest possible monitoring, or for Intel GPUs. Fleetdeck exports Prometheus metrics, so it also runs well next to Grafana.
 
 ## Getting started
 
@@ -277,5 +277,9 @@ The UI in `ui/` is a Vue 3 app built with Vite (Vue Router, CodeMirror for scrip
 ## Out of scope
 
 - **Terraform:** only shell scripts and Ansible playbooks run.
-- **Storage/LVM, network configuration, full firewall editing, VMs:** use Cockpit, which Fleetdeck links to (with one-click install).
+- **Full firewall editing:** use Cockpit, which Fleetdeck links to (with one-click install).
 - **Cancelling a job** stops its output, but a remote command without a terminal may keep running.
+
+## Planned
+
+- **Storage, networking and VMs:** disks, LVM and mounts, network configuration, and virtual machines. Until then, use Cockpit, which Fleetdeck links to (with one-click install).
