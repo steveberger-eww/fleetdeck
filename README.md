@@ -23,13 +23,13 @@ Monitoring, one-click maintenance and day-to-day administration in one place. Ev
 
 ## Quick start
 
-Fleetdeck and its own PostgreSQL, with nothing to configure:
+Fleetdeck and its own PostgreSQL with Docker, with nothing to configure:
 
 ```sh
-curl -fsSLo compose.yaml https://raw.githubusercontent.com/steveberger-eww/fleetdeck/main/deploy/compose.yaml && docker compose up -d --wait && docker compose logs fleetdeck
+curl -fsSL https://raw.githubusercontent.com/steveberger-eww/fleetdeck/main/deploy/install.sh | sh
 ```
 
-Open http://127.0.0.1:8080 and enter the setup token from the logs. [Getting started](#getting-started) covers the options.
+It prints where to open Fleetdeck and the setup token for the first account. [Getting started](#getting-started) covers the options.
 
 ## Features
 
@@ -93,12 +93,14 @@ Most teams end up running several tools: one to watch servers, one to run playbo
 One command starts Fleetdeck and its own PostgreSQL, with nothing to configure:
 
 ```sh
-curl -fsSLo compose.yaml https://raw.githubusercontent.com/steveberger-eww/fleetdeck/main/deploy/compose.yaml && docker compose up -d --wait && docker compose logs fleetdeck
+curl -fsSL https://raw.githubusercontent.com/steveberger-eww/fleetdeck/main/deploy/install.sh | sh
 ```
 
-The logs show a **setup token**. Open http://127.0.0.1:8080, enter the token, and create the first account (a super admin) and its organization.
+[The script](deploy/install.sh) puts `compose.yaml` in a `fleetdeck` folder (or `FLEETDECK_DIR`), starts both containers and waits until they're healthy. It then prints the address and the **setup token**: enter it to create the first account (a super admin) and its organization. If your user may not use Docker, it runs Docker through `sudo`. To update, run it again.
 
-Optional settings go in a `.env` file next to `compose.yaml`; [the file](deploy/compose.yaml) lists them. For example `FLEETDECK_PUBLIC_URL`, `FLEETDECK_TRUST_PROXY=1`, `FLEETDECK_BIND` (default `127.0.0.1:8080`), or `FLEETDECK_VERSION=0.4.0-beta` to pin a release. To update, run `docker compose pull && docker compose up -d`.
+Without the script: download [`deploy/compose.yaml`](deploy/compose.yaml), run `docker compose up -d --wait`, and find the token in `docker compose logs fleetdeck`.
+
+Optional settings go in a `.env` file next to `compose.yaml`; [the file](deploy/compose.yaml) lists them. For example `FLEETDECK_PUBLIC_URL`, `FLEETDECK_TRUST_PROXY=1`, `FLEETDECK_BIND` (default `127.0.0.1:8080`), or `FLEETDECK_VERSION=0.4.1-beta` to pin a release.
 
 > [!IMPORTANT]
 > Fleetdeck listens on localhost by default. To reach it from elsewhere, put it behind a reverse proxy with HTTPS (Caddy, Traefik, nginx) and set `FLEETDECK_TRUST_PROXY=1`, or keep it on a VPN such as Tailscale or WireGuard.

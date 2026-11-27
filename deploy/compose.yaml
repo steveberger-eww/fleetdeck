@@ -1,12 +1,12 @@
 # Fleetdeck with its own PostgreSQL. Nothing to configure:
-#   curl -fsSLo compose.yaml https://raw.githubusercontent.com/steveberger-eww/fleetdeck/main/deploy/compose.yaml
-#   docker compose up -d --wait && docker compose logs fleetdeck   # shows the setup token
+#   curl -fsSL https://raw.githubusercontent.com/steveberger-eww/fleetdeck/main/deploy/install.sh | sh
+# or by hand: docker compose up -d --wait && docker compose logs fleetdeck   # shows the setup token
 #
 # Optional settings go in a .env file next to this one (or the shell environment):
 #   FLEETDECK_BIND=127.0.0.1:8080        where Fleetdeck listens on the host
 #   FLEETDECK_PUBLIC_URL=https://…       for single sign-on redirects and invite links
 #   FLEETDECK_TRUST_PROXY=1              behind a reverse proxy with HTTPS
-#   FLEETDECK_VERSION=0.4.0-beta         pin a release instead of following main
+#   FLEETDECK_VERSION=0.4.1-beta         pin a release instead of following main
 # Back up both volumes: fleetdeck-data holds secret.key, which decrypts the keys stored in the database.
 services:
   fleetdeck:
