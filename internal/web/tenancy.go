@@ -33,10 +33,11 @@ type user struct {
 }
 
 type tenant struct {
-	ID        string `db:"id" json:"id"`
-	Name      string `db:"name" json:"name"`
-	Slug      string `db:"slug" json:"slug"`
-	CreatedAt int64  `db:"created_at" json:"created_at"`
+	ID         string  `db:"id" json:"id"`
+	Name       string  `db:"name" json:"name"`
+	Slug       string  `db:"slug" json:"slug"`
+	CreatedAt  int64   `db:"created_at" json:"created_at"`
+	PersonalOf *string `db:"personal_of" json:"-"`
 }
 
 func getUser(id string) (*user, error) { return db.Get[user](`SELECT * FROM users WHERE id = ?`, id) }
@@ -67,11 +68,17 @@ func nullIfEmpty(s string) any {
 // ponytail: everything is allowed; check the organization's plan here once there are licenses.
 func licensed(tenantID, feature string) bool { return true }
 
+// personal tells whether t is someone's personal organization (true on errors: the side that refuses).
+func personal(t string) bool {
+	p, err := db.Get[int](`SELECT 1 FROM tenants WHERE id = ? AND personal_of IS NOT NULL`, t)
+	return err != nil || p != nil
+}
+
 // defaultTenant is where u lands after signing in: their last organization, else their first. Super admins
-// without a membership land in the oldest organization.
+// without a membership land in the oldest organization (never someone's personal one).
 func defaultTenant(u *user) string {
 	t, err := db.Get[string](`SELECT t.id FROM tenants t LEFT JOIN memberships m ON m.tenant_id = t.id AND m.user_id = ?
-    WHERE m.user_id IS NOT NULL OR ? ORDER BY (t.id = ?) DESC, m.created_at NULLS LAST, t.created_at LIMIT 1`,
+    WHERE m.user_id IS NOT NULL OR (? AND t.personal_of IS NULL) ORDER BY (t.id = ?) DESC, m.created_at NULLS LAST, t.created_at LIMIT 1`,
 		u.ID, u.SuperAdmin != 0, db.Str(u.LastTenant))
 	if err != nil || t == nil {
 		return ""
@@ -79,7 +86,8 @@ func defaultTenant(u *user) string {
 	return *t
 }
 
-// roleIn is the user's role in an organization; "admin" for super admins anywhere, "" for none.
+// roleIn is the user's role in an organization; "admin" for super admins anywhere but in other people's personal
+// organizations, "" for none.
 func (c *ctx) roleIn(t string) (string, error) {
 	if t == "" {
 		return "", nil
@@ -89,7 +97,7 @@ func (c *ctx) roleIn(t string) (string, error) {
 		return db.Str(r), err
 	}
 	if c.super {
-		if ok, err := db.Get[int](`SELECT 1 FROM tenants WHERE id = ?`, t); err != nil || ok != nil {
+		if ok, err := db.Get[int](`SELECT 1 FROM tenants WHERE id = ? AND personal_of IS NULL`, t); err != nil || ok != nil {
 			return "admin", err
 		}
 	}
@@ -328,10 +336,11 @@ func (c *ctx) adminsLeft(t, except string) (int, error) {
 var dummyHash = sync.OnceValue(func() string { return sec.HashPassword(sec.Token()) })
 
 type tenantRole struct {
-	ID   string `db:"id" json:"id"`
-	Name string `db:"name" json:"name"`
-	Slug string `db:"slug" json:"slug"`
-	Role string `db:"role" json:"role"`
+	ID       string `db:"id" json:"id"`
+	Name     string `db:"name" json:"name"`
+	Slug     string `db:"slug" json:"slug"`
+	Role     string `db:"role" json:"role"`
+	Personal bool   `db:"personal" json:"personal"`
 }
 
 func (s *Server) tenancyRoutes() {
@@ -482,12 +491,14 @@ func (s *Server) tenancyRoutes() {
 		var err error
 		switch {
 		case c.sess.Locked != 0:
-			list, err = db.Select[tenantRole](`SELECT t.id, t.name, t.slug, m.role FROM tenants t JOIN memberships m ON m.tenant_id = t.id WHERE m.user_id = ? AND t.id = ?`, c.user.ID, c.tenant)
+			list, err = db.Select[tenantRole](`SELECT t.id, t.name, t.slug, m.role, t.personal_of IS NOT NULL AS personal FROM tenants t
+        JOIN memberships m ON m.tenant_id = t.id WHERE m.user_id = ? AND t.id = ?`, c.user.ID, c.tenant)
 		case c.super:
-			list, err = db.Select[tenantRole](`SELECT t.id, t.name, t.slug, COALESCE(m.role, 'admin') AS role FROM tenants t
-        LEFT JOIN memberships m ON m.tenant_id = t.id AND m.user_id = ? ORDER BY lower(t.name)`, c.user.ID)
+			list, err = db.Select[tenantRole](`SELECT t.id, t.name, t.slug, COALESCE(m.role, 'admin') AS role, t.personal_of IS NOT NULL AS personal FROM tenants t
+        LEFT JOIN memberships m ON m.tenant_id = t.id AND m.user_id = ? WHERE m.user_id IS NOT NULL OR t.personal_of IS NULL ORDER BY lower(t.name)`, c.user.ID)
 		default:
-			list, err = db.Select[tenantRole](`SELECT t.id, t.name, t.slug, m.role FROM tenants t JOIN memberships m ON m.tenant_id = t.id WHERE m.user_id = ? ORDER BY lower(t.name)`, c.user.ID)
+			list, err = db.Select[tenantRole](`SELECT t.id, t.name, t.slug, m.role, t.personal_of IS NOT NULL AS personal FROM tenants t
+        JOIN memberships m ON m.tenant_id = t.id WHERE m.user_id = ? ORDER BY lower(t.name)`, c.user.ID)
 		}
 		if err != nil {
 			return nil, err
@@ -520,6 +531,45 @@ func (s *Server) tenancyRoutes() {
 		if m, err := db.Get[int](`SELECT 1 FROM memberships WHERE user_id = ? AND tenant_id = ?`, c.user.ID, id); err == nil && m == nil {
 			db.Event("security", "Super admin "+c.user.Email+" entered the organization", db.EventOpts{Level: "warn", Actor: c.user.Email, IP: c.ip, TenantID: id})
 		}
+		return okResp, nil
+	}, account)
+
+	// A personal organization: the user is its admin and nobody else gets in. One per person.
+	s.route("POST /api/me/personal", func(c *ctx) (any, error) {
+		if err := c.unlocked(); err != nil {
+			return nil, err
+		}
+		if has, err := db.Get[int](`SELECT 1 FROM tenants WHERE personal_of = ?`, c.user.ID); err != nil || has != nil {
+			return nil, cmpErr(err, httperr.New(409, "You already have a personal organization"))
+		}
+		name := jsSlice(cmp.Or(c.user.Name, c.user.Email), 85) + " (personal)"
+		slug, err := slugFor("", name, "")
+		if err != nil {
+			return nil, err
+		}
+		id := db.NewID()
+		if err := db.Tx(func(tx db.Txn) error {
+			for _, q := range []struct {
+				sql  string
+				args []any
+			}{
+				{`INSERT INTO tenants (id, name, slug, created_at, personal_of) VALUES (?, ?, ?, ?, ?)`, []any{id, name, slug, db.Now(), c.user.ID}},
+				{`INSERT INTO memberships (user_id, tenant_id, role, created_at) VALUES (?, ?, 'admin', ?)`, []any{c.user.ID, id, db.Now()}},
+				{`UPDATE sessions SET tenant_id = ? WHERE hash = ?`, []any{id, c.sess.Hash}},
+				{`UPDATE users SET last_tenant = ? WHERE id = ?`, []any{id, c.user.ID}},
+			} {
+				if _, err := tx.Exec(q.sql, q.args...); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		if err := alerts.Seed(id); err != nil {
+			return nil, err
+		}
+		db.Event("audit", "Created a personal organization", db.EventOpts{Actor: c.user.Email, IP: c.ip, TenantID: id})
 		return okResp, nil
 	}, account)
 
@@ -559,6 +609,9 @@ func (s *Server) tenancyRoutes() {
 	}, admins)
 
 	s.route("POST /api/members/invites", func(c *ctx) (any, error) {
+		if personal(c.tenant) {
+			return nil, httperr.New(409, "A personal organization is yours alone. To work with others, use an organization.")
+		}
 		email, err := validEmail(c.body.str("email"))
 		if err != nil {
 			return nil, err
@@ -899,6 +952,7 @@ func (s *Server) tenancyRoutes() {
 	// ---- the instance (super admins) ----
 	s.route("GET /api/instance", func(c *ctx) (any, error) {
 		tenants, err := db.Rows(`SELECT t.id, t.name, t.slug, t.created_at,
+        COALESCE((SELECT u.email FROM users u WHERE u.id = t.personal_of), '') AS personal_of,
         (SELECT COUNT(*) FROM servers s WHERE s.tenant_id = t.id) AS servers,
         (SELECT COUNT(*) FROM memberships m WHERE m.tenant_id = t.id) AS members
       FROM tenants t ORDER BY lower(t.name)`)
@@ -1002,11 +1056,15 @@ func (s *Server) tenancyRoutes() {
 		if err != nil || t == nil {
 			return nil, cmpErr(err, notFound("Organization"))
 		}
-		if n, err := db.Get[int](`SELECT COUNT(*) FROM servers WHERE tenant_id = ?`, t.ID); err != nil || *n > 0 {
-			return nil, cmpErr(err, httperr.New(409, fmt.Sprintf("%s still has %d servers. Remove them first.", t.Name, *n)))
-		}
-		if n, err := db.Get[int](`SELECT COUNT(*) FROM tenants`); err != nil || *n <= 1 {
-			return nil, cmpErr(err, httperr.New(409, "This is the last organization"))
+		// A personal organization goes with its servers: super admins can't open it to remove them.
+		// ponytail: their metrics rows have no foreign key and age out with the retention instead.
+		if t.PersonalOf == nil {
+			if n, err := db.Get[int](`SELECT COUNT(*) FROM servers WHERE tenant_id = ?`, t.ID); err != nil || *n > 0 {
+				return nil, cmpErr(err, httperr.New(409, fmt.Sprintf("%s still has %d servers. Remove them first.", t.Name, *n)))
+			}
+			if n, err := db.Get[int](`SELECT COUNT(*) FROM tenants WHERE personal_of IS NULL`); err != nil || *n <= 1 {
+				return nil, cmpErr(err, httperr.New(409, "This is the last organization"))
+			}
 		}
 		if err := exec(`DELETE FROM tenants WHERE id = ?`, t.ID); err != nil { // everything it owns goes with it
 			return nil, err
@@ -1049,8 +1107,8 @@ func (s *Server) tenancyRoutes() {
 		if u.ID == c.user.ID {
 			return nil, httperr.Bad("You can't delete your own account")
 		}
-		// Organizations would be left without anyone to run them.
-		orphan, err := db.Get[string](`SELECT t.name FROM memberships m JOIN tenants t ON t.id = m.tenant_id WHERE m.user_id = ? AND m.role = 'admin'
+		// Organizations would be left without anyone to run them. Their personal one is deleted with them.
+		orphan, err := db.Get[string](`SELECT t.name FROM memberships m JOIN tenants t ON t.id = m.tenant_id WHERE m.user_id = ? AND m.role = 'admin' AND t.personal_of IS NULL
       AND NOT EXISTS (SELECT 1 FROM memberships o WHERE o.tenant_id = m.tenant_id AND o.role = 'admin' AND o.user_id != m.user_id) LIMIT 1`, u.ID)
 		if err != nil || orphan != nil {
 			return nil, cmpErr(err, httperr.New(409, fmt.Sprintf("%s is the only admin of %s. Make someone else admin first.", u.Email, db.Str(orphan))))

@@ -5,7 +5,7 @@ import { useRouter } from 'vue-router';
 import { Btn, Loading, ErrorNote, ServerForm, Copy, Callout } from '@/components';
 import { api } from '@/lib/api.js';
 import { useLoad } from '@/lib/use.js';
-import { can, toast, confirmBox, refreshServers } from '@/lib/store.js';
+import { me, can, toast, confirmBox, refreshServers } from '@/lib/store.js';
 import { muteFor } from '@/lib/actions.js';
 import { serverBody, PRIV_TEXT } from '@/lib/servers.js';
 
@@ -103,7 +103,7 @@ const saveAccess = async () => { await api(`/api/servers/${id}/members`, { metho
         </div>
       </section>
 
-      <section class="panel">
+      <section v-if="!me.tenant.personal" class="panel">
         <div class="panel-h"><h2>Access</h2></div>
         <div class="panel-b stack sm">
           <p class="ink2 small">Admins always see every server. Pick who else sees {{ s.name }}; what they can do depends on their role.</p>

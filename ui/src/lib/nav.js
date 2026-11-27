@@ -1,5 +1,5 @@
 // Navigation: one source for the sidebar, the command palette, breadcrumbs and role guards.
-import { can, isSuper } from './store.js';
+import { can, isSuper, me } from './store.js';
 
 // [group label | null, [[label, path, icon, lowest role that may open it]]]
 export const NAV = [
@@ -22,6 +22,9 @@ export const SETTINGS_SECTIONS = [
 ];
 export const SETTINGS_GROUPS = [['account', 'Your account'], ['org', 'Organization'], ['instance', 'Instance']];
 export const settingsVisible = (g) => g === 'account' || (g === 'org' ? can('admin') : isSuper());
+// A personal organization has nobody to invite and no single sign-on of its own.
+const PERSONAL_HIDES = ['org/people', 'org/sso'];
+export const settingsSections = () => SETTINGS_SECTIONS.filter(([p, , g]) => settingsVisible(g) && !(me.value?.tenant?.personal && PERSONAL_HIDES.includes(p)));
 // For the palette and breadcrumbs: [label, path, group label] of every section you can open.
-export const settingsPages = () => SETTINGS_SECTIONS.filter(([, , g]) => settingsVisible(g))
+export const settingsPages = () => settingsSections()
   .map(([p, l, g]) => [l, `/settings${p ? `/${p}` : ''}`, SETTINGS_GROUPS.find(([k]) => k === g)[1]]);

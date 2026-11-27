@@ -2,7 +2,7 @@
 // Settings: a sub-navigation grouped by who a setting affects, one section per URL (/settings/<sub>).
 import { computed } from 'vue';
 import { useRouter } from 'vue-router';
-import { SETTINGS_SECTIONS, SETTINGS_GROUPS, settingsVisible } from '@/lib/nav.js';
+import { SETTINGS_GROUPS, settingsSections } from '@/lib/nav.js';
 import AccountSection from './AccountSection.vue';
 import Preferences from './Preferences.vue';
 import OrgGeneral from './OrgGeneral.vue';
@@ -19,7 +19,7 @@ const PAGES = {
   instance: [InstanceSection, { part: 'general' }], 'instance/orgs': [InstanceSection, { part: 'orgs' }], 'instance/accounts': [InstanceSection, { part: 'accounts' }],
   sso: [SsoSection],
 };
-const mine = computed(() => SETTINGS_SECTIONS.filter(([, , g]) => settingsVisible(g)));
+const mine = computed(settingsSections);
 // /settings/sso is also where anyone connects their own account; without instance rights it belongs to "Sign-in & security".
 const cur = computed(() => (mine.value.some(([p]) => p === props.sub) ? props.sub : props.sub === 'sso' ? 'security' : ''));
 const page = computed(() => (props.sub === 'sso' ? 'sso' : cur.value));

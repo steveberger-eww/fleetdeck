@@ -17,6 +17,12 @@ export async function switchOrg(id) {
   location.hash = '#/';
   location.reload();
 }
+// A personal organization: only its creator sees it. Creating one switches to it.
+export async function createPersonal() {
+  await api('/api/me/personal', { method: 'POST' });
+  location.hash = '#/';
+  location.reload();
+}
 export async function signOut() {
   await api('/api/auth/logout', { method: 'POST' });
   location.hash = '';
