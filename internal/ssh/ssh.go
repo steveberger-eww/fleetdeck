@@ -63,12 +63,13 @@ type Result struct {
 var Notify = func(tenant, title, message, level string) {}
 
 const (
-	idleTimeout      = 5 * time.Minute
-	maxChannels      = 6 // OpenSSH's default MaxSessions is 10
-	handshakeTimeout = 15 * time.Second
-	keepaliveEvery   = 30 * time.Second
-	keepaliveMax     = 3
+	idleTimeout    = 5 * time.Minute
+	maxChannels    = 6 // OpenSSH's default MaxSessions is 10
+	keepaliveEvery = 30 * time.Second
+	keepaliveMax   = 3
 )
+
+var handshakeTimeout = 15 * time.Second // var so tests can shorten it
 
 var wrap = map[Mode]string{
 	ModeUser: "sh -s",
@@ -309,6 +310,38 @@ func Explain(err error, s *db.Server) error {
 	return fmt.Errorf("%s [%w]", hint, err)
 }
 
+var tailscaleURL = regexp.MustCompile(`https://login\.tailscale\.com/\S+`)
+
+// stalled explains a handshake that timed out although the server answered: the login hung, not the network.
+// Tailscale SSH in "check" mode does this: it holds the login until someone approves it in a browser.
+func stalled(err error, s *db.Server, banner string, answered bool) error {
+	var ne net.Error
+	if !answered || !errors.As(err, &ne) || !ne.Timeout() {
+		return nil
+	}
+	at := fmt.Sprintf("%s:%d", s.Host, s.Port)
+	hint := fmt.Sprintf("%s answered, but the SSH login didn't finish within %s.", at, handshakeTimeout)
+	if strings.Contains(banner, "Tailscale SSH requires an additional check") {
+		hint = fmt.Sprintf(`Tailscale SSH on %s is waiting for browser approval (its tailnet policy rule uses "check"). Approve it at %s, or set the rule's action to "accept" so Fleetdeck can log in unattended.`,
+			at, tailscaleURL.FindString(banner))
+	}
+	return fmt.Errorf("%s [%w]", hint, err)
+}
+
+// readConn records whether the server sent anything, to tell a silent host from a hung login.
+type readConn struct {
+	net.Conn
+	got atomic.Bool
+}
+
+func (c *readConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.got.Store(true)
+	}
+	return n, err
+}
+
 var errHostDenied = errors.New("host key verification failed")
 
 // ssh2's host key preference (ed25519 first), not x/crypto's (RSA first): sshd offers several host keys, and pins
@@ -351,8 +384,10 @@ func connect(s *db.Server) (*ssh.Client, error) {
 		return nil, Explain(err, s)
 	}
 	_ = c.SetDeadline(deadline)
+	rc := &readConn{Conn: c}
+	var banner string
 	pinnedRaw, _ := db.Get[string](`SELECT COALESCE(host_key_raw, '') FROM servers WHERE id = ?`, s.ID)
-	cc, chans, reqs, err := ssh.NewClientConn(c, addr, &ssh.ClientConfig{
+	cc, chans, reqs, err := ssh.NewClientConn(rc, addr, &ssh.ClientConfig{
 		Config:            ssh.Config{KeyExchanges: kexAlgos},
 		User:              s.User,
 		HostKeyAlgorithms: hostKeyAlgos(db.Str(pinnedRaw)),
@@ -363,6 +398,7 @@ func connect(s *db.Server) (*ssh.Client, error) {
 			}
 			return errHostDenied
 		},
+		BannerCallback: func(m string) error { banner += m; return nil },
 	})
 	if err != nil {
 		c.Close()
@@ -371,6 +407,9 @@ func connect(s *db.Server) (*ssh.Client, error) {
 		mu.Unlock()
 		if fp != "" && errors.Is(err, errHostDenied) {
 			return nil, fmt.Errorf("HOST KEY CHANGED (offered %s). Verify it, then accept it in server settings.", fp)
+		}
+		if e := stalled(err, s, banner, rc.got.Load()); e != nil {
+			return nil, e
 		}
 		return nil, Explain(err, s)
 	}

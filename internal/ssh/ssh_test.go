@@ -66,6 +66,30 @@ func TestExplain(t *testing.T) {
 	}
 }
 
+// A server that answers but holds the login (Tailscale SSH "check") is not reported as a silent host.
+func TestLoginStall(t *testing.T) {
+	defer func(d time.Duration) { handshakeTimeout = d }(handshakeTimeout)
+	handshakeTimeout = 500 * time.Millisecond
+	hang := func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+		time.Sleep(2 * time.Second)
+		return nil, nil
+	}
+	for banner, want := range map[string]string{
+		"# Tailscale SSH requires an additional check.\n# To authenticate, visit: https://login.tailscale.com/a/abc123\n": "approval (its tailnet policy rule uses \"check\"). Approve it at https://login.tailscale.com/a/abc123,",
+		"": "answered, but the SSH login didn't finish",
+	} {
+		ts := startServer(t, func(c *ssh.ServerConfig) {
+			c.PublicKeyCallback = hang
+			if banner != "" {
+				c.BannerCallback = func(ssh.ConnMetadata) string { return banner }
+			}
+		})
+		if _, err := connect(addServer(t, ts.addr)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%q: %v", banner, err)
+		}
+	}
+}
+
 // Golden values printed by the Node version (JSON.stringify(WRAP_PW)).
 func TestWrapVerbatim(t *testing.T) {
 	var want map[Mode]string
