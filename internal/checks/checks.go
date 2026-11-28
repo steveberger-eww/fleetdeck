@@ -105,7 +105,8 @@ var Roots *x509.CertPool
 
 var errBlocked = errors.New("connecting to this address is not allowed")
 
-func dialer() *net.Dialer {
+// Dialer refuses the addresses Blocked names. Registry lookups use it too.
+func Dialer() *net.Dialer {
 	return &net.Dialer{Timeout: Timeout, Control: func(_, address string, _ syscall.RawConn) error {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil {
@@ -126,7 +127,7 @@ func Run(ctx context.Context, c *Check) Result {
 	r := Result{}
 	err := func() error {
 		if c.Kind == "tcp" {
-			conn, err := dialer().DialContext(ctx, "tcp", c.Target)
+			conn, err := Dialer().DialContext(ctx, "tcp", c.Target)
 			if err == nil {
 				conn.Close()
 			}
@@ -145,7 +146,7 @@ func Run(ctx context.Context, c *Check) Result {
 			return err
 		}}
 		client := &http.Client{
-			Transport:     &http.Transport{DialContext: dialer().DialContext, TLSClientConfig: tc, DisableKeepAlives: true, Proxy: nil},
+			Transport:     &http.Transport{DialContext: Dialer().DialContext, TLSClientConfig: tc, DisableKeepAlives: true, Proxy: nil},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, // check this URL, not where it points
 		}
 		req, err := http.NewRequestWithContext(ctx, "GET", c.Target, nil)

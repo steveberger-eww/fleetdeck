@@ -39,7 +39,7 @@ Fleetdeck combines the core ideas of [Beszel](https://github.com/henrygd/beszel)
 - **Alerts.** Rules for all servers, a tag or one server, sent via ntfy, Pushover, Discord, Slack, Telegram, Gotify or a webhook. Endpoint and TLS certificate checks, quiet hours and maintenance windows.
 - **Scripts and jobs.** A script library with parameters and encrypted shared variables. Run on servers, tags or everything, watch the output live, re-run failed hosts only. Chains, automatic retries, cron schedules and webhook triggers.
 - **Ansible from Git.** Playbooks straight from your repositories, with dry runs and per-host results.
-- **Server administration.** Package updates with history and OS end-of-life warnings, systemd services and timers, a fleet-wide journal search, processes, containers, open ports checked against the real firewall, a web terminal, and every authorized SSH key across the fleet.
+- **Server administration.** Package updates with history and OS end-of-life warnings, systemd services and timers, a fleet-wide journal search, processes, containers with image update checks and a Compose file editor, open ports checked against the real firewall, a web terminal, and every authorized SSH key across the fleet.
 - **Organizations.** Several tenants on one instance (for example an IT provider and each of its customers), with per-organization roles, invite links and single sign-on.
 
 <table>
@@ -186,6 +186,8 @@ Every server is probed once a minute over its pooled SSH connection. New install
 | **Network traffic** | Per-interface rates, plus 30-day totals next to the Network chart and on the Overview. Time when the probe was down counts as zero. |
 | **GPUs** | NVIDIA via `nvidia-smi` (needs the driver), AMD from `/sys/class/drm` (no extra tools). Intel GPUs aren't supported. |
 | **Custom metrics** | Graph anything a shell command prints: `ls /var/backups \| wc -l`, hours since the last backup, queue length. Add one from a server's Metrics panel for that server, a tag or all servers. The command must print one number and is stopped after 5 seconds. |
+| **Image updates** | The Containers tab compares each image with its registry and grades the gap: new build, patch, minor or major (and how many majors behind). A newer tag of the same kind counts (`1.25.3` → `1.27.2`, `-alpine` stays `-alpine`, release candidates never). For `latest`-style tags, a new image behind the tag counts, graded by its version label. Public images only; answers are cached for 6 hours. |
+| **Compose files** | **Edit** on a stack opens the files its containers were started with (and its `.env`). Saving checks them with `docker compose config` first, keeps a `.bak` and refuses to overwrite a file changed since you opened it. **Use 1.27.2** in a container's details opens the file with the image tag already changed. Operators only, since the files often hold passwords. |
 | **Proxmox VE** | On a host with `pvesh`, the Containers tab lists that node's VMs and LXC containers with state, usage and history (read-only). Needs root or passwordless sudo. |
 | **Endpoint checks** | An HTTP(S) URL (expected status, optional "page must contain") or a TCP port, checked every minute from the Fleetdeck host. HTTPS checks record the days the certificate has left. Never connects to loopback or link-local addresses such as cloud metadata. |
 | **S.M.A.R.T.** | Every check is recorded; **History** charts 30 days of temperature, reallocated and pending sectors (SATA) or wear (NVMe). Rules can watch each of them. |

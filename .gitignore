@@ -2,3 +2,4 @@ data/
 .claude/
 /fleetdeck
 /DESIGN_HANDOFF.md
+*.dump
