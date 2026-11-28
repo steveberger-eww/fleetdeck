@@ -1,9 +1,9 @@
 <script setup>
 // Shell code field: CodeMirror (loaded on first use) with highlighting from our tokens.
 // A plain textarea shows until the bundle loads, and stays if it fails. The value is read once on mount (use :key to reset).
-//   <CodeEditor v-model="body" label="Script" tall />   <CodeEditor :model-value="s.body" read-only label="Script" />
+//   <CodeEditor v-model="body" label="Script" tall />   lang="yaml" for Compose files (default: shell)   <CodeEditor :model-value="s.body" read-only label="Script" />
 import { ref, onMounted, onBeforeUnmount } from 'vue';
-const props = defineProps({ label: String, placeholder: String, autofocus: Boolean, readOnly: Boolean, tall: Boolean });
+const props = defineProps({ label: String, placeholder: String, autofocus: Boolean, readOnly: Boolean, tall: Boolean, lang: String });
 const model = defineModel({ type: String, default: '' });
 const el = ref();
 const ready = ref(false);

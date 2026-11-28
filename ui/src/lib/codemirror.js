@@ -1,9 +1,10 @@
-// CodeMirror setup for shell scripts; imported lazily by CodeEditor.vue (its own chunk).
+// CodeMirror setup for shell scripts and YAML; imported lazily by CodeEditor.vue (its own chunk).
 import { EditorView, keymap, lineNumbers, drawSelection, placeholder } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { StreamLanguage, syntaxHighlighting, HighlightStyle, bracketMatching, indentUnit } from '@codemirror/language';
 import { shell } from '@codemirror/legacy-modes/mode/shell';
+import { yaml } from '@codemirror/legacy-modes/mode/yaml';
 import { tags } from '@lezer/highlight';
 
 export { EditorView, EditorState };
@@ -17,9 +18,9 @@ const style = HighlightStyle.define([
   { tag: tags.operator, color: 'var(--ink-2)' },
 ]);
 
-export const extensions = ({ label, placeholder: ph, readOnly }, change) => [
+export const extensions = ({ label, placeholder: ph, readOnly, lang }, change) => [
   lineNumbers(), history(), drawSelection(), bracketMatching(), indentUnit.of('  '),
-  StreamLanguage.define(shell), syntaxHighlighting(style),
+  StreamLanguage.define(lang === 'yaml' ? yaml : shell), syntaxHighlighting(style),
   // Tab indents; Esc then Tab still moves focus on (CodeMirror's built-in escape hatch).
   keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
   EditorView.contentAttributes.of({ 'aria-label': label || 'Code', spellcheck: 'false' }),

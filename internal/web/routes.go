@@ -909,6 +909,35 @@ func (s *Server) serverRoutes() {
 		c.audit(fmt.Sprintf("docker %s %s on %s", c.body.String("action"), jsSlice(id, 12), srv.Name), srv.ID)
 		return J{"ok": true, "output": out}, nil
 	})
+	// Registry lookups are cached for hours; operators may ask again now.
+	onServer("GET /api/servers/{id}/containers/updates", func(c *ctx, srv *db.Server) (any, error) {
+		return admin.ImageUpdates(c.r.Context(), srv, c.query("refresh") == "1" && c.level() >= roleOperator)
+	})
+	// Compose files often hold passwords inline, like environment values: reading them needs an operator too.
+	s.route("GET /api/servers/{id}/compose", func(c *ctx) (any, error) {
+		srv, err := c.server(c.param("id"), roleOperator)
+		if err != nil {
+			return nil, err
+		}
+		return admin.ReadCompose(c.r.Context(), srv, c.query("project"))
+	})
+	onServer("PUT /api/servers/{id}/compose", func(c *ctx, srv *db.Server) (any, error) {
+		var edits []admin.ComposeEdit
+		raw, _ := json.Marshal(c.body["files"])
+		if json.Unmarshal(raw, &edits) != nil {
+			return nil, httperr.Bad("invalid files")
+		}
+		project := c.body.str("project")
+		if err := admin.SaveCompose(detached(c), srv, project, edits); err != nil {
+			return nil, err
+		}
+		names := make([]string, len(edits))
+		for i, e := range edits {
+			names[i] = filepath.Base(e.Path)
+		}
+		c.audit(fmt.Sprintf("edit %s of Compose stack %s on %s", strings.Join(names, ", "), project, srv.Name), srv.ID)
+		return okResp, nil
+	})
 
 	// ---- endpoint checks (Network tab): owners set them up, operators run them now, everyone sees them ----
 	type checkOut struct {
